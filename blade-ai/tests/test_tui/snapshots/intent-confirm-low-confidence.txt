@@ -3,6 +3,7 @@
 
   ┌──────────────┬────────────────────────────────────────┐                     
   │ Fault Type:  │ cpu-fullload                           │                     
+  │ Use Case:    │ -                                      │                     
   │ Scope:       │ pod                                    │                     
   │ Target:      │ cpu                                    │                     
   │ Action:      │ fullload                               │                     

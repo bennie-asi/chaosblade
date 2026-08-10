@@ -55,7 +55,7 @@ export const en: Dict = {
   "thinking.collapsed": "Thought for {duration}",
 
   // -- TurnUsageMessage (per-turn token total appended at TURN_DONE)
-  "turn.usage": "turn used {total} tokens (input {input} tokens, output {output} tokens)",
+  "turn.usage": "turn used {total} tokens (input {input} tokens, output {output} tokens, {time})",
 
   // -- error labels (actionable hints) ------------------------------
   "error.init_failed.label": "INIT FAILED",
@@ -508,6 +508,11 @@ export const en: Dict = {
 
   // -- ConfirmMessage field labels ----------------------------------
   "confirm.field.fault_type": "Fault type",
+  // Skill use case chosen during intent clarification (use_case_name) —
+  // optional upstream; the row is ALWAYS rendered with confirm.none as
+  // the explicit "nothing was chosen" value instead of hiding the row.
+  "confirm.field.use_case_name": "Use case",
+  "confirm.none": "None",
   "confirm.field.scope": "Scope",
   "confirm.field.target": "Target",
   "confirm.field.action": "Action",
@@ -721,11 +726,12 @@ export const en: Dict = {
   "wizard.step.kubeconfig": "Kubeconfig",
   "wizard.step.kube_context": "K8s Context",
   "wizard.step.permission": "Permission",
+  "wizard.step.github_token": "GitHub Token (optional)",
   "wizard.step.summary": "Review",
   "wizard.welcome.title": "blade-ai setup",
   "wizard.welcome.section": "Hello",
-  "wizard.welcome.body1": "8 steps and you're ready. Each step has a smart default — press Enter to accept.",
-  "wizard.welcome.body2": "Esc cancels at any time (nothing saved). ← goes back; 1-8 jumps to a completed step.",
+  "wizard.welcome.body1": "9 steps and you're ready. Each step has a smart default — press Enter to accept.",
+  "wizard.welcome.body2": "Esc cancels at any time (nothing saved). ← goes back; 1-9 jumps to a completed step.",
   "wizard.welcome.fields_section": "You'll configure",
   "wizard.model.title": "Default model",
   "wizard.model.recommended_section": "Recommended",
@@ -741,6 +747,11 @@ export const en: Dict = {
   "wizard.api_key.title": "LLM API Key",
   "wizard.api_key.section": "Input",
   "wizard.api_key.label": "API Key",
+  "wizard.github_token.title": "GitHub Token (optional)",
+  "wizard.github_token.section": "Input (skippable)",
+  "wizard.github_token.label": "Token",
+  "wizard.github_token.optional_hint":
+    "When set, failed drills auto-report their postmortem as a GitHub issue (public repo, content is redacted). Leave empty and press Enter to skip (= stay off).",
   "wizard.kubeconfig.title": "Kubeconfig path",
   "wizard.kubeconfig.section": "Input",
   "wizard.kubeconfig.label": "Path",
@@ -762,6 +773,8 @@ export const en: Dict = {
   "wizard.summary.kube_context": "K8s Context",
   "wizard.summary.kube_context_default": "(use kubeconfig current-context)",
   "wizard.summary.permission": "Permission",
+  "wizard.summary.github_token": "GitHub Token",
+  "wizard.summary.github_token_off": "(not configured — issue reporting off)",
   "wizard.summary.custom_tag": "(custom)",
   "wizard.summary.saved_to": "Saved to",
   "wizard.summary.saved_keys": "Written keys",
@@ -772,9 +785,10 @@ export const en: Dict = {
   "wizard.returned_hint": "Returned to this step — re-validate or edit",
   "wizard.hint.welcome": "Enter to start  ·  Esc to cancel",
   "wizard.hint.radio_with_back": "A-Z select  ·  ↑↓ move  ·  Enter confirm  ·  ← back  ·  Esc cancel",
-  "wizard.hint.text_with_back": "Enter confirm  ·  ← back  ·  1-8 jump  ·  Esc cancel",
+  "wizard.hint.text_with_back": "Enter confirm  ·  ← back  ·  1-9 jump  ·  Esc cancel",
+  "wizard.hint.github_token": "Enter confirm (empty = skip)  ·  ← back  ·  Esc cancel",
   "wizard.hint.model_custom": "Enter confirm  ·  Esc back to presets  ·  ← previous step",
-  "wizard.hint.summary": "Enter to save  ·  1-7 jump back to edit  ·  ← back  ·  Esc cancel",
+  "wizard.hint.summary": "Enter to save  ·  1-8 jump back to edit  ·  ← back  ·  Esc cancel",
   "wizard.hint.saved": "Saved — press Enter to continue",
   "wizard.hint.save_failed": "Save failed — ← back to fix or Esc to exit",
   "wizard.cancel_message": "Setup wizard cancelled — blade-ai exiting. You'll be prompted again next launch.",

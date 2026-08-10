@@ -1933,6 +1933,7 @@ function commitPending(
       id: alloc.id,
       inputTokens: state.turnInputTokens,
       outputTokens: state.turnOutputTokens,
+      endedAt: Date.now(),
     };
     state = {
       ...state,

@@ -72,13 +72,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  // First-run config gate is now handled inside BootRunner — after
-  // the embedded Python server is up and /health responds, BootRunner
+  // First-run config gate is handled inside BootRunner — after the
+  // embedded Python server is up and /health responds, BootRunner
   // checks ``GET /api/v1/wizard/needs-setup`` and, if true, renders
   // the in-Ink ``WizardCard`` (talking to the server over HTTP) before
-  // continuing to session creation. The old pre-Ink ``runConfigWizard``
-  // helper (Python Rich subprocess) is kept for the standalone
-  // ``blade-ai config-wizard`` CLI command — see ``utils/configGate.ts``.
+  // continuing to session creation. The standalone
+  // ``blade-ai config-wizard`` CLI command serves users who run or
+  // re-run setup outside the TUI (headless boxes, scripts).
 
   const debug = process.env["BLADE_AI_DEBUG"] === "1";
 

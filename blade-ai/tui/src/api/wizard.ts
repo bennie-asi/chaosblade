@@ -20,6 +20,7 @@
  */
 
 import { t } from "../i18n/index.js";
+import { resolveServerToken } from "./auth.js";
 
 export interface ValidationResult {
   status: "ok" | "warn" | "error";
@@ -98,10 +99,29 @@ async function fetchWithTimeout(
 }
 
 export class WizardClient {
+  /**
+   * Bearer token for a token-guarded server — resolved exactly like
+   * BladeClient's (see api/auth.ts). The wizard routes sit behind the
+   * same TokenAuthMiddleware as everything else, so these calls need
+   * the header too (a 401 here would look like "server unreachable").
+   */
+  private readonly authToken: string | undefined;
+
   constructor(
     private readonly baseUrl: string,
     private readonly timeoutMs: number = DEFAULT_TIMEOUT_MS,
-  ) {}
+  ) {
+    this.authToken = resolveServerToken();
+  }
+
+  /** Merge the auth header into a fetch init (no-op without a token). */
+  private withAuth(init: RequestInit): RequestInit {
+    if (!this.authToken) return init;
+    return {
+      ...init,
+      headers: { ...init.headers, authorization: `Bearer ${this.authToken}` },
+    };
+  }
 
   /**
    * GET /api/v1/wizard/needs-setup — determines whether the wizard
@@ -124,7 +144,7 @@ export class WizardClient {
     try {
       const r = await fetchWithTimeout(
         `${this.baseUrl}/api/v1/wizard/needs-setup`,
-        { method: "GET" },
+        this.withAuth({ method: "GET" }),
         this.timeoutMs,
       );
       if (!r.ok) return FAIL_OPEN;
@@ -151,7 +171,7 @@ export class WizardClient {
     try {
       const r = await fetchWithTimeout(
         `${this.baseUrl}/api/v1/wizard/model-presets`,
-        { method: "GET" },
+        this.withAuth({ method: "GET" }),
         this.timeoutMs,
       );
       if (!r.ok) return [];
@@ -206,11 +226,11 @@ export class WizardClient {
     try {
       const r = await fetchWithTimeout(
         `${this.baseUrl}/api/v1/wizard/save`,
-        {
+        this.withAuth({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ config }),
-        },
+        }),
         this.timeoutMs,
       );
       const env = (await r.json()) as Record<string, unknown>;
@@ -262,11 +282,11 @@ export class WizardClient {
     try {
       const r = await fetchWithTimeout(
         `${this.baseUrl}/api/v1/wizard${path}`,
-        {
+        this.withAuth({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
-        },
+        }),
         this.timeoutMs,
       );
       const env = (await r.json()) as Record<string, unknown>;

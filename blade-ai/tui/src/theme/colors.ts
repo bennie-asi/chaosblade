@@ -108,6 +108,20 @@ const status = {
   warn: "#E8B341",
   // Failure red — slightly muted so it doesn't strobe.
   err: "#C44545",
+  // Change / drift alert — "pay attention, the course changed".
+  // Reads cautionary like warn but is hue-distant from BOTH warn
+  // amber (execution-confirm cards) and err red (failure cards), so
+  // 目标变更 / 计划变更 cards can't be mistaken for either.
+  //
+  // Per-terminal-bg pair (same pattern as USER_BUBBLE_PALETTE):
+  // dark-canvas gets the deep crimson (#A5306B) which holds contrast
+  // against near-black; light-canvas gets the lifted magenta
+  // (#C8558F) so the hue stays vivid on white. Picked via
+  // ``Theme.status.change[useTerminalBg()]``.
+  change: {
+    dark: "#A5306B",
+    light: "#C8558F",
+  },
   // Cool info — calm, factual, for advisory metadata.
   info: "#5A8A9A",
   // Dim variants for non-loud uses (e.g. "running" tool border).

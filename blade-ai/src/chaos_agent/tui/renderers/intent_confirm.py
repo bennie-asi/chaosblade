@@ -255,6 +255,10 @@ def build_body(
 
     fields: list[tuple[str, object]] = [
         ("Fault Type", fault_intent.get("fault_type", "unknown")),
+        # Skill use case chosen during clarification — optional upstream.
+        # Rendered ALWAYS (parity with the TS card): "-" is the explicit
+        # "nothing was chosen" answer; hiding the row would conceal it.
+        ("Use Case", fault_intent.get("use_case_name") or "-"),
         ("Scope", fault_intent.get("scope", "unknown")),
         ("Target", fault_intent.get("target", "unknown")),
         ("Action", fault_intent.get("action", "unknown")),

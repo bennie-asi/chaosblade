@@ -88,6 +88,37 @@ describe("ConfirmContextMessage", () => {
       expect(lastFrame() ?? "").toContain("cpu_percent=80");
     });
 
+    it("always renders the Use Case row with the chosen case verbatim", () => {
+      // use_case_name is optional upstream, but when the user chose a
+      // skill use case during clarification the card must show it.
+      const withCase = baseContext({
+        node: "intent_confirm",
+        payload: {
+          type: "intent_confirm",
+          fault_intent: {
+            fault_type: "node-cpu-fullload",
+            scope: "node",
+            target: "cpu",
+            action: "fullload",
+            use_case_name: "进程CPU满载 导致 Host_CPU使用率过高",
+          },
+          intent_confidence: 0.9,
+        },
+      });
+      const { lastFrame } = render(<ConfirmContextMessage item={withCase} />);
+      expect(lastFrame() ?? "").toContain("进程CPU满载 导致 Host_CPU使用率过高");
+    });
+
+    it("never hides the Use Case row: explicit 无/None when nothing chosen", () => {
+      // The base fixture carries no use_case_name — the row must still
+      // render with confirm.none as its value instead of disappearing.
+      const { lastFrame } = render(<ConfirmContextMessage item={item} />);
+      const frame = lastFrame() ?? "";
+      // Locale-agnostic label check (zh dict is active by default).
+      expect(frame.includes("用例") || frame.includes("Use case")).toBe(true);
+      expect(frame.includes("无") || frame.includes("None")).toBe(true);
+    });
+
     it("formats intent_confidence as a percentage", () => {
       const { lastFrame } = render(<ConfirmContextMessage item={item} />);
       expect(lastFrame() ?? "").toContain("92%");

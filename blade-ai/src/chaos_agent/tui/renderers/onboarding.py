@@ -219,9 +219,11 @@ def _default_kubeconfig(ctx: WizardCtx) -> str:
 
 
 def _default_permission(ctx: WizardCtx) -> bool:
+    # Default is auto mode (confirmation_required=False) everywhere —
+    # the wizard pre-selects it; the user can still switch to confirm.
     if ctx.edit_mode:
-        return bool(ctx.snapshot.get("confirmation_required", True))
-    return True
+        return bool(ctx.snapshot.get("confirmation_required", False))
+    return False
 
 
 async def _validate_api_key(value: Any, ctx: WizardCtx) -> StepResult:

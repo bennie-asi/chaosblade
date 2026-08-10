@@ -93,6 +93,34 @@ describe("truncateOutput", () => {
     expect(r.hiddenLines).toBe(3);
     expect(r.totalLines).toBe(6);
   });
+
+  it("strips bare mid-line \\r (curl progress meters)", () => {
+    // \r resets the terminal cursor to column 0 mid-line — the rest
+    // of the line repaints over the card padding / left rail. Ink
+    // measures it as width-0 so layout never catches it; the sweep
+    // must remove it before render.
+    const r = truncateOutput(
+      'kubeone: Dload Upload\nkubeone: \r  0     0\nnext',
+      10,
+    );
+    expect(r.body).not.toContain("\r");
+    expect(r.body.split("\n")[1]).toBe("kubeone:   0     0");
+  });
+
+  it("strips trailing CRLF line endings via the same sweep + rstrip", () => {
+    const r = truncateOutput("line1\r\nline2\r\n", 10);
+    expect(r.body).toBe("line1\nline2");
+  });
+
+  it("folds tabs to spaces and drops other C0 control chars", () => {
+    const r = truncateOutput("a\tb\x00c\x1bd", 10);
+    expect(r.body).toBe("a bcd");
+  });
+
+  it("keeps \\n as the only surviving control character", () => {
+    const r = truncateOutput("a\nb", 10);
+    expect(r.body).toBe("a\nb");
+  });
 });
 
 describe("formatElapsed", () => {

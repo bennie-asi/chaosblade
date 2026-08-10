@@ -14,6 +14,7 @@ import React, { memo } from "react";
 
 import { t } from "../../i18n/index.js";
 import { Theme } from "../../theme/colors.js";
+import { Icons } from "../../theme/icons.js";
 import { useBootCardWidth } from "../boot/BootCardFrame.js";
 import {
   type Block,
@@ -118,9 +119,12 @@ const PostmortemSectionInternal: React.FC<PostmortemSectionProps> = ({
         width={width}
       >
         {/* Title row — matches ResultCard's titleRow shape so the two
-            cards read as siblings, not parent/child. */}
+            cards read as siblings, not parent/child. Glyph comes from
+            the Icons palette (single-cell, ASCII-fallback aware) —
+            emoji double-width on iTerm and mojibake on glyph-poor
+            terminals. */}
         <Box>
-          <Text color={Theme.status.info}>{"📝 "}</Text>
+          <Text color={Theme.status.info}>{`${Icons.doc} `}</Text>
           <Text bold>{t("postmortem.title")}</Text>
         </Box>
 

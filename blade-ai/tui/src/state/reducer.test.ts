@@ -1709,6 +1709,10 @@ describe("reducer / USAGE_RECEIVED + TurnUsageItem", () => {
     if (usage[0]?.kind === "turn_usage") {
       expect(usage[0].inputTokens).toBe(198);
       expect(usage[0].outputTokens).toBe(89);
+      // endedAt freezes the turn-end moment at creation time so the
+      // timestamp in the summary row survives later repaints.
+      expect(usage[0].endedAt).toBeGreaterThan(0);
+      expect(Math.abs(usage[0].endedAt - Date.now())).toBeLessThan(5000);
     }
   });
 

@@ -27,6 +27,7 @@ export type StepKey =
   | "kubeconfig"
   | "kube_context"
   | "permission"
+  | "github_token"
   | "summary";
 
 export const STEP_ORDER: StepKey[] = [
@@ -37,6 +38,7 @@ export const STEP_ORDER: StepKey[] = [
   "kubeconfig",
   "kube_context",
   "permission",
+  "github_token",
   "summary",
 ];
 
@@ -67,6 +69,11 @@ export interface WizardValues {
   kube_context: string;
   /** ``true`` = confirm before fault injection, ``false`` = auto. */
   confirmation_required: boolean;
+  /** Optional GitHub PAT. Generic credential — issue reporting is
+   *  just its first use. Doubles as the drill-failure issue-report
+   *  on/off switch: empty = reporting off. No validation step — the
+   *  user may press Enter on an empty input to skip. */
+  github_token: string;
 }
 
 export function emptyValues(): WizardValues {
@@ -77,7 +84,8 @@ export function emptyValues(): WizardValues {
     llm_api_key: "",
     kubeconfig_path: "",
     kube_context: "",
-    confirmation_required: true,
+    confirmation_required: false,
+    github_token: "",
   };
 }
 
@@ -358,6 +366,8 @@ export function canAdvanceFrom(state: WizardState, step: StepKey): boolean {
       return true; // optional select
     case "permission":
       return true;
+    case "github_token":
+      return true; // optional — empty input skips (report stays off)
     case "summary":
       return true;
     default:

@@ -43,6 +43,8 @@ export interface IconSet {
    * evolve independently. */
   prompt: string;
   system: string;
+  /** Document / report artefact marker (postmortem card title). */
+  doc: string;
   tree: string;
   bullet: string;
   arrow: string;
@@ -61,6 +63,7 @@ const Unicode: IconSet = {
   user: ">",
   prompt: "❯", // U+276F — heavier-weight caret for the input prompt
   system: "ℹ", // U+2139
+  doc: "≡", // U+2261 — reads as stacked report lines
   // Inline tree branch
   tree: "⎿", // U+23BF
   // Visual decorations
@@ -79,6 +82,7 @@ const Ascii: IconSet = {
   user: ">",
   prompt: ">",
   system: "i",
+  doc: "=",
   tree: "\\",
   bullet: "*",
   arrow: "->",

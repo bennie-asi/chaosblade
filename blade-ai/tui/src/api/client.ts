@@ -16,6 +16,7 @@
  */
 
 import { isStreamEvent, type StreamEvent } from "./events.js";
+import { resolveServerToken } from "./auth.js";
 
 export interface CreateSessionOpts {
   cluster?: string;
@@ -62,10 +63,34 @@ export class BladeClient {
    */
   private _serverProtocolVersion?: string;
 
+  /**
+   * Bearer token presented to a token-guarded server (Python
+   * ``TokenAuthMiddleware``, active when ``server_token`` is set).
+   * Resolved once at construction — same sources/priority as the
+   * Python CLI's AgentClient. Harmless when the server has no gate
+   * (the embedded server bypasses it) — the header is just ignored.
+   */
+  private readonly authToken: string | undefined;
+
   constructor(
     private readonly baseUrl: string,
     private readonly opts: ClientOptions = {},
-  ) {}
+  ) {
+    this.authToken = resolveServerToken();
+  }
+
+  /**
+   * fetch() with the auth header merged in. Every HTTP call in this
+   * class MUST go through here — the token gate covers all routes,
+   * SSE streams included.
+   */
+  private _fetch(url: string, init: RequestInit = {}): Promise<Response> {
+    if (!this.authToken) return fetch(url, init);
+    return fetch(url, {
+      ...init,
+      headers: { ...init.headers, authorization: `Bearer ${this.authToken}` },
+    });
+  }
 
   /** Read-only access to the resolved server URL — used by /doctor. */
   get url(): string {
@@ -79,7 +104,7 @@ export class BladeClient {
 
   async health(): Promise<boolean> {
     try {
-      const r = await fetch(`${this.baseUrl}/api/v1/health`);
+      const r = await this._fetch(`${this.baseUrl}/api/v1/health`);
       // Capture the protocol header even on non-2xx — a 503 response
       // still carries the header and we want it for the mismatch
       // check. Only bail when the network call itself failed (caught
@@ -102,7 +127,7 @@ export class BladeClient {
    */
   async getServerVersion(): Promise<string | null> {
     try {
-      const r = await fetch(`${this.baseUrl}/api/v1/version`);
+      const r = await this._fetch(`${this.baseUrl}/api/v1/version`);
       if (!r.ok) return null;
       const env = (await r.json()) as Record<string, unknown>;
       if (env["status"] === "fail") return null;
@@ -125,7 +150,7 @@ export class BladeClient {
    */
   async getPreflight(): Promise<Record<string, unknown> | null> {
     try {
-      const r = await fetch(`${this.baseUrl}/api/v1/preflight`);
+      const r = await this._fetch(`${this.baseUrl}/api/v1/preflight`);
       if (!r.ok) return null;
       const env = (await r.json()) as Record<string, unknown>;
       if (env["status"] === "fail") return null;
@@ -138,7 +163,7 @@ export class BladeClient {
   }
 
   async createSession(opts: CreateSessionOpts = {}): Promise<string> {
-    const r = await fetch(`${this.baseUrl}/api/v1/sessions`, {
+    const r = await this._fetch(`${this.baseUrl}/api/v1/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -158,7 +183,7 @@ export class BladeClient {
     // half-stuck socket. Node's fetch has no built-in timeout; without
     // an explicit signal a wedged server would freeze the TUI forever
     // and leave the user staring at a hung goodbye card.
-    await fetch(`${this.baseUrl}/api/v1/sessions/${sid}`, {
+    await this._fetch(`${this.baseUrl}/api/v1/sessions/${sid}`, {
       method: "DELETE",
       signal: AbortSignal.timeout(3000),
     }).catch(() => undefined);
@@ -181,7 +206,7 @@ export class BladeClient {
       recovery_count: number;
     }>,
   ): Promise<void> {
-    await fetch(`${this.baseUrl}/api/v1/sessions/${sid}/stats`, {
+    await this._fetch(`${this.baseUrl}/api/v1/sessions/${sid}/stats`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(stats),
@@ -190,7 +215,7 @@ export class BladeClient {
   }
 
   async getSessionState(sid: string): Promise<Record<string, unknown>> {
-    const r = await fetch(`${this.baseUrl}/api/v1/sessions/${sid}/state`);
+    const r = await this._fetch(`${this.baseUrl}/api/v1/sessions/${sid}/state`);
     if (!r.ok) throw new Error(`getSessionState failed: HTTP ${r.status}`);
     return (await r.json()) as Record<string, unknown>;
   }
@@ -208,7 +233,7 @@ export class BladeClient {
    * errored.
    */
   async listTasks(): Promise<Record<string, unknown>> {
-    const r = await fetch(`${this.baseUrl}/api/v1/metric`);
+    const r = await this._fetch(`${this.baseUrl}/api/v1/metric`);
     if (!r.ok) throw new Error(`listTasks failed: HTTP ${r.status}`);
     const env = (await r.json()) as Record<string, unknown>;
     // Python's ``ResponseStatus`` is exactly "success" or "fail" — see
@@ -229,7 +254,7 @@ export class BladeClient {
    * ``{task_id, events: [{ts, type, data}, ...], total}``.
    */
   async getRecording(taskId: string): Promise<Record<string, unknown>> {
-    const r = await fetch(
+    const r = await this._fetch(
       `${this.baseUrl}/api/v1/recordings/${encodeURIComponent(taskId)}`,
     );
     if (!r.ok) throw new Error(`getRecording failed: HTTP ${r.status}`);
@@ -245,7 +270,7 @@ export class BladeClient {
 
   /** List the available recordings on disk. */
   async listRecordings(): Promise<Record<string, unknown>> {
-    const r = await fetch(`${this.baseUrl}/api/v1/recordings`);
+    const r = await this._fetch(`${this.baseUrl}/api/v1/recordings`);
     if (!r.ok) throw new Error(`listRecordings failed: HTTP ${r.status}`);
     const env = (await r.json()) as Record<string, unknown>;
     if (env["status"] === "fail") {
@@ -268,7 +293,7 @@ export class BladeClient {
    * blank card.
    */
   async getMetric(taskId: string): Promise<Record<string, unknown>> {
-    const r = await fetch(
+    const r = await this._fetch(
       `${this.baseUrl}/api/v1/metric/${encodeURIComponent(taskId)}`,
     );
     if (!r.ok) throw new Error(`getMetric failed: HTTP ${r.status}`);
@@ -291,7 +316,7 @@ export class BladeClient {
    * Returns the data envelope's payload: ``{total, categories: [...]}``.
    */
   async listSkills(): Promise<Record<string, unknown>> {
-    const r = await fetch(`${this.baseUrl}/api/v1/skills`);
+    const r = await this._fetch(`${this.baseUrl}/api/v1/skills`);
     if (!r.ok) throw new Error(`listSkills failed: HTTP ${r.status}`);
     const env = (await r.json()) as Record<string, unknown>;
     if (env["status"] === "fail") {
@@ -312,7 +337,7 @@ export class BladeClient {
     taskId: string,
     signal?: AbortSignal,
   ): AsyncGenerator<StreamEvent, void, void> {
-    const r = await fetch(`${this.baseUrl}/api/v1/recover-stream`, {
+    const r = await this._fetch(`${this.baseUrl}/api/v1/recover-stream`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -375,7 +400,7 @@ export class BladeClient {
    * just shows ``data.config_path``.
    */
   async getConfig(): Promise<Record<string, unknown>> {
-    const r = await fetch(`${this.baseUrl}/api/v1/config`);
+    const r = await this._fetch(`${this.baseUrl}/api/v1/config`);
     if (!r.ok) throw new Error(`getConfig failed: HTTP ${r.status}`);
     const env = (await r.json()) as Record<string, unknown>;
     if (env["status"] === "fail") {
@@ -403,7 +428,7 @@ export class BladeClient {
     key: string,
     value: string,
   ): Promise<Record<string, unknown>> {
-    const r = await fetch(
+    const r = await this._fetch(
       `${this.baseUrl}/api/v1/config/${encodeURIComponent(key)}`,
       {
         method: "POST",
@@ -427,7 +452,7 @@ export class BladeClient {
    * whitelist as setConfig.
    */
   async unsetConfig(key: string): Promise<Record<string, unknown>> {
-    const r = await fetch(
+    const r = await this._fetch(
       `${this.baseUrl}/api/v1/config/${encodeURIComponent(key)}`,
       { method: "DELETE" },
     );
@@ -454,7 +479,7 @@ export class BladeClient {
   async getMemoryInfo(
     tuiSessionId: string,
   ): Promise<Record<string, unknown>> {
-    const r = await fetch(
+    const r = await this._fetch(
       `${this.baseUrl}/api/v1/memory/${encodeURIComponent(tuiSessionId)}`,
     );
     if (!r.ok) throw new Error(`getMemoryInfo failed: HTTP ${r.status}`);
@@ -476,7 +501,7 @@ export class BladeClient {
    * anything was actually deleted (false when nothing existed).
    */
   async clearMemory(tuiSessionId: string): Promise<Record<string, unknown>> {
-    const r = await fetch(
+    const r = await this._fetch(
       `${this.baseUrl}/api/v1/memory/${encodeURIComponent(tuiSessionId)}`,
       { method: "DELETE" },
     );
@@ -526,7 +551,7 @@ export class BladeClient {
     threadId?: string,
     signal?: AbortSignal,
   ): AsyncGenerator<StreamEvent, void, void> {
-    const r = await fetch(
+    const r = await this._fetch(
       `${this.baseUrl}/api/v1/sessions/${encodeURIComponent(sid)}/compact`,
       {
         method: "POST",
@@ -593,7 +618,7 @@ export class BladeClient {
    * catalog generator.
    */
   async getSkillsDir(): Promise<Record<string, unknown>> {
-    const r = await fetch(`${this.baseUrl}/api/v1/skills_dir`);
+    const r = await this._fetch(`${this.baseUrl}/api/v1/skills_dir`);
     if (!r.ok) throw new Error(`getSkillsDir failed: HTTP ${r.status}`);
     const env = (await r.json()) as Record<string, unknown>;
     if (env["status"] === "fail") {
@@ -612,7 +637,7 @@ export class BladeClient {
    * names surface as an actionable warning instead of an empty card.
    */
   async showSkill(name: string): Promise<Record<string, unknown>> {
-    const r = await fetch(
+    const r = await this._fetch(
       `${this.baseUrl}/api/v1/skills/${encodeURIComponent(name)}`,
     );
     if (!r.ok) throw new Error(`showSkill failed: HTTP ${r.status}`);
@@ -632,7 +657,7 @@ export class BladeClient {
    * can show a precise diff after the rescan.
    */
   async reloadSkills(): Promise<Record<string, unknown>> {
-    const r = await fetch(`${this.baseUrl}/api/v1/skills/reload`, {
+    const r = await this._fetch(`${this.baseUrl}/api/v1/skills/reload`, {
       method: "POST",
     });
     if (!r.ok) throw new Error(`reloadSkills failed: HTTP ${r.status}`);
@@ -654,7 +679,7 @@ export class BladeClient {
    * ``/skills reload`` for activation.
    */
   async installSkill(source: string): Promise<Record<string, unknown>> {
-    const r = await fetch(`${this.baseUrl}/api/v1/skills/install`, {
+    const r = await this._fetch(`${this.baseUrl}/api/v1/skills/install`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ source }),
@@ -677,7 +702,7 @@ export class BladeClient {
    * changed.
    */
   async enableSkill(name: string): Promise<Record<string, unknown>> {
-    const r = await fetch(
+    const r = await this._fetch(
       `${this.baseUrl}/api/v1/skills/${encodeURIComponent(name)}/enable`,
       { method: "POST" },
     );
@@ -699,7 +724,7 @@ export class BladeClient {
    * skill was already disabled.
    */
   async disableSkill(name: string): Promise<Record<string, unknown>> {
-    const r = await fetch(
+    const r = await this._fetch(
       `${this.baseUrl}/api/v1/skills/${encodeURIComponent(name)}/disable`,
       { method: "POST" },
     );
@@ -722,7 +747,7 @@ export class BladeClient {
    * surfaces as the running model.
    */
   async getModel(): Promise<Record<string, unknown>> {
-    const r = await fetch(`${this.baseUrl}/api/v1/model`);
+    const r = await this._fetch(`${this.baseUrl}/api/v1/model`);
     if (!r.ok) throw new Error(`getModel failed: HTTP ${r.status}`);
     const env = (await r.json()) as Record<string, unknown>;
     if (env["status"] === "fail") {
@@ -749,7 +774,7 @@ export class BladeClient {
    * when actually needed.
    */
   async setModel(modelName: string): Promise<Record<string, unknown>> {
-    const r = await fetch(`${this.baseUrl}/api/v1/model`, {
+    const r = await this._fetch(`${this.baseUrl}/api/v1/model`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model_name: modelName }),
@@ -775,7 +800,7 @@ export class BladeClient {
     body: TurnRequest,
     signal?: AbortSignal,
   ): AsyncGenerator<StreamEvent, void, void> {
-    const r = await fetch(`${this.baseUrl}/api/v1/sessions/${sid}/turn`, {
+    const r = await this._fetch(`${this.baseUrl}/api/v1/sessions/${sid}/turn`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -858,7 +883,7 @@ export class BladeClient {
   }
 
   async resolveInterrupt(sid: string, body: InterruptResolve): Promise<void> {
-    const r = await fetch(`${this.baseUrl}/api/v1/sessions/${sid}/interrupt`, {
+    const r = await this._fetch(`${this.baseUrl}/api/v1/sessions/${sid}/interrupt`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -867,7 +892,7 @@ export class BladeClient {
   }
 
   async cancelTurn(sid: string): Promise<void> {
-    await fetch(`${this.baseUrl}/api/v1/sessions/${sid}/cancel`, {
+    await this._fetch(`${this.baseUrl}/api/v1/sessions/${sid}/cancel`, {
       method: "POST",
     }).catch(() => undefined);
   }

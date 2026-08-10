@@ -42,7 +42,7 @@ export const zh: Dict = {
   "thinking.collapsed": "思考用时 {duration}",
 
   // -- TurnUsageMessage（轮末 token 用量总结） -----------------------
-  "turn.usage": "本轮共 {total} tokens（输入 {input} tokens，输出 {output} tokens）",
+  "turn.usage": "本轮共 {total} tokens（输入 {input} tokens，输出 {output} tokens，{time}）",
 
   // -- 错误标签 + 建议 ----------------------------------------------
   "error.init_failed.label": "初始化失败",
@@ -491,6 +491,10 @@ export const zh: Dict = {
 
   // -- ConfirmMessage 字段标签 --------------------------------------
   "confirm.field.fault_type": "故障类型",
+  // intent 澄清中用户选择的技能用例（use_case_name）——上游是可选字段，
+  // 卡片恒显示此行：未选中时值为 confirm.none（"无"），不隐藏整行。
+  "confirm.field.use_case_name": "用例",
+  "confirm.none": "无",
   "confirm.field.scope": "范围",
   "confirm.field.target": "目标",
   "confirm.field.action": "动作",
@@ -698,11 +702,12 @@ export const zh: Dict = {
   "wizard.step.kubeconfig": "Kubeconfig",
   "wizard.step.kube_context": "K8s Context",
   "wizard.step.permission": "权限模式",
+  "wizard.step.github_token": "GitHub Token（可选）",
   "wizard.step.summary": "确认保存",
   "wizard.welcome.title": "blade-ai 配置向导",
   "wizard.welcome.section": "你好",
-  "wizard.welcome.body1": "8 步走完，blade-ai 就能跑起来。每步都有智能默认，按 Enter 接受。",
-  "wizard.welcome.body2": "中间任何时候按 Esc 取消（不保存），← 返回上一步，1-8 数字键跳转已完成的步骤。",
+  "wizard.welcome.body1": "9 步走完，blade-ai 就能跑起来。每步都有智能默认，按 Enter 接受。",
+  "wizard.welcome.body2": "中间任何时候按 Esc 取消（不保存），← 返回上一步，1-9 数字键跳转已完成的步骤。",
   "wizard.welcome.fields_section": "你将配置",
   "wizard.model.title": "默认模型",
   "wizard.model.recommended_section": "推荐",
@@ -718,6 +723,11 @@ export const zh: Dict = {
   "wizard.api_key.title": "LLM API Key",
   "wizard.api_key.section": "输入",
   "wizard.api_key.label": "API Key",
+  "wizard.github_token.title": "GitHub Token（可选）",
+  "wizard.github_token.section": "输入（可跳过）",
+  "wizard.github_token.label": "Token",
+  "wizard.github_token.optional_hint":
+    "配置后，失败演练的事后分析会自动上报为 GitHub issue（公开仓库，内容已脱敏）。留空直接 Enter 跳过 = 不开启。",
   "wizard.kubeconfig.title": "Kubeconfig 路径",
   "wizard.kubeconfig.section": "输入",
   "wizard.kubeconfig.label": "路径",
@@ -739,6 +749,8 @@ export const zh: Dict = {
   "wizard.summary.kube_context": "K8s Context",
   "wizard.summary.kube_context_default": "(使用 kubeconfig 当前 context)",
   "wizard.summary.permission": "权限模式",
+  "wizard.summary.github_token": "GitHub Token",
+  "wizard.summary.github_token_off": "（未配置，失败上报已关闭）",
   "wizard.summary.custom_tag": "(自选)",
   "wizard.summary.saved_to": "已保存到",
   "wizard.summary.saved_keys": "写入字段",
@@ -749,9 +761,10 @@ export const zh: Dict = {
   "wizard.returned_hint": "已返回此步骤，可重新校验或编辑",
   "wizard.hint.welcome": "Enter 开始  ·  Esc 取消",
   "wizard.hint.radio_with_back": "A-Z 选择  ·  ↑↓ 移动  ·  Enter 确认  ·  ← 上一步  ·  Esc 取消",
-  "wizard.hint.text_with_back": "Enter 确认  ·  ← 上一步  ·  数字 1-8 跳转  ·  Esc 取消",
+  "wizard.hint.text_with_back": "Enter 确认  ·  ← 上一步  ·  数字 1-9 跳转  ·  Esc 取消",
+  "wizard.hint.github_token": "Enter 确认（留空 = 跳过）  ·  ← 上一步  ·  Esc 取消",
   "wizard.hint.model_custom": "Enter 确认  ·  Esc 返回预设列表  ·  ← 上一步",
-  "wizard.hint.summary": "Enter 保存  ·  数字 1-7 跳回修改  ·  ← 上一步  ·  Esc 取消",
+  "wizard.hint.summary": "Enter 保存  ·  数字 1-8 跳回修改  ·  ← 上一步  ·  Esc 取消",
   "wizard.hint.saved": "已保存，Enter 进入主界面",
   "wizard.hint.save_failed": "保存失败，← 返回检查或 Esc 退出",
   "wizard.cancel_message": "配置向导已取消，blade-ai 退出。下次启动会再次提示。",

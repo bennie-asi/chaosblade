@@ -72,3 +72,49 @@ class TestConfigStoreWrite:
         assert not os.path.exists(p + ".tmp")
         data = store.read_all()
         assert data["model_name"] == "atomic-test"
+
+
+class TestCoercionRejectsWrongTypes:
+    """_coerce must RAISE on unparseable values instead of silently
+    casting (old bool behaviour: any string → False) or storing raw
+    strings. A wrong-typed value in config.json — the highest-priority
+    settings source — breaks Settings() construction for every later
+    command. All write paths (server /config, wizard save, Python TUI
+    /config set, CLI config set) already handle ValueError."""
+
+    def test_bool_rejects_garbage(self, config_dir):
+        store = ConfigStore(os.path.join(config_dir, "config.json"))
+        with pytest.raises(ValueError, match="not a valid boolean"):
+            store.set("confirmation_required", "maybe")
+        # The rejected write must not have landed.
+        assert store.read_all()["confirmation_required"] is True
+
+    def test_bool_accepts_common_spellings(self, config_dir):
+        store = ConfigStore(os.path.join(config_dir, "config.json"))
+        for raw, expected in [("on", True), ("off", False), ("1", True), ("no", False)]:
+            store.set("confirmation_required", raw)
+            assert store.read_all()["confirmation_required"] is expected
+
+    def test_int_rejects_garbage(self, config_dir):
+        store = ConfigStore(os.path.join(config_dir, "config.json"))
+        with pytest.raises(ValueError, match="not a valid integer"):
+            store.set("llm_max_retries", "lots")
+        assert store.read_all()["llm_max_retries"] == 3
+
+    def test_float_rejects_garbage(self, config_dir):
+        store = ConfigStore(os.path.join(config_dir, "config.json"))
+        with pytest.raises(ValueError, match="not a valid number"):
+            store.set("llm_temperature", "warm")
+
+    def test_introspection_covers_fields_outside_key_sets(self, config_dir):
+        """Typed Settings fields that no curated set mentions (e.g.
+        ``otel_enabled`` / ``postmortem_timeout_seconds``) must still
+        coerce — the Settings.model_fields fallback is what keeps the
+        guard complete as settings grow."""
+        store = ConfigStore(os.path.join(config_dir, "config.json"))
+        store.set("otel_enabled", "true")
+        assert store.read_all()["otel_enabled"] is True
+        with pytest.raises(ValueError, match="not a valid boolean"):
+            store.set("otel_enabled", "maybe")
+        store.set("postmortem_timeout_seconds", "120")
+        assert store.read_all()["postmortem_timeout_seconds"] == 120

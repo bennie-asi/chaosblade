@@ -123,6 +123,7 @@ const StepperBar: React.FC<{
     kubeconfig: t("wizard.step.kubeconfig"),
     kube_context: t("wizard.step.kube_context"),
     permission: t("wizard.step.permission"),
+    github_token: t("wizard.step.github_token"),
     summary: t("wizard.step.summary"),
   };
   const currentIdx = stepIndex(state.currentStep);
@@ -336,6 +337,7 @@ function renderWelcomeStep() {
         <Field label="4." value={t("wizard.step.kubeconfig")} />
         <Field label="5." value={t("wizard.step.kube_context")} />
         <Field label="6." value={t("wizard.step.permission")} />
+        <Field label="7." value={t("wizard.step.github_token")} />
       </Box>
     </>
   );
@@ -521,6 +523,27 @@ function renderPermissionStep(state: WizardState, focusedRadioIdx: number) {
   );
 }
 
+function renderGithubTokenStep(inputBuffer: string) {
+  return (
+    <>
+      <SectionHeading label={t("wizard.github_token.section")} />
+      <Box marginTop={1}>
+        <InputRow
+          label={t("wizard.github_token.label")}
+          value={inputBuffer}
+          placeholder="ghp_..."
+          mask
+        />
+      </Box>
+      <Box marginTop={1}>
+        <Text color={Theme.text.secondary} wrap="wrap">
+          {t("wizard.github_token.optional_hint")}
+        </Text>
+      </Box>
+    </>
+  );
+}
+
 function renderSummaryStep(state: WizardState) {
   const v = state.values;
   return (
@@ -564,6 +587,16 @@ function renderSummaryStep(state: WizardState) {
               : t("wizard.permission.auto_label")
           }
           valueBold
+        />
+        <Field
+          label={t("wizard.summary.github_token")}
+          value={
+            v.github_token
+              ? "•".repeat(
+                  Math.max(0, v.github_token.length - 4),
+                ) + v.github_token.slice(-4)
+              : t("wizard.summary.github_token_off")
+          }
         />
       </Box>
       {state.saveResult && (
@@ -614,6 +647,7 @@ const STEP_META: Record<StepKey, StepMeta> = {
   kubeconfig: { glyph: "⎈", chipLabel: "KUBE", titleKey: "wizard.kubeconfig.title" },
   kube_context: { glyph: "⎈", chipLabel: "CTX", titleKey: "wizard.kube_context.title" },
   permission: { glyph: "⛔", chipLabel: "PERM", titleKey: "wizard.permission.title" },
+  github_token: { glyph: "🔑", chipLabel: "GH", titleKey: "wizard.github_token.title" },
   summary: { glyph: "✓", chipLabel: "REVIEW", titleKey: "wizard.summary.title" },
 };
 
@@ -693,6 +727,8 @@ export const WizardCard: React.FC<{
     if (state.currentStep === "api_url") setInputBuffer(state.values.api_base_url);
     else if (state.currentStep === "api_key") setInputBuffer(state.values.llm_api_key);
     else if (state.currentStep === "kubeconfig") setInputBuffer(state.values.kubeconfig_path);
+    else if (state.currentStep === "github_token")
+      setInputBuffer(state.values.github_token);
     else if (state.currentStep === "model" && state.values.model_is_custom)
       setInputBuffer(state.values.model_name);
     else setInputBuffer("");
@@ -779,6 +815,19 @@ export const WizardCard: React.FC<{
     dispatch({ type: "STEP_NEXT" });
   }
 
+  function commitGithubToken() {
+    // Optional step — no validation call: the bastion running the
+    // wizard often cannot reach github.com, and an empty token is a
+    // legitimate answer (issue reporting stays off). The server only
+    // ever sees a non-empty value (see commitSave).
+    dispatch({
+      type: "VALUE_SET",
+      key: "github_token",
+      value: inputBuffer.trim(),
+    });
+    dispatch({ type: "STEP_NEXT" });
+  }
+
   async function commitSave() {
     const result = await client.saveConfig({
       model_name: state.values.model_name,
@@ -789,6 +838,13 @@ export const WizardCard: React.FC<{
       confirmation_required: state.values.confirmation_required
         ? "true"
         : "false",
+      // Skip-when-empty: re-running the wizard must not clobber a
+      // token the user configured earlier with an empty write.
+      ...(state.values.github_token
+        ? {
+            github_token: state.values.github_token,
+          }
+        : {}),
     });
     dispatch({ type: "SAVE_DONE", result });
   }
@@ -823,6 +879,7 @@ export const WizardCard: React.FC<{
       state.currentStep === "api_url" ||
       state.currentStep === "api_key" ||
       state.currentStep === "kubeconfig" ||
+      state.currentStep === "github_token" ||
       (state.currentStep === "model" && state.values.model_is_custom);
     if (!isTextInputStep && input && /^[1-9]$/.test(input)) {
       const idx = parseInt(input, 10) - 1;
@@ -943,6 +1000,11 @@ export const WizardCard: React.FC<{
         }
         break;
       }
+      case "github_token": {
+        handleTextInput(input, key, setInputBuffer);
+        if (key.return) commitGithubToken();
+        break;
+      }
       case "summary": {
         // Trigger save on Enter for two cases:
         //   1. First press (no prior result) — initial save.
@@ -979,6 +1041,8 @@ export const WizardCard: React.FC<{
         return renderKubeContextStep(state, safeFocusedIdx);
       case "permission":
         return renderPermissionStep(state, safeFocusedIdx);
+      case "github_token":
+        return renderGithubTokenStep(inputBuffer);
       case "summary":
         return renderSummaryStep(state);
       default:
@@ -1001,6 +1065,8 @@ export const WizardCard: React.FC<{
       case "kube_context":
       case "permission":
         return t("wizard.hint.radio_with_back");
+      case "github_token":
+        return t("wizard.hint.github_token");
       case "summary":
         return state.saveResult
           ? state.saveResult.status === "success"

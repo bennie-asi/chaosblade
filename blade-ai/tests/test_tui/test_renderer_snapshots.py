@@ -178,3 +178,14 @@ class TestIntentConfirmBodySnapshots:
         snapshot.assert_match(
             "intent-confirm-low-confidence", _render_to_text(captured_console, body)
         )
+
+    def test_use_case_row_shows_chosen_case(self, captured_console):
+        # Parity with the TS card: the Use Case row is always rendered;
+        # when the user chose a skill use case it appears verbatim
+        # (snapshots above lock the "-" fallback when none was chosen).
+        intent = self.BASE_INTENT | {
+            "use_case_name": "进程CPU满载 导致 Host_CPU使用率过高"
+        }
+        body = intent_confirm.build_body({"fault_intent": intent})
+        text = _render_to_text(captured_console, body)
+        assert "进程CPU满载 导致 Host_CPU使用率过高" in text

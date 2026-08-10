@@ -50,6 +50,9 @@ export interface TruncatedOutput {
  *     entirely (no ghost trailing branch).
  *   - Strip ANSI control sequences (some CLIs prefix output with
  *     cursor-clear codes; spinners inject erase-line codes).
+ *   - Strip bare C0 control chars (``\r``, ``\b``, DEL-less range) a
+ *     tool may emit mid-line — see the ``\r`` note on the cleaning
+ *     regex below; tabs are folded to a single space.
  *   - Strip trailing whitespace per line so verbose output doesn't
  *     add visible garbage.
  *   - Drop trailing blank lines from the end of the buffer.
@@ -72,8 +75,21 @@ export function truncateOutput(
   // Drop ANSI control sequences a tool might inject (Cursor up /
   // erase line — common in spinners). Conservative: only the
   // ``ESC[…m``  / ``ESC[…K`` / ``ESC[…A`` shapes; anything else
-  // is left for downstream Text wrap to handle.
-  const cleaned = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+  // is left for the C0 sweep below.
+  //
+  // The C0 sweep (\x00-\x08, \x0b-\x1f — i.e. everything except
+  // \n; tabs are folded to a space first) is load-bearing: a bare
+  // mid-line \r survives the ANSI pass and rstrip (which only reach
+  // line tails). Ink measures it as width-0, so layout stays intact,
+  // but the terminal HONOURS it — the cursor resets to column 0 and
+  // the rest of the line repaints over the card padding and even the
+  // left rail. Real source seen in the wild: curl-style progress
+  // meters inside kubectl exec output ("…\r  0  0  …"). Binary
+  // probes (hexdump of ELF headers) emit the whole C0 range.
+  const cleaned = raw
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
+    .replace(/\t/g, " ")
+    .replace(/[\x00-\x08\x0b-\x1f]/g, "");
 
   // Per-line normalisation: rstrip + drop fully-empty trailing rows.
   const lines = cleaned.split("\n").map((l) => l.replace(/\s+$/, ""));

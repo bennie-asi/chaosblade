@@ -283,6 +283,11 @@ export interface TurnUsageItem {
   inputTokens: number;
   /** Sum of output_tokens across every ``usage`` event of this turn. */
   outputTokens: number;
+  /** Epoch ms when the turn committed — frozen at creation (not at
+   *  render time) so the summary row keeps showing the actual turn-end
+   *  moment even after later repaints / remounts. Rendered in the
+   *  host's local timezone as MM-DD HH:MM:SS. */
+  endedAt: number;
 }
 
 /**

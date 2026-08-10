@@ -47,6 +47,7 @@ import { PlanPreviewSection } from "../result/PlanPreviewSection.js";
 import { t } from "../../i18n/index.js";
 import { useAppDispatch } from "../../state/store.js";
 import { Theme } from "../../theme/colors.js";
+import { useTerminalBg } from "../../theme/TerminalBgContext.js";
 import { Icons } from "../../theme/icons.js";
 
 // ---------------------------------------------------------------------------
@@ -756,6 +757,16 @@ const IntentConfirmCard: React.FC<{
         /* Single fault: existing structured fields */
         <>
           <Field label={t("confirm.field.fault_type")} value={asString(fi["fault_type"])} />
+          {/* Skill use case the user chose during clarification — optional
+           *  upstream (empty when no case was chosen). Rendered ALWAYS so
+           *  the row's presence doesn't imply anything about selection:
+           *  "无" / "None" is the explicit answer to "did we match a
+           *  case?" — hiding the row would make that question unaskable. */}
+          <Field
+            label={t("confirm.field.use_case_name")}
+            value={asString(fi["use_case_name"]) || t("confirm.none")}
+            valueColor={asString(fi["use_case_name"]) ? Theme.text.primary : Theme.gray[500]}
+          />
           <Field label={t("confirm.field.scope")} value={asString(fi["scope"])} />
           <Field label={t("confirm.field.target")} value={asString(fi["target"])} />
           <Field label={t("confirm.field.action")} value={asString(fi["action"])} />
@@ -1275,6 +1286,9 @@ const TargetChangeCard: React.FC<{ payload: Payload; taskId?: string }> = ({
   taskId,
 }) => {
   const cardWidth = useBootCardWidth();
+  // Adaptive change hue: deep crimson on dark canvases, lifted
+  // magenta on light ones (see status.change in theme/colors.ts).
+  const changeColor = Theme.status.change[useTerminalBg()];
   const p = payload ?? {};
   const reason = asString(p["reason"]);
   const agentReason = asString(p["agent_reason"]);
@@ -1304,14 +1318,14 @@ const TargetChangeCard: React.FC<{ payload: Payload; taskId?: string }> = ({
       <Box
         flexDirection="column"
         borderStyle="single"
-        borderColor={Theme.status.warn}
+        borderColor={changeColor}
         paddingX={2}
         paddingY={0}
         width={cardWidth}
       >
         <TitleChip
           glyph={Icons.warning}
-          glyphColor={Theme.status.warn}
+          glyphColor={changeColor}
           chipLabel={t("confirm.targetChange.chip")}
           title={t("confirm.targetChange.title")}
           taskId={taskId}
@@ -1346,6 +1360,7 @@ const PlanChangeCard: React.FC<{ payload: Payload; taskId?: string }> = ({
   taskId,
 }) => {
   const cardWidth = useBootCardWidth();
+  const changeColor = Theme.status.change[useTerminalBg()];
   const p = payload ?? {};
   const reason = asString(p["reason"]);
   const original = asRecord(p["original"]);
@@ -1364,14 +1379,14 @@ const PlanChangeCard: React.FC<{ payload: Payload; taskId?: string }> = ({
       <Box
         flexDirection="column"
         borderStyle="single"
-        borderColor={Theme.status.warn}
+        borderColor={changeColor}
         paddingX={2}
         paddingY={0}
         width={cardWidth}
       >
         <TitleChip
           glyph={Icons.warning}
-          glyphColor={Theme.status.warn}
+          glyphColor={changeColor}
           chipLabel={t("confirm.planChange.chip")}
           title={t("confirm.planChange.title")}
           taskId={taskId}
@@ -1617,6 +1632,7 @@ const ConfirmPromptMessageInternal: React.FC<{
   // Width is read unconditionally so the hook call order stays stable
   // across resolved→unresolved transitions.
   const cardWidth = useBootCardWidth();
+  const changeColor = Theme.status.change[useTerminalBg()];
 
   // Resolved state — collapsed chip
   if (item.resolved) {
@@ -1697,7 +1713,11 @@ const ConfirmPromptMessageInternal: React.FC<{
   );
 
   const isHard = item.node === "confirmation_gate" || item.node === "tool_screener" || item.node === "plan_change_confirm";
-  const tierColor = (item.node === "tool_screener" || item.node === "plan_change_confirm") ? Theme.status.warn : Theme.gray[700];
+  // Change-family prompts (target / plan change) carry the dedicated
+  // change hue so the pending select frame reads as one unit with its
+  // context card above — and neither mimics the warn-yellow execution
+  // gate nor the err-red failure styling.
+  const tierColor = (item.node === "tool_screener" || item.node === "plan_change_confirm") ? changeColor : Theme.gray[700];
   const tierStyle: "double" | "single" | "round" = item.node === "confirmation_gate"
     ? "double"
     : isHard ? "single" : "round";

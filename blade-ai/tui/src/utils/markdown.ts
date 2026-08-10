@@ -26,6 +26,7 @@
 
 import { Marked } from "marked";
 import { markedTerminal } from "marked-terminal";
+import { reflowWideTables } from "./tableReflow.js";
 
 const MAX_CACHE = 4;
 const _cache = new Map<number, Marked>();
@@ -70,7 +71,13 @@ function getMarked(width: number): Marked {
 export function renderMarkdown(text: string, width = 80): string {
   if (!text) return "";
   try {
-    const result = getMarked(width).parse(text, { async: false });
+    // marked-terminal draws GFM tables at natural width regardless of
+    // the ``width`` option; over-wide tables would then hard-wrap in
+    // Ink's <Text wrap="wrap"> and shred the box frame. Downgrade
+    // those to a vertical record list before parsing (no-op when the
+    // table fits).
+    const prepared = reflowWideTables(text, width);
+    const result = getMarked(width).parse(prepared, { async: false });
     if (typeof result !== "string") return text;
     // marked-terminal often appends a trailing newline; trim so our
     // Ink <Box marginTop> handles spacing instead.
