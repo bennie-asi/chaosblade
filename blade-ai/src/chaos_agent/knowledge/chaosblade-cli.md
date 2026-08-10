@@ -115,21 +115,59 @@ doc only describes the *mechanics*.
 Preserves `blade_uid` for automatic recovery via `blade_destroy`.
 
 ```
-1. Find a running tool pod:
-   kubectl get pods -n chaosblade -l app=otel-c-tool --kubeconfig=<path>
+1. Find a running tool pod ACROSS ALL NAMESPACES (the namespace is
+   deployment-specific — it may be `chaosblade`, `default`, or else):
+   kubectl get pods -A -l app=otel-c-tool -o wide --kubeconfig=<path>
+   (fallback label: app=chaosblade-tool)
 
-2. Execute blade inside the pod (default --timeout is auto-injected):
-   kubectl exec <pod> -n chaosblade -- \
+2. Execute blade inside the pod (default --timeout is auto-injected),
+   using the NAMESPACE you discovered in step 1:
+   kubectl exec <pod> -n <tool-pod-namespace> -- \
      blade create k8s <scope>-<target> <action> [flags]
 
-3. Extract blade_uid from the JSON response — it is still valid for
-   blade_destroy recovery.
+3. Extract blade_uid from the JSON response — recovery must destroy this
+   experiment through the SAME in-cluster channel (see "Recovery of
+   Tier-1 experiments" below).
 ```
 
 Inside the tool pod, blade uses the pod's ServiceAccount — do NOT add
 `--kubeconfig` inside the blade command (`v_args`). The `kubectl` tool's
 own `kubeconfig` parameter (for connecting to the cluster) should still
 be passed via the dedicated `kubeconfig` parameter.
+
+#### Recovery of Tier-1 (kubectl exec) experiments
+
+An experiment created via Tier 1 lives in the cluster (CRD) and the host
+`blade_destroy` tool cannot reach it — destroy it through the same
+in-cluster channel used for injection:
+
+```
+1. Find a running tool pod ACROSS ALL NAMESPACES (same discovery as
+   injection step 1; the namespace is deployment-specific — never assume):
+   kubectl get pods -A -l app=otel-c-tool -o wide --kubeconfig=<path>
+   (fallback label: app=chaosblade-tool)
+
+2. Destroy the experiment inside the pod, using the NAMESPACE from step 1:
+   kubectl exec <pod> -n <tool-pod-namespace> -- blade destroy <uid> \
+     --kubeconfig=<path>
+
+3. Confirm the output reports success.
+```
+
+The tool pod used during injection may have rotated (DaemonSet) — always
+re-discover a currently Running pod before destroying.
+
+#### CRD experiment status checks (UID dual mapping)
+
+The `blade_uid` of a cluster-created experiment is the CRD resource name.
+Inside a tool pod, `blade status <uid>` searches the LOCAL experiment
+database and returns 'record not found' for CRD-created experiments —
+treating that as "destroyed" is a false conclusion. Check the CRD instead:
+
+| Intent | Command |
+| --- | --- |
+| Query CRD status via API server | `blade query k8s create <uid>` (inside the tool pod) |
+| Check the CRD directly | `kubectl get/describe chaosblade <uid>` |
 
 ### Tier 2: kubectl-Native Injection
 
@@ -172,9 +210,11 @@ supported flags in your version. Older blade versions reject
 
 ## When to Request Replan
 
-If all three tiers above are exhausted without success, output
-the structured replan request rather than improvising a method that the skill case did not
-list. Improvising untested methods violates the safety contract.
+If all three tiers above are exhausted without success but you can devise an
+equivalent-effect method (same target, same fault effect, probe the environment
+read-only first), that is legitimate within the safety envelope — the safety
+guard arbitrates what is dangerous. Only when no such path remains, output
+the structured replan request.
 
 <a id="dns-fault-note"></a>
 

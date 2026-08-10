@@ -22,12 +22,12 @@
    ```yaml
    startupProbe:
      httpGet:
-       path: /healthz
-       port: 8080
+       path: <应用实际健康检查路径>   # 占位符：必须按目标应用实际探针配置替换，/healthz 仅为示例写法
+       port: <应用实际健康检查端口>   # 占位符：必须按目标应用实际探针配置替换，8080 仅为示例写法
      failureThreshold: 3
      periodSeconds: 5
    ```
-   （总等待时间 = failureThreshold × periodSeconds = 15 秒，远小于应用实际启动时间）
+   （总等待时间 = failureThreshold × periodSeconds = 15 秒，远小于应用实际启动时间。窗口参数为示例默认值，可按应用启动时长调整；**path/port 必须取自目标应用的真实探针配置，探针本身应指向可达端点，直接照抄示例值会把故障变成端口错配，偏离用例语义**）
 4. 同时确保 livenessProbe 存在，使得 startupProbe 失败后触发容器重启
 5. 等待 Pod 滚动更新完成，确认所有旧 Pod 已被替换
 6. 滚动更新完成后，立即还原 maxUnavailable 为原始值（maxUnavailable 只是使滚动更新完成的手段，不是故障本身，不应泄漏到恢复阶段）

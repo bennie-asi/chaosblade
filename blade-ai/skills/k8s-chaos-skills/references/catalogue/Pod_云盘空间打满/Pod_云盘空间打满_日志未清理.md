@@ -62,12 +62,17 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'command -v fallocate; command -
 ```
 任一存在即可走本路径；都没有（distroless / scratch 极简镜像的常态）走路径 B。
 
-注入命令：
+注入命令（填充量必须按**增量**计算）：
 ```bash
-# 使用 fallocate 快速填充磁盘
-kubectl exec <pod-name> -n <namespace> -- fallocate -l <size>G <PVC挂载路径>/fill_file
+# 0) 先测基线：PVC 挂载路径所在文件系统的总容量、已用量、可用量
+kubectl exec <pod-name> -n <namespace> -- df -h <PVC挂载路径>
+
+# 1) 填充量 = 文件系统总容量 × 目标使用率 − 当前已用量（本用例目标为打满，可取可用量 − 少量保留）
+
+# 2) 使用 fallocate 快速填充磁盘
+kubectl exec <pod-name> -n <namespace> -- fallocate -l <算出的填充量>G <PVC挂载路径>/fill_file
 # 或使用 dd：
-kubectl exec <pod-name> -n <namespace> -- dd if=/dev/zero of=<PVC挂载路径>/fill_file bs=1M count=<MB>
+kubectl exec <pod-name> -n <namespace> -- dd if=/dev/zero of=<PVC挂载路径>/fill_file bs=1M count=<填充量换算的MB数>
 ```
 
 恢复命令：
@@ -78,7 +83,7 @@ kubectl exec <pod-name> -n <namespace> -- rm -f <PVC挂载路径>/fill_file
 注意事项：
 - `fallocate` 分配速度快（仅分配元数据），`dd` 实际写入数据速度较慢但更真实
 - 无自动超时恢复机制，必须手动删除填充文件
-- 需计算填充大小以确保磁盘使用率达到预期值（先用 `df -h` 查看剩余空间）
+- 需按**增量**计算填充大小以确保磁盘使用率达到预期值（填充量 = 文件系统总容量 × 目标使用率 − 当前已用量，先用 `df -h <PVC挂载路径>` 查看）；盲目填一个大数可能越过云盘实际容量直接报 ENOSPC，也可能远达不到打满效果
 
 ---
 
@@ -117,12 +122,12 @@ PVC 在容器里是一个挂载点，它的真实存储在宿主机的 kubelet �
      -- chroot /host sh -c '
        systemd-run --on-active=<recovery-seconds>s --unit=blade-rmfill-<PodUID前8位> \
          rm -f <步骤2确认的路径>/fill_file &&
-       fallocate -l <size>G <步骤2确认的路径>/fill_file
+       fallocate -l <按路径A同式算出的填充量>G <步骤2确认的路径>/fill_file
      '
    ```
    - **先武装定时删除再填充** —— debug pod 可能先于清理被删；定时器由宿主机 systemd(PID 1)
      管理，不受 debug pod 生命周期影响
-   - `fallocate` 不可用时改 `dd if=/dev/zero of=<路径>/fill_file bs=1M count=<MB>`
+   - `fallocate` 不可用时改 `dd if=/dev/zero of=<路径>/fill_file bs=1M count=<MB>`（MB 为填充量换算值）
 
 验证：
 ```bash

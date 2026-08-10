@@ -16,11 +16,12 @@
    ```bash
    blade create k8s node-disk fill \
      --names <节点名> \
-     --path /var/lib/containerd \
+     --path <容器运行时数据目录> \
      --percent 90 \
      --timeout 300 \
      --kubeconfig <路径>
    ```
+   （`--path` 必须按目标节点实际运行时探测填写：containerd 为 `/var/lib/containerd`，docker 为 `/var/lib/docker`，不得照抄；`--percent` 为示例默认值，可按需调整）
 3. 等待 kubelet 检测到 DiskPressure 并触发 Pod 驱逐
 4. 观察应用 A 的 Pod 驱逐和重建行为
 
@@ -52,14 +53,19 @@
 
 前提条件：集群需支持 `kubectl debug node` 功能（K8s 1.18+）；选择已验证可拉取且含 `chroot`/`sh` 的镜像；宿主机变更必须 `--profile=sysadmin`；禁用 `-it`
 
-注入命令：
+注入命令（填充量必须按**增量**计算，先经 debug pod 测目标分区基线）：
 ```bash
-# 通过 kubectl debug node 在容器运行时目录填充数据
+# 0) 先测容器运行时目录所在分区的基线
+kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host df -h /var/lib/containerd
+
+# 1) 填充量 = 分区总容量 × 90%（对齐 blade --percent 90） − 当前已用量
+
+# 2) 通过 kubectl debug node 在容器运行时目录填充数据
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'dd if=/dev/zero of=/var/lib/containerd/app-archive.log bs=1M count=<size_mb>'
+  'dd if=/dev/zero of=/var/lib/containerd/app-archive.log bs=1M count=<算出的填充量换算的MB数>'
 # 或使用 fallocate（更快）：
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'fallocate -l <size>G /var/lib/containerd/app-archive.log'
+  'fallocate -l <算出的填充量>G /var/lib/containerd/app-archive.log'
 ```
 
 恢复命令：
@@ -74,6 +80,6 @@ kubectl delete pods --field-selector=status.phase=Failed
 ```
 
 注意事项：
-- 填充大小需根据节点实际磁盘容量和当前使用率计算，确保超过驱逐阈值（默认 imagefs.available < 15%）
+- 填充大小需按**增量**计算（填充量 = 分区总容量 × 90% − 当前已用量），确保超过驱逐阈值（默认 imagefs.available < 15%）；量太小不越阈值不触发驱逐，量太大把分区填满会影响恢复阶段写入
 - 与 ChaosBlade `--percent 90` 不同，此方式需手动计算填充字节数
 - 无自动超时恢复，必须手动删除填充文件

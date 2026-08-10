@@ -27,7 +27,7 @@
      params="--namespace <namespace> --node <目标节点> --kubeconfig <kubeconfig路径>"
    )
    ```
-   脚本会创建 `ipam-pressure-probe` Deployment 并绑定到目标节点。
+   脚本会创建 `chaos-ip-exhaust` Deployment 并绑定到目标节点，脚本输出中的 `[drill-vehicle: ...]` 登记行会被框架自动解析，将该 Deployment 注册为演练占位载具（恢复阶段与任务中途崩溃时的兜底清理都依赖此登记）。
 4. 删除应用 A 在目标节点上的 Pod，触发重建。由于 nodeSelector 约束，新 Pod 只能调度到已耗尽的目标节点，将进入 ContainerCreating 状态
 5. 观察新 Pod 的 ContainerCreating 状态
 
@@ -37,7 +37,7 @@
 3. 查看节点 ENI/IP 使用情况，确认资源已耗尽
 
 **注入恢复**：
-1. 删除批量创建的 Deployment：`kubectl delete deployment ipam-pressure-probe -n <namespace>`
+1. 删除批量创建的 Deployment：`kubectl delete deployment chaos-ip-exhaust -n <namespace>`（该 Deployment 已由脚本登记行注册为演练载具，此删除会被守卫豁免）
 2. 移除应用 A 的 Deployment 上添加的 nodeSelector（还原为原始值，若原本无 nodeSelector 则移除整个 nodeSelector）
 3. 移除目标节点上添加的标签：`kubectl label node <目标节点> net.ops/ipam-audit-`
 4. 等待 IP/ENI 资源释放和 Pod 滚动更新完成

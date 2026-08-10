@@ -76,8 +76,9 @@ If the fault appears to affect resources beyond the intended target:
 
 If `blade_destroy` fails or the target doesn't recover:
 
-1. Check if the ChaosBlade daemon pod is healthy:
-   `kubectl get pods -n chaosblade`.
+1. Check if the ChaosBlade daemon pod is healthy (namespace is
+   deployment-specific — search all namespaces):
+   `kubectl get pods -A -l app=chaosblade-tool`.
 2. Try manual cleanup: `kubectl exec` into the target to remove stress
    processes (`pkill chaos`, `pkill stress-ng`, `rm -f /tmp/chaos_*`).
 3. For node-disk fill that left files behind, use the same exec/debug

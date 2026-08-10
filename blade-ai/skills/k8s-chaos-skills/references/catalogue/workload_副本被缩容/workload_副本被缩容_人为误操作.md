@@ -22,8 +22,7 @@
 **注入验证**：
 1. 执行 `kubectl get pods`，确认 Pod 总数减少，部分 Pod 被终止
 2. 执行 `kubectl get deployment/statefulset <name>`，确认当前副本数小于缩容前的值
-3. 确认应用 A 的请求延迟增大或出现超时
-4. 确认服务可用性下降
+3. （可选，仅当演练方提供了应用访问入口时）确认请求延迟增大/超时或可用性下降；无入口时上述副本数证据成立即可判定
 
 **注入恢复**：
 1. 使用 kubectl 将 replicas 恢复为原来的合理值
@@ -32,8 +31,7 @@
 **恢复验证**：
 1. 执行 `kubectl get pods`，确认 Pod 总数恢复到缩容前的值
 2. 执行 `kubectl get deployment/statefulset <name>`，确认 READY 副本数等于 DESIRED
-3. 确认应用 A 的请求延迟恢复正常
-4. 确认服务可用性恢复
+3. （可选，有访问入口时）确认请求延迟与可用性恢复正常
 
 **基准事实**：
 - **根因**：人为误操作（如 kubectl scale、修改 YAML 等）导致 Deployment/StatefulSet 的副本数被意外缩小，可用实例不足

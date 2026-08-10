@@ -84,12 +84,17 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'command -v fallocate; command -
 ```
 任一存在即可走本路径；都没有（distroless / scratch 极简镜像的常态）走路径 B。
 
-注入命令：
+注入命令（填充量必须按**增量**计算）：
 ```bash
-# 使用 fallocate 快速填充磁盘
-kubectl exec <pod-name> -n <namespace> -- fallocate -l <size>G <目标目录>/fill_file
+# 0) 先测基线：目标目录所在文件系统的总容量、已用量、可用量
+kubectl exec <pod-name> -n <namespace> -- df -h <目标目录>
+
+# 1) 填充量 = 文件系统总容量 × 目标使用率 − 当前已用量（或：可用量 − 少量保留，达到打满效果）
+
+# 2) 使用 fallocate 快速填充磁盘
+kubectl exec <pod-name> -n <namespace> -- fallocate -l <算出的填充量>G <目标目录>/fill_file
 # 或使用 dd：
-kubectl exec <pod-name> -n <namespace> -- dd if=/dev/zero of=<目标目录>/fill_file bs=1M count=<MB>
+kubectl exec <pod-name> -n <namespace> -- dd if=/dev/zero of=<目标目录>/fill_file bs=1M count=<填充量换算的MB数>
 ```
 
 恢复命令：
@@ -100,7 +105,7 @@ kubectl exec <pod-name> -n <namespace> -- rm -f <目标目录>/fill_file
 注意事项：
 - `fallocate` 分配速度快（仅分配元数据），`dd` 实际写入数据速度较慢但更真实
 - 无自动超时恢复机制，必须手动删除填充文件
-- 需计算填充大小以确保磁盘使用率达到预期值（先用 `df -h` 查看剩余空间）
+- 需按**增量**计算填充大小以确保磁盘使用率达到预期值（填充量 = 文件系统总容量 × 目标使用率 − 当前已用量，先用 `df -h <目标目录>` 查看）；量太小达不到阈值，量太大触发 ENOSPC 后无法观察应用写入失败之外的行为
 
 ---
 
@@ -150,12 +155,12 @@ kubectl exec <pod-name> -n <namespace> -- rm -f <目标目录>/fill_file
      -- chroot /host sh -c '
        systemd-run --on-active=<recovery-seconds>s --unit=blade-rmfill-<PodUID前8位> \
          rm -f <步骤2确认的路径>/fill_file &&
-       fallocate -l <size>G <步骤2确认的路径>/fill_file
+       fallocate -l <按路径A同式算出的填充量>G <步骤2确认的路径>/fill_file
      '
    ```
    - **先武装定时删除再填充** —— debug pod 可能先于清理被删；定时器由宿主机 systemd(PID 1)
      管理，不受 debug pod 生命周期影响
-   - `fallocate` 不可用时改 `dd if=/dev/zero of=<路径>/fill_file bs=1M count=<MB>`
+   - `fallocate` 不可用时改 `dd if=/dev/zero of=<路径>/fill_file bs=1M count=<MB>`（MB 为填充量换算值）
    - 文件名沿用 `fill_file`，与路径 A 一致，便于统一清理
 
 验证（从容器内看使用率上升 —— 这才是业务视角的效果判据）：

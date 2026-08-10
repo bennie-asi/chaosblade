@@ -52,10 +52,14 @@ blade destroy <experiment-uid>
 
 注入命令：
 ```bash
+# 0) 先测基线：cat /proc/meminfo 记 MemTotal/MemAvailable（单位 kB）
+#    分配量 = MemTotal × 目标百分比 − (MemTotal − MemAvailable)，按增量算，勿用绝对值
+
 # stress-ng 的 vm stressor 与本用例同属 mem 故障族，可直接执行。
 # --vm-keep 让页面保持驻留，效果接近 Page Cache 持续占用。
-stress-ng --vm 1 --vm-bytes <size>M --vm-keep --timeout <duration>s
+stress-ng --vm 1 --vm-bytes <算出的分配量换算的MB数>M --vm-keep --timeout <duration>s
 ```
+> 分配量按**增量**计算：主机已有基础用量，直接按目标百分比的绝对值分配会超量触发 OOM Killer。
 
 > **为什么不用 `dd` 填充文件**：本用例的批准故障族是 `mem`（主路径 `blade create mem load
 > --mode cache`），而 `dd` 被判为 `disk` 族。target_guard 的故障类型锁定会以

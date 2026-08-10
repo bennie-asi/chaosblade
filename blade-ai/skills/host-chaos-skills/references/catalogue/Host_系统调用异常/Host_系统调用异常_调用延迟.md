@@ -31,7 +31,7 @@ blade create strace delay --pid <pid> --syscall-name <syscall> --time <delay> --
 
 **注入验证**：
 1. `strace -T -p <pid> -e trace=<syscall>` 确认该系统调用耗时增加
-2. 观察应用响应延迟是否增大
+2. （可选，仅当演练方提供了应用访问入口时）确认响应延迟增大；无入口时上述 strace 耗时证据成立即可判定
 3. 确认延迟是否符合注入的时间值
 
 **注入恢复**：
@@ -41,7 +41,7 @@ blade destroy <experiment-uid>
 
 **恢复验证**：
 1. `strace -T -p <pid> -e trace=<syscall>` 确认系统调用耗时恢复正常
-2. 确认应用响应延迟恢复正常
+2. （可选，有访问入口时）确认应用响应延迟恢复正常
 
 **基准事实**：
 - **根因**：特定系统调用出现异常延迟（如磁盘慢、网络抖动导致的底层延迟）

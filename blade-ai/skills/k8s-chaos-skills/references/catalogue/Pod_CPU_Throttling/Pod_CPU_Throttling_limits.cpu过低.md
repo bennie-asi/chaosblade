@@ -17,8 +17,8 @@
 
 **注入验证**：
 1. 进入容器查看 `/sys/fs/cgroup/cpu/cpu.stat`，确认 `nr_throttled` 和 `throttled_time` 持续增长
-2. 查看监控指标，确认 Pod CPU 使用率接近 limits
-3. 确认应用 A 的请求延迟显著增大
+2. `kubectl top pod <pod-name> -n <namespace>` 确认 Pod CPU 使用率接近 limits
+3. （可选，仅当演练方提供了应用访问入口时）确认请求延迟显著增大；无入口时上述 throttling 与 CPU 证据成立即可判定
 
 **注入恢复**：
 1. 销毁 chaosblade CPU 负载实验
@@ -26,7 +26,7 @@
 
 **恢复验证**：
 1. 查看 `cpu.stat`，确认 `nr_throttled` 停止增长
-2. 确认应用 A 的请求延迟恢复正常
+2. （可选，有访问入口时）确认请求延迟恢复正常
 
 **基准事实**：
 - **根因**：容器 limits.cpu 设置过低，实际 CPU 需求超过 limit，内核对容器 CPU 时间片进行 throttle，导致应用性能下降

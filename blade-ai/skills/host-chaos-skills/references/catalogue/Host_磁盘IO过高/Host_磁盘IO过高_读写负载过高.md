@@ -29,7 +29,7 @@ blade create disk burn --read --write --path <target-path> --timeout <duration>
 **注入验证**：
 1. `iostat -xd 1` 确认 %util 接近 100%
 2. `top` 确认 wa（IO Wait）显著升高
-3. 观察应用读写延迟是否增大
+3. （可选，仅当演练方提供了应用访问入口时）确认读写延迟增大；无入口时上述 %util 与 iowait 证据成立即可判定
 
 **注入恢复**：
 ```bash
@@ -38,7 +38,7 @@ blade destroy <experiment-uid>
 
 **恢复验证**：
 1. `iostat -xd 1` 确认 %util 回落到正常水平
-2. 确认应用读写延迟恢复正常
+2. （可选，有访问入口时）确认应用读写延迟恢复正常
 
 **基准事实**：
 - **根因**：磁盘被大量读写操作占满，导致 IO 队列堆积，正常应用的 IO 请求被延迟

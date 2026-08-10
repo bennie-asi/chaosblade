@@ -54,12 +54,16 @@ blade destroy <experiment-uid>
 
 注入命令：
 ```bash
-# 1) 先读总内存（输出中的 MemTotal 单位是 kB）
+# 1) 先读总内存与可用内存（输出中 MemTotal/MemAvailable 单位是 kB）
 cat /proc/meminfo
 
-# 2) 取 MemTotal 的 80% 作为 --vm-bytes 的值填入（单位 k）
-stress-ng --vm 1 --vm-bytes <MemTotal的80%>k --timeout <duration>s
+# 2) 按增量计算分配量：分配量 = MemTotal × 目标百分比 − (MemTotal − MemAvailable)
+#    例：MemTotal=16000000k、MemAvailable=6000000k、目标 80%：
+#    16000000×0.8 − (16000000−6000000) = 2800000k
+stress-ng --vm 1 --vm-bytes <算出的分配量>k --timeout <duration>s
 ```
+> **严禁直接按「MemTotal × 目标百分比」的绝对值分配**——主机已有基础用量，
+> 绝对值分配会超出目标水位甚至超过总内存，触发 swap 抖动或 OOM Killer。
 
 恢复命令：
 ```bash
@@ -70,5 +74,5 @@ kill <pid>
 ```
 
 注意事项：
-- stress-ng 方式无法精确控制百分比，需手动计算内存量
-- 无 `--avoid-being-killed` 等效保护，可能被 OOM Killer 杀死
+- stress-ng 方式无法精确控制百分比，需按**增量**手动计算内存量（分配量 = MemTotal × 目标百分比 − 已用量）
+- 无 `--avoid-being-killed` 等效保护，可能被 OOM Killer 杀死；若分配后进程消失且 `free -m` 无变化，先查 `dmesg | grep -i oom` 确认是否超量被杀，按增量重算后重试，不要直接换方法

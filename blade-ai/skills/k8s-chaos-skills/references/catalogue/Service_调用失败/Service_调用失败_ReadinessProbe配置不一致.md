@@ -22,11 +22,12 @@
    ```yaml
    readinessProbe:
      httpGet:
-       path: /non-existent-health-path
-       port: 9999    # 应用实际不监听此端口
+       path: <应用不提供的路径>   # 占位符：必须与应用实际健康检查路径不同；/non-existent-health-path 仅为示例写法
+       port: <应用不监听的端口>   # 占位符：必须先探测应用实际监听端口后选一个未监听端口；9999 仅为示例写法
      periodSeconds: 5
      failureThreshold: 3
    ```
+   （本用例的故障机制就是探针指向错误端点：注入前必须先探测目标应用实际监听端口与健康检查路径，再选一个确定未监听/不存在的值；不得照抄示例值，若示例端口恰被应用监听则故障不生效）
 4. 等待 Pod 滚动更新完成，确认所有旧 Pod 已被替换
 5. 滚动更新完成后，立即还原 maxUnavailable 为原始值（maxUnavailable 只是使滚动更新完成的手段，不是故障本身，不应泄漏到恢复阶段）
 6. 观察 Pod Ready 状态和 Service Endpoints 变化

@@ -21,7 +21,7 @@ blade create k8s node-mem load --mode ram --mem-percent 90 --names <节点名> -
 > **必须使用 `--mode ram`**。默认的 cache 模式在 cgroup v2 节点上不会增加实际物理内存占用（仅填充页缓存），kubectl top 观测不到变化。`--mode ram` 通过分配匿名内存直接占用物理 RAM。
 
 **注入验证**：
-1. 查看节点内存使用率监控，确认持续超过 90%
+1. `kubectl top node <node-name>` 确认节点内存使用率持续超过 90%
 2. 执行 `kubectl describe node <节点名>`，确认 MemoryPressure 条件为 True
 3. 确认应用 A 的 Pod 出现 OOMKilled 或被驱逐
 
@@ -29,7 +29,7 @@ blade create k8s node-mem load --mode ram --mem-percent 90 --names <节点名> -
 1. 销毁 chaosblade 实验
 
 **恢复验证**：
-1. 查看节点内存使用率监控，确认恢复到正常水平
+1. `kubectl top node <node-name>` 确认内存使用率恢复到正常水平
 2. 执行 `kubectl describe node <节点名>`，确认 MemoryPressure 条件为 False
 3. 确认应用 A 的 Pod 恢复正常运行
 
@@ -45,12 +45,18 @@ blade create k8s node-mem load --mode ram --mem-percent 90 --names <节点名> -
 
 前提条件：集群需支持 `kubectl debug node` 功能（K8s 1.18+）；选择当前集群已验证可拉取且**包含 `stress-ng`** 的镜像（如 `ghcr.io/colinianking/stress-ng`）；切勿使用不含 stress-ng 的 alpine/busybox 基础镜像（会报 `stress-ng: not found`）。
 
-注入命令：
+注入命令（`--vm-bytes` 必须按**增量**计算，不能拍脑袋给绝对值）：
 ```bash
-# 使用 kubectl debug node 注入内存压力（非交互；镜像须含 stress-ng）
-kubectl debug node/<node-name> --profile=sysadmin --image=<stress-ng-image> -- sh -c 'stress-ng --vm 1 --vm-bytes <size> --timeout <duration>s'
-# 示例：占用 4G 内存，持续 600 秒
-kubectl debug node/<node-name> --profile=sysadmin --image=<stress-ng-image> -- sh -c 'stress-ng --vm 1 --vm-bytes 4G --timeout 600s'
+# 1) 先测节点内存基线
+kubectl top node <node-name>
+
+# 2) 分配量 = 节点总内存 × 目标百分比 − 当前用量
+#    例：节点 16Gi、当前已用 6Gi、目标 80% → 16×0.8 − 6 ≈ 6.8G
+
+# 3) 使用 kubectl debug node 注入内存压力（非交互；镜像须含 stress-ng）
+kubectl debug node/<node-name> --profile=sysadmin --image=<stress-ng-image> -- sh -c 'stress-ng --vm 1 --vm-bytes <算出的分配量> --timeout <duration>s'
+# 示例：分配 6.8G，持续 600 秒
+kubectl debug node/<node-name> --profile=sysadmin --image=<stress-ng-image> -- sh -c 'stress-ng --vm 1 --vm-bytes 6.8G --timeout 600s'
 ```
 
 恢复命令：
@@ -61,7 +67,7 @@ kubectl delete pod <debug-pod-name> --force --grace-period=0
 ```
 
 注意事项：
-- 必须使用 `--vm-bytes` 指定具体内存大小，而非百分比，需根据节点总内存计算
+- 必须使用 `--vm-bytes` 指定具体内存大小，而非百分比；大小按**增量**算（分配量 = 节点总内存 × 目标百分比 − 当前用量），按绝对值分配会超量触发 OOM killer
 - debug 命令客户端会阻塞到 --timeout 到期或断连，但 debug Pod 服务端持续运行，客户端超时不代表注入失败（--timeout 到期后自动释放=自动恢复）
 - 与 ChaosBlade `--mode ram` 相比，stress-ng 默认会不断分配/释放内存（malloc/free 循环），效果等价
 - debug Pod 在节点 MemoryPressure 时可能被 OOM killer 终止，这本身就是预期行为

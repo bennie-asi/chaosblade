@@ -641,32 +641,32 @@ kubectl delete chaosblade --all
 
 ### 执行步骤
 
-1. 发现可用的 tool Pod：
+1. 发现可用的 tool Pod（**跨所有命名空间**，tool Pod 所在命名空间因部署而异，可能是 chaosblade、default 或其他，切勿假设）：
    ```bash
-   kubectl get pods -n chaosblade -l app=otel-c-tool --kubeconfig=<path>
+   kubectl get pods -A -l app=otel-c-tool -o wide --kubeconfig=<path>
    ```
-2. 选择 STATUS=Running 的 Pod（任意一个均可，实验是集群级别的）
-3. 执行 blade 命令：
+2. 选择 STATUS=Running 的 Pod（任意一个均可，实验是集群级别的），并记住其 NAMESPACE
+3. 执行 blade 命令（使用步骤 1 发现的命名空间）：
    ```bash
-   kubectl exec <pod> -n chaosblade -- blade create k8s <scenario> [flags] --kubeconfig=<path>
+   kubectl exec <pod> -n <tool-pod命名空间> -- blade create k8s <scenario> [flags] --kubeconfig=<path>
    ```
 4. 从 JSON 输出中提取 blade_uid 用于后续恢复
 
 ### 示例：Pod 网络丢包
 
 ```bash
-# 1. 发现 tool Pod
-kubectl get pods -n chaosblade -l app=otel-c-tool --kubeconfig=/path/to/config
-# 2. 通过 tool Pod 执行 blade create
-kubectl exec otel-c-tool-xxxxx -n chaosblade -- \
+# 1. 发现 tool Pod（跨所有命名空间）
+kubectl get pods -A -l app=otel-c-tool -o wide --kubeconfig=/path/to/config
+# 2. 通过 tool Pod 执行 blade create（-n 用发现到的命名空间）
+kubectl exec otel-c-tool-xxxxx -n <tool-pod命名空间> -- \
   blade create k8s pod-network drop \
   --namespace cms-demo \
   --labels "app=myapp" \
   --kubeconfig=/path/to/config
 # 3. 从输出中提取 blade_uid
 # {"code":200,"success":true,"result":"abc123"}
-# 4. 恢复时同样通过 tool Pod 执行 blade destroy
-kubectl exec otel-c-tool-xxxxx -n chaosblade -- \
+# 4. 恢复时同样通过 tool Pod 执行 blade destroy（需重新发现 Running Pod 及其命名空间）
+kubectl exec otel-c-tool-xxxxx -n <tool-pod命名空间> -- \
   blade destroy abc123 --kubeconfig=/path/to/config
 ```
 

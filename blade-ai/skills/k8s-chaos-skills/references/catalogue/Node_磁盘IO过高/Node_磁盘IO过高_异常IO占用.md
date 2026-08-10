@@ -12,7 +12,7 @@
 **演练步骤**：
 1. 定位运行应用 A 的节点
 2. **路径校验（必须）**：注入前验证目标路径存在且可写：
-   - 通过 `kubectl exec <tool-pod> -n chaosblade -- ls -ld <磁盘路径>` 确认路径存在
+   - 通过 `kubectl exec <tool-pod> -n <tool-pod命名空间> -- ls -ld <磁盘路径>` 确认路径存在（tool Pod 命名空间需用 `kubectl get pods -A -l app=chaosblade-tool` 发现）
    - 如路径不存在，通过 `df -h` 查看可用挂载点，选择已存在的可写目录
    - 常见可用路径：`/var/lib/containerd`、`/var/lib/docker`、`/tmp`、`/var/log`
    - **禁止使用未校验的路径** — ChaosBlade 接受任意路径但底层 dd 进程会静默失败

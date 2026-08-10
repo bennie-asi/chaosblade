@@ -101,6 +101,25 @@ class TestDirFingerprint:
     def test_nonexistent_dir_returns_empty(self):
         assert _dir_fingerprint(Path("/nonexistent")) == ""
 
+    def test_pycache_and_ds_store_ignored(self, tmp_path):
+        """不参与蒸馏的内容不计入指纹：
+
+        - __pycache__/*.pyc、.DS_Store：运行时缓存产物，后端重启会重写，
+          若计入会导致注册表被误判过期（case 内容未变却触发 stale）
+        - scripts/：辅助脚本，capabilities-sync 只蒸馏 catalogue case
+          文档，脚本改动不影响注册表产物
+        """
+        d = tmp_path / "skill"
+        (d / "__pycache__").mkdir(parents=True)
+        (d / "scripts").mkdir()
+        (d / "SKILL.md").write_text("hello", encoding="utf-8")
+        fp1 = _dir_fingerprint(d)
+        (d / "__pycache__" / "loader.cpython-311.pyc").write_bytes(b"\x00\x01")
+        (d / ".DS_Store").write_bytes(b"junk")
+        (d / "scripts" / "list_scenarios.py").write_text("print(1)", encoding="utf-8")
+        fp2 = _dir_fingerprint(d)
+        assert fp1 == fp2
+
 
 class TestGenerateSkillCatalog:
     @pytest.mark.asyncio

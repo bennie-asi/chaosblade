@@ -9,6 +9,7 @@ repeated `blade-ai list` calls are fast.
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _CACHE_FILENAME = "skill_catalog_cache.json"
+
+# Authoritative case name lives in the md content (``**用例名称** ...``),
+# same line extract_planning_metadata consumes; filename conventions are
+# only a fallback for legacy files that lack the line.
+_CASE_NAME_RE = re.compile(r"\*\*用例名称\*\*\s*(.+?)\s*$", re.MULTILINE)
 
 
 def _cache_path(work_dir: Path) -> Path:
@@ -57,10 +63,13 @@ def _content_fingerprint(content: str) -> str:
 
 
 def _dir_fingerprint(skill_dir: Path) -> str:
-    """MD5 fingerprint from all files under skill_dir.
+    """MD5 fingerprint from distillation-relevant files under skill_dir.
 
     Based on relative paths + file *contents* so that any addition, deletion,
-    or content change invalidates the cache.
+    or content change invalidates the cache. Runtime cache artifacts
+    (__pycache__/*.pyc, .DS_Store) and scripts/ are excluded: they don't
+    feed capabilities-sync / catalog generation, so changes to them must
+    not invalidate registries or caches.
 
     Content — not mtime — because mtime resolution varies across filesystems:
     two same-size edits within one clock tick share an mtime on Linux/tmpfs
@@ -78,6 +87,19 @@ def _dir_fingerprint(skill_dir: Path) -> str:
             continue
         try:
             rel = f.relative_to(skill_dir)
+        except OSError:
+            continue
+        # 排除不参与蒸馏的内容，避免无谓触发 stale：
+        # - __pycache__/*.pyc、.DS_Store：运行时缓存产物，随后端重启重写
+        # - scripts/：辅助脚本，capabilities-sync 只蒸馏 catalogue case 文档，
+        #   脚本改动不影响注册表产物
+        if (
+            "__pycache__" in rel.parts
+            or f.name == ".DS_Store"
+            or rel.parts[0] == "scripts"
+        ):
+            continue
+        try:
             data = f.read_bytes()
         except OSError:
             continue
@@ -158,8 +180,9 @@ async def generate_skill_catalog(
     """
 
     cache_file = _cache_path(work_dir)
-    # Use directory fingerprint (covers ALL files) when available,
-    # otherwise fall back to content fingerprint
+    # Use directory fingerprint (covers distillation-relevant files; runtime
+    # caches and scripts/ excluded) when available, otherwise fall back to
+    # content fingerprint
     if skill_dir and skill_dir.exists():
         fp = _dir_fingerprint(skill_dir)
     else:
@@ -379,7 +402,10 @@ def _generate_from_catalogue(catalogue_dir: Path, skill_name: str) -> Optional[l
             prefix = category + "_"
             root_cause = stem[len(prefix):] if stem.startswith(prefix) else stem
 
-            use_case_name = f"{root_cause} 导致 {category}"
+            # Content-first naming: the md's own **用例名称** line is
+            # authoritative, so files may be named freely.
+            name_m = _CASE_NAME_RE.search(md_file.read_text(encoding="utf-8"))
+            use_case_name = name_m.group(1) if name_m else f"{root_cause} 导致 {category}"
             resource_path = f"references/catalogue/{category}/{md_file.name}"
 
             # Try to read fault_symptom from the .md file

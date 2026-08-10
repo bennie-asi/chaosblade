@@ -145,6 +145,12 @@ def main():
         f"IP pool will be exhausted, {pod_capacity - current_pods - replicas} pod slots remain."
     )
     print(json.dumps(result, ensure_ascii=False))
+    # 载具登记行：框架解析此行将 deployment 注册为演练占位载具，
+    # 保证任务中途崩溃时 recover/finalize 仍能兜底删除。
+    print(
+        f'[drill-vehicle: {{"kind": "deployment", '
+        f'"name": "{DEPLOYMENT_NAME}", "namespace": "{args.namespace}"}}]'
+    )
 
 
 if __name__ == "__main__":

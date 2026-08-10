@@ -80,7 +80,7 @@ The tool auto-strips the flag with a warning if you forget.
 | Goal | Recipe |
 | --- | --- |
 | Inspect filesystem usage | `<pod> -n <ns> -- df -h` |
-| Run blade inside the tool pod | `<pod> -n chaosblade -- blade create k8s pod-cpu fullload --cpu-percent 80` (timeout auto-injected) |
+| Run blade inside the tool pod | `<pod> -n <tool-pod-namespace> -- blade create k8s pod-cpu fullload --cpu-percent 80` (timeout auto-injected; discover the pod's namespace via `get pods -A -l app=otel-c-tool`) |
 | Probe TCP connectivity | `<pod> -n <ns> -- nc -vz <host> <port>` |
 | Process list | `<pod> -n <ns> -- ps -ef` |
 

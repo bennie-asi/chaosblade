@@ -28,7 +28,7 @@ blade create cpu fullload --cpu-percent <percent> --timeout <duration>
 **注入验证**：
 1. `top` 或 `mpstat -P ALL 1` 确认 CPU 使用率持续超过目标百分比
 2. `uptime` 确认 Load Average 显著升高
-3. 观察应用请求延迟是否增大
+3. （可选，仅当演练方提供了应用访问入口时）确认请求延迟增大；无入口时上述 CPU 与 Load 证据成立即可判定
 
 **注入恢复**：
 ```bash
@@ -37,7 +37,7 @@ blade destroy <experiment-uid>
 
 **恢复验证**：
 1. `top` 确认 CPU 使用率恢复正常水平
-2. 确认应用请求延迟恢复正常
+2. （可选，有访问入口时）确认应用请求延迟恢复正常
 
 **基准事实**：
 - **根因**：异常进程大量占用 CPU，导致主机 CPU 使用率过高，影响同主机上所有应用性能

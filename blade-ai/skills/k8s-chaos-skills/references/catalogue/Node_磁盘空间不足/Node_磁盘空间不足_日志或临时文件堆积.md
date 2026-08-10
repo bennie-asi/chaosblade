@@ -74,14 +74,20 @@
 
 前提条件：集群需支持 `kubectl debug node` 功能（K8s 1.18+）；选择已验证可拉取且含 `chroot`/`sh` 的镜像；宿主机变更必须 `--profile=sysadmin`；禁用 `-it`
 
-注入命令：
+注入命令（填充量必须按**增量**计算，先经 debug pod 测目标分区基线）：
 ```bash
-# 通过 kubectl debug node 在 /var/log 或 /tmp 目录填充数据
+# 0) 先测目标分区基线：总容量、已用量（df 的路径用宿主机真实路径）
+kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host df -h /var/log
+
+# 1) 填充量 = 分区总容量 × 目标使用率(如 85%) − 当前已用量
+#    例：分区 100G、已用 50G、目标 85% → 100×0.85 − 50 = 35G
+
+# 2) 通过 kubectl debug node 在 /var/log 或 /tmp 目录填充数据
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'dd if=/dev/zero of=/var/log/app-archive.log bs=1M count=<size_mb>'
+  'dd if=/dev/zero of=/var/log/app-archive.log bs=1M count=<算出的填充量换算的MB数>'
 # 或使用 fallocate（更快）：
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'fallocate -l <size>G /tmp/app-archive.log'
+  'fallocate -l <算出的填充量>G /tmp/app-archive.log'
 ```
 
 恢复命令：
@@ -95,5 +101,5 @@ kubectl delete pod <debug-pod-name> --force --grace-period=0
 
 注意事项：
 - 填充路径对应的分区取决于节点配置，需参考上方「CRD 模式路径→分区映射表」
-- 与 ChaosBlade `--percent` 不同，此方式需手动计算填充字节数
+- 与 ChaosBlade `--percent` 不同，此方式需按**增量**手动计算填充字节数（填充量 = 分区总容量 × 目标使用率 − 当前已用量）；量太小达不到 85% 告警阈值，量太大把分区填满会触发非预期的 DiskPressure/驱逐
 - 无自动超时恢复，必须手动删除填充文件
