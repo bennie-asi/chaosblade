@@ -4,11 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blade-ai"
-# Versions are coordinated across pyproject.toml, tui/package.json,
-# src/chaos_agent/__init__.py, and src/chaos_agent/server/schemas.py.
-# The M11 release.yml guards enforce tag↔file equality before
-# publishing — bump all four in one commit.
-version = "0.6.1"
+# Versions are coordinated across pyproject.toml, tui/package.json, and
+# src/chaos_agent/__init__.py. The M11 release.yml guards enforce
+# tag↔file equality before publishing — bump all three in one commit.
+version = "0.6.2"
 description = "Chaos Engineering Agent for Kubernetes fault injection"
 
 authors = [
@@ -71,6 +70,9 @@ packages = ["src/chaos_agent"]
 # been run locally (the CI-downloaded tarball has none). Applies to the
 # platform-wheel hook's vendor force-include too.
 exclude = ["**/.DS_Store", "**/chaosblade/logs/**"]
+# 能力注册表蒸馏产物已 gitignore（每次 sync 行数抖动大），但发版必须带上：
+# artifacts 声明 VCS 忽略、构建时仍纳入的文件（hatchling 默认跳过 gitignore 文件）
+artifacts = ["src/chaos_agent/_capabilities/capabilities_*.json"]
 
 # Platform wheels: the build hook bakes vendor/chaosblade into the wheel
 # and stamps a platform tag when BLADE_AI_WHEEL_PLATFORM is set (CI). A
