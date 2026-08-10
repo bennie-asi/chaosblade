@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import uuid
 
 from fastapi import Request
 
@@ -16,6 +15,7 @@ from chaos_agent.memory.session_finalizer import (
     RESULT_SUMMARY_STATUS_ENVELOPE,
     finalize_inject_session,
 )
+from chaos_agent.persistence.task_identity import new_inject_task_id
 from chaos_agent.models.schemas import JSONEnvelope, ResponseCode
 from chaos_agent.server.routes import inject_router
 from chaos_agent.server.schemas import InjectRequest
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 @inject_router.post("/inject")
 async def inject_fault(request: InjectRequest, req: Request):
     """Inject a fault into a Kubernetes target."""
-    task_id = f"task-{uuid.uuid4()}"
+    task_id = new_inject_task_id()
     agents = req.app.state.agents
     task_tracker = req.app.state.task_tracker
 

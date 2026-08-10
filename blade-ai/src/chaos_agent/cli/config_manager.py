@@ -31,8 +31,11 @@ MODE_FILE = CONFIG_DIR / "mode.json"
 LOCAL = "local"
 SERVER = "server"
 
-# Keys that are considered sensitive and should be masked in output
-SENSITIVE_KEYS = {"llm_api_key"}
+# Keys that are considered sensitive and should be masked in output.
+# github_token doubles as the issue-report on/off switch, so it is a
+# first-class user-facing config key — `config get/list` must never
+# echo it back in plain text. server_token gates the HTTP API.
+SENSITIVE_KEYS = {"llm_api_key", "github_token", "server_token"}
 
 # Default configuration values (user-facing settings only)
 DEFAULTS: dict[str, Any] = {
@@ -45,14 +48,19 @@ DEFAULTS: dict[str, Any] = {
     "llm_max_retries": 3,
     "server_port": 8089,
     "server_host": "0.0.0.0",
+    # Empty = API auth disabled; a non-empty token makes the server
+    # require Authorization: Bearer <token> on every request.
+    "server_token": "",
     "skills_dir": "~/.blade-ai/skills",
     "memory_dir": "~/.blade-ai/memory",
-    "confirmation_required": True,
+    "confirmation_required": False,
     "blade_path": "",
     "kubectl_path": "kubectl",
     "kubeconfig_path": "",
     "kube_context": "",
     "command_timeout": 60,
+    # Empty = issue reporting off; setting a token turns it on.
+    "github_token": "",
     "log_level": "DEBUG",
     "self_evolution": False,
 }

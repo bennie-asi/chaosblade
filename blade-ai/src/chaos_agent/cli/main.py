@@ -284,23 +284,22 @@ app.command(name="config", help="Manage configuration (mode, API keys, etc.)")(c
 # to avoid restructuring the existing ``config`` typer into a sub-app —
 # both for backward-compat with users who alias ``blade-ai config`` and
 # because typer Typer→Typer nesting requires non-trivial refactoring.
-# The TS TUI launcher in tui/src/cli.tsx spawns this when it detects
-# that ``llm_api_key`` is unset on first start.
+# The TS TUI runs its own in-Ink wizard over HTTP (/api/v1/wizard/*);
+# this standalone command serves headless/scripted setup outside the TUI.
 from chaos_agent.cli.commands.config_wizard import config_wizard_command  # noqa: E402
 app.command(name="config-wizard", help="Run the first-time setup wizard (LLM, kubeconfig, permissions)")(config_wizard_command)
 # Counterpart to config-wizard — exit 0 iff all 3 required fields
 # (llm_api_key / model_name / api_base_url) resolve to non-empty values
-# via Settings. The TS TUI launcher calls this to decide whether to
-# spawn the wizard, ensuring its "is config sufficient?" check matches
-# the Python TUI's check 1:1 instead of duplicating Settings defaults
-# in TypeScript.
+# via Settings. A machine-readable gate for scripts/CI, ensuring the
+# "is config sufficient?" check matches the Python TUI's check 1:1
+# instead of duplicating Settings defaults elsewhere.
 from chaos_agent.cli.commands.config_check import config_check_command  # noqa: E402
-app.command(name="config-check", help="Exit 0 if required config fields are set (used by TS TUI launcher)")(config_check_command)
+app.command(name="config-check", help="Exit 0 if required config fields are set (machine-readable gate for scripts/CI)")(config_check_command)
 app.command(name="inject", help="Inject a fault into a Kubernetes target")(inject_command)
 app.command(name="recover", help="Recover a fault injection by task ID")(recover_command)
 app.command(name="metric", help="Query task status and execution metrics")(metric_command)
 app.command(name="list", help="List supported fault capabilities")(list_command)
-app.command(name="capabilities-sync", help="Sync: probe blade + LLM generate commands for each skill case (slow, manual)")(capabilities_sync)
+app.command(name="capabilities-sync", help="Sync: LLM derives commands from each skill case (slow, manual)")(capabilities_sync)
 app.command(name="confirm", help="Confirm or reject a pending task")(confirm_command)
 app.command(name="version", help="Show version information")(version_command)
 app.command(name="update", help="Update blade-ai to the latest version")(update_command)
@@ -327,7 +326,10 @@ def _embedded_server_command(
     ready_stdout: bool = typer.Option(False, "--ready-stdout"),
 ) -> None:
     from chaos_agent.server.app import run_server
-    run_server(host=host, port=port, ready_stdout=ready_stdout)
+    # embedded=True disables the server_token gate: this entry point is
+    # only ever spawned by the TS TUI on loopback, and the TUI sends no
+    # Authorization header (a configured token would 401-block it).
+    run_server(host=host, port=port, ready_stdout=ready_stdout, embedded=True)
 
 
 if __name__ == "__main__":

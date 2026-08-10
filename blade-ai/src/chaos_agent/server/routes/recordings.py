@@ -88,8 +88,11 @@ async def get_recording(task_id: str, req: Request) -> Any:
                     logger.debug(f"skipping malformed recording line in {task_id}")
                     continue
     except OSError as e:
+        # A read failure is a generic internal error (disk / permission),
+        # NOT a shutdown signal — 5001 would mislead clients into the
+        # "server is going away, retry later" branch.
         return JSONEnvelope.fail(
-            code=ResponseCode.SERVER_SHUTTING_DOWN,
+            code=ResponseCode.INTERNAL_ERROR,
             message=f"failed to read recording: {e}",
             request_id=req_id,
         )

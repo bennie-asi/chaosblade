@@ -145,3 +145,83 @@ class TestAgentRunnerConfirm:
         result = await runner.confirm("task-123", "invalid_action")
         assert result["code"] == 1001
         assert "invalid" in result["message"].lower()
+
+
+class TestResumeStreamCleanupContract:
+    """resume_stream's finally must clean up without raising (Bug R1).
+
+    ``unsubscribe`` requires ``(task_id, queue)``; the old single-argument
+    call raised TypeError in the generator's finally, which propagated to
+    the TUI consumer as a spurious "Resume failed" after a successful
+    resume and skipped ``printer_task.cancel()`` / ``remove_tracker``
+    (tracker leak).
+    """
+
+    @pytest.mark.asyncio
+    async def test_resume_stream_exhausts_without_cleanup_error(self):
+        import asyncio
+        from uuid import uuid4
+
+        from chaos_agent.observability import status_tracker as st
+
+        task_id = f"task-{uuid4()}"
+
+        class _PausedState:
+            next = ("confirmation_gate",)
+            tasks = []
+            values = {}
+
+        class _FakeGraph:
+            async def aget_state(self, config):
+                return _PausedState()
+
+            async def astream_events(self, *args, **kwargs):
+                if False:  # pragma: no cover - makes this an async generator
+                    yield
+
+        runner = AgentRunner()
+        runner._initialized = True
+        runner._agents = {"pipeline": _FakeGraph()}
+
+        events = []
+        # Must exhaust the generator without the finally raising.
+        async for evt in runner.resume_stream(task_id, resume_value="approved"):
+            events.append(evt)
+
+        # Give the cancelled printer task a chance to settle.
+        await asyncio.sleep(0)
+        # The whole finally ran: remove_tracker (its last statement) popped
+        # the tracker, proving unsubscribe did not raise mid-cleanup.
+        assert task_id not in st._trackers
+
+    @pytest.mark.asyncio
+    async def test_resume_stream_unsubscribes_the_status_queue(self):
+        from uuid import uuid4
+
+        from chaos_agent.observability import status_tracker as st
+
+        task_id = f"task-{uuid4()}"
+
+        class _PausedState:
+            next = ("confirmation_gate",)
+            tasks = []
+            values = {}
+
+        class _FakeGraph:
+            async def aget_state(self, config):
+                return _PausedState()
+
+            async def astream_events(self, *args, **kwargs):
+                if False:  # pragma: no cover
+                    yield
+
+        runner = AgentRunner()
+        runner._initialized = True
+        runner._agents = {"pipeline": _FakeGraph()}
+
+        tracker = st.get_tracker(task_id)
+        async for _ in runner.resume_stream(task_id, resume_value=None):
+            pass
+        # The queue subscribed by resume_stream was removed from the
+        # tracker (unsubscribe received the queue, not just the task id).
+        assert tracker._subscribers == []

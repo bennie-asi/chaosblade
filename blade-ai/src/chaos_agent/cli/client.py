@@ -26,11 +26,25 @@ class AgentClient:
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
+    def _auth_headers(self) -> dict:
+        """Bearer header for token-gated servers, empty dict otherwise.
+
+        Mirrors the server's TokenAuthMiddleware: when ``server_token``
+        is configured, every request must carry it; when it is empty the
+        server accepts unauthenticated traffic and no header is added.
+        """
+        token = (settings.server_token or "").strip()
+        if not token:
+            return {}
+        return {"Authorization": f"Bearer {token}"}
+
     async def post(self, path: str, json_data: dict) -> dict:
         """Send a POST request to the agent server."""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                response = await client.post(self._url(path), json=json_data)
+                response = await client.post(
+                    self._url(path), json=json_data, headers=self._auth_headers()
+                )
                 return response.json()
             except httpx.ConnectError:
                 return {
@@ -49,7 +63,9 @@ class AgentClient:
         """Send a GET request to the agent server."""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                response = await client.get(self._url(path), params=params)
+                response = await client.get(
+                    self._url(path), params=params, headers=self._auth_headers()
+                )
                 return response.json()
             except httpx.ConnectError:
                 return {
@@ -135,7 +151,7 @@ class AgentClient:
                     "POST",
                     self._url("/api/v1/recover-stream"),
                     json=payload,
-                    headers={"accept": "text/event-stream"},
+                    headers={"accept": "text/event-stream", **self._auth_headers()},
                 ) as response:
                     response.raise_for_status()
                     async for line in response.aiter_lines():

@@ -2,9 +2,9 @@
 
 Exposes the same 8-step ``onboarding_renderer.run()`` flow that the
 legacy Python TUI launches inline, but as an independently-callable
-Typer command. The TS TUI launcher in ``cli.tsx`` shells out to this
-when ``llm_api_key`` is unset on first start, so end-users get the
-same wizard regardless of which TUI front-end they boot.
+Typer command. The TS TUI runs its own in-Ink wizard over HTTP
+(``/api/v1/wizard/*``); this command covers users who run or re-run
+setup outside the TUI (headless boxes, scripts, ``blade-ai config-wizard``).
 
 Exit codes:
     0  user completed and saved
@@ -26,9 +26,8 @@ def config_wizard_command() -> None:
 
     Intentionally creates fresh ``ChaosConsole`` and ``ConfigStore``
     instances rather than borrowing the TUI app's globals — this
-    command runs OUTSIDE any TUI session (the caller is either the
-    user typing ``blade-ai config-wizard`` or the TS TUI launcher
-    spawning us before its own server is up).
+    command runs OUTSIDE any TUI session (the caller is a user typing
+    ``blade-ai config-wizard`` or an external script).
     """
     try:
         from chaos_agent.config.config_store import ConfigStore

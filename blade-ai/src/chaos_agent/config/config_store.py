@@ -199,13 +199,68 @@ class ConfigStore:
     # ── helpers ──────────────────────────────────────────────────
 
     @staticmethod
-    def _coerce(key: str, value: str) -> Any:
+    def _target_type(key: str) -> type | None:
+        """Resolve the type *key* is consumed as by Settings.
+
+        The curated ``_BOOL/_INT/_FLOAT_KEYS`` sets come first (the
+        historical edit surface), then ``Settings.model_fields``
+        introspection covers EVERY remaining typed field. Settings has
+        80+ typed fields; hand-maintained key lists drift silently and
+        any missed key stores a raw string into config.json — which is
+        the highest-priority settings source, so Settings() construction
+        then fails for every later command with a pydantic traceback far
+        from the ``config set`` that caused it.
+        """
         if key in _BOOL_KEYS:
-            return value.lower() in ("true", "1", "yes", "on")
+            return bool
         if key in _INT_KEYS:
-            return int(value)
+            return int
         if key in _FLOAT_KEYS:
-            return float(value)
+            return float
+        try:
+            from chaos_agent.config.settings import Settings
+
+            annotation = Settings.model_fields[key].annotation
+        except (KeyError, ImportError):
+            return None
+        if annotation in (bool, int, float):
+            return annotation
+        # ``X | None`` style annotations: pick the concrete arm.
+        args = [a for a in getattr(annotation, "__args__", ()) if a is not type(None)]
+        if len(args) == 1 and args[0] in (bool, int, float):
+            return args[0]
+        return None
+
+    @staticmethod
+    def _coerce(key: str, value: str) -> Any:
+        target = ConfigStore._target_type(key)
+        if target is bool:
+            lowered = value.lower()
+            if lowered in ("true", "1", "yes", "on"):
+                return True
+            if lowered in ("false", "0", "no", "off"):
+                return False
+            # Reject instead of silently casting (old behaviour cast any
+            # unrecognised string to False). Every caller (server
+            # config/wizard routes, Python TUI /config set, CLI config
+            # set) already handles ValueError.
+            raise ValueError(
+                f"'{value}' is not a valid boolean for '{key}' (use true/false)"
+            )
+        if target is int:
+            try:
+                return int(value)
+            except ValueError:
+                raise ValueError(
+                    f"'{value}' is not a valid integer for '{key}'"
+                ) from None
+        if target is float:
+            try:
+                return float(value)
+            except ValueError:
+                raise ValueError(
+                    f"'{value}' is not a valid number for '{key}'"
+                ) from None
         return value
 
     def _write_atomic(self, data: dict) -> None:

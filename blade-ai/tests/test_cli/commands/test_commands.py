@@ -33,6 +33,82 @@ class TestConfigCommand:
         assert "server_url" in result
 
 
+class TestConfigValueParsing:
+    """config set must refuse wrong-typed values instead of storing them.
+
+    config.json is the highest-priority settings source: a string stored
+    for an int/float/bool key makes Settings() construction raise for
+    every subsequent command.
+    """
+
+    def test_parse_int_valid(self):
+        from chaos_agent.cli.commands.config import _parse_value
+        assert _parse_value("server_port", "9090") == 9090
+
+    def test_parse_int_invalid_raises(self):
+        import pytest
+        from chaos_agent.cli.commands.config import _parse_value
+        with pytest.raises(ValueError):
+            _parse_value("server_port", "abc")
+
+    def test_parse_float_invalid_raises(self):
+        import pytest
+        from chaos_agent.cli.commands.config import _parse_value
+        with pytest.raises(ValueError):
+            _parse_value("llm_temperature", "warm")
+
+    def test_parse_bool_valid(self):
+        from chaos_agent.cli.commands.config import _parse_value
+        assert _parse_value("confirmation_required", "true") is True
+        assert _parse_value("confirmation_required", "False") is False
+
+    def test_parse_bool_invalid_raises(self):
+        import pytest
+        from chaos_agent.cli.commands.config import _parse_value
+        with pytest.raises(ValueError):
+            _parse_value("confirmation_required", "maybe")
+
+    def test_parse_delegates_to_config_store_key_sets(self):
+        """Regression: parsing must cover EVERY typed key ConfigStore
+        knows about, not a second hand-maintained list. These keys were
+        previously outside the CLI's private whitelist and would have
+        been stored as raw strings (the exact config-poisoning bug the
+        validation was meant to kill)."""
+        import pytest
+        from chaos_agent.cli.commands.config import _parse_value
+        # int keys absent from the old CLI list
+        assert _parse_value("max_verifier_loop", "5") == 5
+        assert _parse_value("loop_detection_window", "3") == 3
+        with pytest.raises(ValueError):
+            _parse_value("max_verifier_loop", "abc")
+        # bool keys absent from the old CLI list
+        assert _parse_value("self_evolution", "true") is True
+        with pytest.raises(ValueError):
+            _parse_value("otel_enabled", "maybe")
+        # float keys absent from the old CLI list
+        assert _parse_value("context_compact_ratio", "0.6") == 0.6
+        with pytest.raises(ValueError):
+            _parse_value("context_compact_ratio", "lots")
+
+    def test_set_rejects_bad_int_without_writing(self, tmp_mode_dir, capsys):
+        import json
+        from chaos_agent.cli.commands.config import config_command
+        from chaos_agent.cli.config_manager import get_config
+        from chaos_agent.cli.output import OutputFormat
+
+        # Bypassing typer's CLI runner means Option defaults don't apply;
+        # pass every argument explicitly.
+        config_command(
+            action="set", key="server_port", value="abc", extra=None,
+            output=OutputFormat.json,
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["code"] == 1001
+        assert "not a valid integer" in envelope["message"]
+        # The bad value must NOT have been persisted.
+        assert get_config("server_port") == 8089
+
+
 class TestInjectCommandParsing:
     """Test inject command parameter parsing logic."""
 

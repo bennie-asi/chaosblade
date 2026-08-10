@@ -6,6 +6,7 @@ import typer
 
 from chaos_agent.cli.config_manager import get_backend
 from chaos_agent.cli.output import OutputFormat, format_output
+from chaos_agent.preflight import exit_for_envelope
 
 
 def metric_command(
@@ -30,3 +31,4 @@ def metric_command(
 
     result = asyncio.run(_run())
     typer.echo(format_output(result, output))
+    exit_for_envelope(result)

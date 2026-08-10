@@ -36,6 +36,12 @@ def serve_command(
     ``BLADE_AI_SERVER_HOST`` / ``BLADE_AI_SERVER_PORT`` settings stay
     authoritative; a flag only overrides them when explicitly passed. This
     keeps ``blade-ai server`` and ``blade-ai-server`` behaviourally identical.
+
+    Security: the server binds 0.0.0.0 by default and exposes fault
+    injection. When serving beyond loopback, set a token —
+    ``blade-ai config set server_token <token>`` or
+    ``BLADE_AI_SERVER_TOKEN=<token>`` — and every request must then carry
+    ``Authorization: Bearer <token>``.
     """
     from chaos_agent.server.app import run_server
 

@@ -8,7 +8,6 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import uuid4
 
 from chaos_agent.agent.intent_handoff import (
     build_pipeline_handoff_from_intent_state,
@@ -35,6 +34,11 @@ from chaos_agent.memory.operation_summary_writer import write_operation_summary
 from chaos_agent.memory.session_finalizer import (
     RESULT_SUMMARY_RECOVER_PAYLOAD,
     finalize_recover_session,
+)
+from chaos_agent.persistence.task_identity import (
+    is_real_task_id,
+    new_inject_task_id,
+    new_recover_task_id,
 )
 from chaos_agent.server.routes.turn_interrupt import (
     ConfirmTimeout,
@@ -437,12 +441,12 @@ async def _finalize_task_session(
         if _final and getattr(_final, "values", None):
             _state_values = _final.values
             _candidate = _state_values.get("task_id", "")
-            if isinstance(_candidate, str) and _candidate.startswith(("task-", "recover-")):
+            if isinstance(_candidate, str) and is_real_task_id(_candidate):
                 _op_tid = _candidate
             _state_msgs = list(_state_values.get("messages") or [])
         paused_at_interrupt = bool(_final and getattr(_final, "next", None))
         is_inject_task = bool(
-            _op_tid.startswith("task-")
+            is_real_task_id(_op_tid)
             and _state_values.get("operation") != "recover"
         )
         if _op_tid and _store.has_active(_op_tid):
@@ -510,7 +514,7 @@ async def _run_inject_pipeline(ctx, iv, batcher, sidewrite, converters):
     _handoff_data = build_pipeline_handoff_from_intent_state(
         iv,
         operation="inject",
-        task_id=iv.get("task_id", f"task-{uuid4()}"),
+        task_id=iv.get("task_id", "") or new_inject_task_id(),
         default_tui_session_id=ctx.sid,
     )
     _p_task_id = _handoff_data.task_id
@@ -638,7 +642,7 @@ async def _run_batch_pipeline(ctx, iv, batcher, sidewrite, converters):
     _handoff_data = build_pipeline_handoff_from_intent_state(
         iv,
         operation="batch_inject",
-        task_id=f"task-{uuid4()}",
+        task_id=new_inject_task_id(),
         default_tui_session_id=ctx.sid,
     )
     _p_task_id = _handoff_data.task_id
@@ -808,7 +812,7 @@ async def _run_recover(ctx, graph, config, turn_started_monotonic, batcher, side
     elif _rv.get("blade_uid") or has_active_skill(_rv):
         checkpoint_values = _rv
 
-    _rec_task_id = _rv.get("task_id", f"task-{uuid4()}")
+    _rec_task_id = _rv.get("task_id", "") or new_recover_task_id()
 
     resolution = await resolve_recover_initial_state(
         _recover_inject_tid,
@@ -1199,7 +1203,7 @@ async def event_generator(ctx: TurnContext):
             data_obj = result_payload.get("data")
             if isinstance(data_obj, dict):
                 candidate = data_obj.get("task_id", "")
-                if isinstance(candidate, str) and candidate.startswith("task-"):
+                if isinstance(candidate, str) and is_real_task_id(candidate):
                     op_task_id = candidate
             if op_task_id:
                 ctx.store.add_task(ctx.sid, op_task_id)

@@ -155,8 +155,9 @@ def check_config_file_health() -> str | None:
 
 
 # Fields the wizard treats as "required to launch blade-ai". Same set as
-# the legacy ``cli/commands/config_check.py::REQUIRED_FIELDS`` and the
-# (now-deprecated) TS-side ``utils/configGate.ts::isConfigSufficient``.
+# ``cli/commands/config_check.py::REQUIRED_FIELDS`` and the retired
+# TS-side ``utils/configGate.ts::isConfigSufficient`` (the TS TUI now
+# asks ``/api/v1/wizard/needs-setup`` instead).
 # Kept here so every callsite (HTTP /needs-setup, CLI config-check,
 # any future check) reads from one constant.
 ESSENTIAL_CONFIG_FIELDS: tuple[tuple[str, str], ...] = (
@@ -290,79 +291,89 @@ async def validate_api_key(
 
     client = openai.AsyncOpenAI(api_key=key, base_url=base, timeout=5.0)
     try:
-        listed = await asyncio.wait_for(client.models.list(), timeout=5.0)
-    except asyncio.TimeoutError:
-        return ValidationResult(
-            status="warn",
-            message="Validation timed out, possibly a network issue; accepted (will be confirmed on the first /run)",
-            block=False,
-        )
-    except Exception as e:
-        msg = str(e).lower()
-        if (
-            "401" in msg
-            or "unauthorized" in msg
-            or "invalid" in msg
-            or "authentication" in msg
-        ):
-            return ValidationResult(
-                status="error",
-                message=(
-                    f"401 rejected: endpoint {base} does not accept this key. "
-                    "Check that the key and the API base URL from the previous step "
-                    "come from the same provider."
-                ),
-                block=True,
-            )
-        if "404" in msg:
+        try:
+            listed = await asyncio.wait_for(client.models.list(), timeout=5.0)
+        except asyncio.TimeoutError:
             return ValidationResult(
                 status="warn",
-                message=f"The endpoint has no /models ({type(e).__name__}); accepted",
+                message="Validation timed out, possibly a network issue; accepted (will be confirmed on the first /run)",
                 block=False,
             )
+        except Exception as e:
+            msg = str(e).lower()
+            if (
+                "401" in msg
+                or "unauthorized" in msg
+                or "invalid" in msg
+                or "authentication" in msg
+            ):
+                return ValidationResult(
+                    status="error",
+                    message=(
+                        f"401 rejected: endpoint {base} does not accept this key. "
+                        "Check that the key and the API base URL from the previous step "
+                        "come from the same provider."
+                    ),
+                    block=True,
+                )
+            if "404" in msg:
+                return ValidationResult(
+                    status="warn",
+                    message=f"The endpoint has no /models ({type(e).__name__}); accepted",
+                    block=False,
+                )
+            return ValidationResult(
+                status="warn",
+                message=f"Validation error: {type(e).__name__} (accepted)",
+                block=False,
+            )
+
+        # Parse the model list (SDK returns objects with .id attr).
+        model_ids: list[str] = []
+        try:
+            if hasattr(listed, "data"):
+                model_ids = [m.id for m in listed.data if hasattr(m, "id")]
+            else:
+                # Pagination iterator path — best-effort, take first 200.
+                # Iteration stays inside the outer try so a lazy paginator
+                # keeps its client until fully drained.
+                collected = []
+                async for m in listed:  # type: ignore
+                    if hasattr(m, "id"):
+                        collected.append(m.id)
+                    if len(collected) >= 200:
+                        break
+                model_ids = collected
+        except Exception:
+            model_ids = []
+
+        has_target: Optional[bool] = None
+        if model and model_ids:
+            has_target = model in model_ids
+
+        metadata = {"model_count": len(model_ids)}
+        if has_target is not None:
+            metadata["has_target"] = has_target
+            metadata["target_model"] = model
+
+        message_parts = [f"Validation passed · {len(model_ids)} model(s) returned"]
+        if has_target is True:
+            message_parts.append(f"includes the target {model} ✓")
+        elif has_target is False:
+            message_parts.append(f"⚠ does not include {model}")
         return ValidationResult(
-            status="warn",
-            message=f"Validation error: {type(e).__name__} (accepted)",
+            status="ok" if has_target is not False else "warn",
+            message=" · ".join(message_parts),
             block=False,
+            metadata=metadata,
         )
-
-    # Parse the model list (SDK returns objects with .id attr).
-    model_ids: list[str] = []
-    try:
-        if hasattr(listed, "data"):
-            model_ids = [m.id for m in listed.data if hasattr(m, "id")]
-        else:
-            # Pagination iterator path — best-effort, take first 200.
-            collected = []
-            async for m in listed:  # type: ignore
-                if hasattr(m, "id"):
-                    collected.append(m.id)
-                if len(collected) >= 200:
-                    break
-            model_ids = collected
-    except Exception:
-        model_ids = []
-
-    has_target: Optional[bool] = None
-    if model and model_ids:
-        has_target = model in model_ids
-
-    metadata = {"model_count": len(model_ids)}
-    if has_target is not None:
-        metadata["has_target"] = has_target
-        metadata["target_model"] = model
-
-    message_parts = [f"Validation passed · {len(model_ids)} model(s) returned"]
-    if has_target is True:
-        message_parts.append(f"includes the target {model} ✓")
-    elif has_target is False:
-        message_parts.append(f"⚠ does not include {model}")
-    return ValidationResult(
-        status="ok" if has_target is not False else "warn",
-        message=" · ".join(message_parts),
-        block=False,
-        metadata=metadata,
-    )
+    finally:
+        # The AsyncOpenAI client owns an httpx connection pool; every
+        # exit path (success / timeout / 401 / other) must release it.
+        try:
+            await client.close()
+        except Exception:
+            pass
 
 
 # ── Kubeconfig validation ──────────────────────────────────────────────
@@ -428,6 +439,10 @@ async def discover_kube_contexts(kubeconfig_path: str) -> list[str]:
         except asyncio.TimeoutError:
             try:
                 proc.kill()
+                # Reap the killed child and release its stdout pipe fd;
+                # kill() alone leaves a zombie + an open pipe until
+                # the loop closes.
+                await proc.wait()
             except Exception:
                 pass
             return []

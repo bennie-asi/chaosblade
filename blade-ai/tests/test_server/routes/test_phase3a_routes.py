@@ -967,6 +967,29 @@ class TestConfigSetGetIntegration:
         assert isinstance(body["data"]["config_path"], str)
         assert body["data"]["config_path"]
 
+    def test_get_masks_server_token(self, test_client, tmp_path, monkeypatch):
+        # server_token is the credential gating this very API
+        # (TokenAuthMiddleware). Unlike llm_api_key — which operators
+        # explicitly asked to see verbatim — the gate key must never
+        # round-trip in plaintext, or every token holder could read
+        # the token back out of /config.
+        from chaos_agent.config.config_store import ConfigStore
+        import json
+
+        cfg_path = str(tmp_path / "config.json")
+        with open(cfg_path, "w") as f:
+            json.dump({"server_token": "super-secret-token"}, f)
+        monkeypatch.setattr(
+            ConfigStore, "__init__",
+            lambda self, config_path=None: setattr(self, "_path", cfg_path),
+        )
+        r = test_client.get("/api/v1/config")
+        body = r.json()
+        assert body["status"] == "success"
+        cfg = body["data"]["config"]
+        assert cfg.get("server_token") == "*" * 8
+        assert "super-secret-token" not in str(body)
+
     def test_set_then_unset_clears(self, test_client, tmp_path, monkeypatch):
         from chaos_agent.config.config_store import ConfigStore
         import json

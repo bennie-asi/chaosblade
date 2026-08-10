@@ -20,6 +20,7 @@ from chaos_agent.server.middleware import (
     ProtocolVersionMiddleware,
     RequestIDMiddleware,
     TimingMiddleware,
+    TokenAuthMiddleware,
 )
 from chaos_agent.server.routes import config as _config  # noqa: F401 - registers /api/v1/config
 from chaos_agent.server.routes import (
@@ -337,6 +338,10 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIDMiddleware)
     app.add_middleware(TimingMiddleware)
     app.add_middleware(ProtocolVersionMiddleware)
+    # Added LAST, so it is the OUTERMOST layer: when server_token is
+    # configured, unauthenticated requests are rejected before any other
+    # middleware or route work happens. No-op when the token is empty.
+    app.add_middleware(TokenAuthMiddleware)
 
     # Register routers
     app.include_router(inject_router)
@@ -380,10 +385,22 @@ def create_app() -> FastAPI:
 
     @health_router.get("/api/v1/version")
     async def version():
+        # skill_count mirrors the local runner (blade-ai version): number
+        # of loaded skills. Best-effort — a missing/corrupt skills dir
+        # must not break the version endpoint.
+        try:
+            from chaos_agent.skills.loader import get_skills_dir
+            from chaos_agent.skills.registry import SkillRegistry
+
+            registry = SkillRegistry()
+            registry.load_from_directory(get_skills_dir())
+            skill_count = len(registry)
+        except Exception:
+            skill_count = 0
         return JSONEnvelope.ok(
             data={
                 "version": _pkg_ver,
-                "supported_fault_count": 0,
+                "skill_count": skill_count,
             },
         )
 
@@ -396,6 +413,7 @@ def run_server(
     host: str | None = None,
     port: int | None = None,
     ready_stdout: bool = False,
+    embedded: bool = False,
 ) -> None:
     """Entry point for the blade-ai-server command.
 
@@ -407,8 +425,20 @@ def run_server(
         (skill loading, LLM creation, checkpointer setup). This ensures
         the TUI's 10s health-check timer doesn't start counting down
         during lifespan initialization.
+      - ``embedded=True`` marks the TUI-spawned instance (this function
+        is its ONLY caller path setting it). It disables the server_token
+        gate: the embedded server is loopback-only with an OS-allocated
+        port and the TUI sends no Authorization header, so a configured
+        token would 401-block the whole TUI without adding protection.
+        The public ``server`` command and the ``blade-ai-server`` console
+        script never pass this flag — their gate stays fully active.
     """
     import socket
+
+    if embedded:
+        from chaos_agent.server.middleware import set_token_auth_bypass
+
+        set_token_auth_bypass(True)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -457,7 +487,13 @@ def _cli() -> None:
     parser.add_argument("--ready-stdout", action="store_true")
     args = parser.parse_args()
 
-    run_server(host=args.host, port=args.port, ready_stdout=args.ready_stdout)
+    # embedded=True: this -m entry point exists exclusively for the TS
+    # TUI's embedded-server spawn (see server-process.ts), so the token
+    # gate is disabled for it.
+    run_server(
+        host=args.host, port=args.port, ready_stdout=args.ready_stdout,
+        embedded=True,
+    )
 
 
 if __name__ == "__main__":

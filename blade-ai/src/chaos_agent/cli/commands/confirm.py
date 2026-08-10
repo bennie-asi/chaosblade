@@ -5,7 +5,7 @@ from typing import Optional
 import typer
 
 from chaos_agent.cli.output import OutputFormat, format_output
-from chaos_agent.preflight import CONFIRM_CHECKS, run_command
+from chaos_agent.preflight import CONFIRM_CHECKS, exit_for_envelope, run_command
 
 
 def confirm_command(
@@ -24,3 +24,4 @@ def confirm_command(
 
     result = run_command(CONFIRM_CHECKS, _local, _server)
     typer.echo(format_output(result, output))
+    exit_for_envelope(result)

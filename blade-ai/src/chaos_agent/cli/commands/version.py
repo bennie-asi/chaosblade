@@ -38,7 +38,7 @@ def version_command(
                     "message": "success",
                     "data": {
                         "version": __version__,
-                        "supported_fault_count": "N/A (server not available)",
+                        "skill_count": "N/A (server not available)",
                     },
                 },
                 output,

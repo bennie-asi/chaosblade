@@ -21,37 +21,23 @@ def _mask_value(key: str, value: object) -> object:
 
 
 def _parse_value(key: str, raw: str) -> object:
-    """Parse a string value into the appropriate Python type based on key."""
-    # Boolean keys
-    if key in ("confirmation_required", "retry_jitter"):
-        return raw.lower() in ("true", "1", "yes")
-    # Integer keys
-    if key in (
-        "server_port",
-        "command_timeout",
-        "llm_max_retries",
-        "timeout_blade",
-        "timeout_kubectl",
-        "timeout_kubectl_exec",
-        "llm_connect_timeout",
-        "llm_read_timeout",
-        "timeout_default",
-        "max_agent_loop",
-        "max_execute_loop",
-        "recursion_limit",
-        "retry_max_retries",
-    ):
-        try:
-            return int(raw)
-        except ValueError:
-            return raw
-    # Float keys
-    if key in ("llm_temperature", "retry_base_delay", "retry_max_delay", "retry_exponential_base"):
-        try:
-            return float(raw)
-        except ValueError:
-            return raw
-    return raw
+    """Parse a string value into the type Settings consumes for *key*.
+
+    Delegates to ``ConfigStore._coerce`` — the same single source of
+    truth the server's ``/config`` write path and the Python TUI's
+    ``/config set`` use (bool/int/float key sets live there). Keeping
+    a second, smaller key list here previously left typed keys like
+    ``max_verifier_loop`` unprotected: an unparsed string would poison
+    config.json — the HIGHEST-priority settings source — making
+    ``Settings()`` construction fail for every command afterwards, with
+    the traceback pointing at pydantic instead of the ``config set``
+    that wrote it.
+
+    Raises ValueError when *raw* cannot be converted.
+    """
+    from chaos_agent.config.config_store import ConfigStore
+
+    return ConfigStore._coerce(key, raw)
 
 
 def config_command(
@@ -120,7 +106,15 @@ def config_command(
             else:
                 result = {"code": 1001, "message": f"Unknown mode '{mode_val}'. Use: local | server", "data": None}
         else:
-            parsed = _parse_value(key, value) if value is not None else value
+            if value is None:
+                parsed = value
+            else:
+                try:
+                    parsed = _parse_value(key, value)
+                except ValueError as e:
+                    result = {"code": 1001, "message": str(e), "data": None}
+                    typer.echo(format_output(result, output))
+                    return
             set_config(key, parsed)
             result = {"code": 0, "message": "success", "data": {key: _mask_value(key, parsed)}}
 

@@ -8,7 +8,7 @@ import typer
 
 from chaos_agent.cli.output import OutputFormat, format_output
 from chaos_agent.config.settings import settings
-from chaos_agent.preflight import INJECT_CHECKS, run_command
+from chaos_agent.preflight import INJECT_CHECKS, exit_for_envelope, run_command
 
 
 def inject_command(
@@ -190,7 +190,16 @@ def inject_command(
                 elif event.type == "confirm":
                     pass
                 elif event.type == "result":
-                    final_result = json.loads(event.content)
+                    try:
+                        final_result = json.loads(event.content)
+                    except json.JSONDecodeError:
+                        # A malformed result event must degrade to an error
+                        # envelope, not a bare traceback out of the CLI.
+                        final_result = {
+                            "code": 1,
+                            "message": "Received a malformed result event from the agent",
+                            "data": None,
+                        }
                 elif event.type == "error":
                     typer.echo(f"\n❌ Error: {event.content}", err=True)
             return final_result or {"code": 1, "message": "No result received", "data": None}
@@ -201,7 +210,7 @@ def inject_command(
             if (
                 confirm
                 and result["code"] == 0
-                and result.get("data", {}).get("needs_confirm")
+                and (result.get("data") or {}).get("needs_confirm")
             ):
                 plan = result["data"].get("plan_summary", "No plan summary available")
                 typer.echo(f"\nPlan Summary:\n{plan}\n")
@@ -222,3 +231,4 @@ def inject_command(
 
     # ═══ Phase 3: output ═══
     typer.echo(format_output(result, output))
+    exit_for_envelope(result)

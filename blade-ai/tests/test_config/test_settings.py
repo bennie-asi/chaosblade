@@ -106,7 +106,9 @@ class TestSettingsDefaults:
         from chaos_agent.config.settings import Settings
 
         s = Settings(llm_api_key="test")
-        assert s.confirmation_required is True
+        # Default flipped to auto mode (False) — wizard and runtime
+        # defaults must agree.
+        assert s.confirmation_required is False
 
 
 class TestBlacklistNamespaces:

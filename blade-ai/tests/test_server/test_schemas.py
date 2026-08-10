@@ -2,7 +2,11 @@
 
 import pytest
 
-from chaos_agent.models.schemas import JSONEnvelope
+from chaos_agent.models.schemas import (
+    JSONEnvelope,
+    ResponseCode,
+    build_inject_envelope,
+)
 from chaos_agent.server.schemas import (
     InjectRequest,
     RecoverRequest,
@@ -328,12 +332,14 @@ class TestSkillsListResponse:
 
 class TestVersionResponse:
     def test_defaults(self):
+        from chaos_agent import __version__
+
         resp = VersionResponse()
-        # Bumped in lockstep with pyproject / package.json / utils/version.ts.
-        # If you bump the package version, this assertion has to move too.
-        assert resp.version == "0.1.0"
+        # Default tracks the package version (single source of truth:
+        # src/chaos_agent/__init__.py) — no lockstep edit needed on bump.
+        assert resp.version == __version__
         assert resp.build_time == ""
-        assert resp.supported_fault_count == 0
+        assert resp.skill_count == 0
 
 
 class TestJSONEnvelope:
@@ -360,3 +366,48 @@ class TestJSONEnvelope:
         assert env.timestamp != ""
         # Should be ISO format
         assert "T" in env.timestamp or "-" in env.timestamp
+
+
+class TestBuildInjectEnvelopeCodeMapping:
+    """Contract: failure_reason categories map to their code-table band.
+
+    Operational failures must stay in the 4xxx band. Regression guard
+    for the legacy mis-mapping of execution_timeout to NO_BLADE_UID
+    (5000, internal band): the missing blade_uid is a consequence of
+    the timeout, not an internal error.
+    """
+
+    def test_success_state(self):
+        env = build_inject_envelope({"k": "v"}, "completed")
+        assert env["status"] == "success"
+        assert env["code"] == ResponseCode.OK
+
+    def test_execution_timeout_maps_to_operational_band(self):
+        env = build_inject_envelope(
+            {}, "failed", failure_reason="execution_timeout: blade hung"
+        )
+        assert env["status"] == "fail"
+        assert env["code"] == ResponseCode.EXECUTION_TIMEOUT
+        assert env["code"] == 4003
+
+    def test_execution_timeout_no_longer_maps_to_no_blade_uid(self):
+        env = build_inject_envelope(
+            {}, "failed", failure_reason="execution_timeout"
+        )
+        assert env["code"] != ResponseCode.NO_BLADE_UID
+
+    def test_safety_rejected_mapping(self):
+        env = build_inject_envelope({}, "failed", failure_reason="safety_rejected: risky")
+        assert env["code"] == ResponseCode.SAFETY_REJECTED
+
+    def test_user_rejected_mapping(self):
+        env = build_inject_envelope({}, "failed", failure_reason="user_rejected")
+        assert env["code"] == ResponseCode.USER_REJECTED
+
+    def test_unknown_failure_defaults_to_injection_failed(self):
+        env = build_inject_envelope({}, "failed", failure_reason="boom")
+        assert env["code"] == ResponseCode.INJECTION_FAILED
+
+    def test_failure_data_always_included(self):
+        env = build_inject_envelope({"uid": "u1"}, "failed", failure_reason="boom")
+        assert env["data"] == {"uid": "u1"}

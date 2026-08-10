@@ -107,6 +107,13 @@ async def read_config(req: Request):
     view.update(store.read_all())
     if s.llm_api_key:
         view["llm_api_key"] = s.llm_api_key
+    # server_token is the credential that gates this very API
+    # (TokenAuthMiddleware). Echoing it back in plaintext — while the
+    # CLI's ``config list`` masks it — would leak the gate key to every
+    # token holder, so mask it here too. (llm_api_key stays surfaced
+    # as-is per the operators' request documented above.)
+    if view.get("server_token"):
+        view["server_token"] = "*" * 8
     return JSONEnvelope.ok(
         data={
             "config": view,

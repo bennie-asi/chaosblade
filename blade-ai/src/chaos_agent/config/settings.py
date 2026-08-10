@@ -426,6 +426,10 @@ class Settings(BaseSettings):
     # Server配置
     server_port: int = 8089                   # BLADE_AI_SERVER_PORT
     server_host: str = "0.0.0.0"              # BLADE_AI_SERVER_HOST
+    # API 鉴权令牌：非空时 server 要求每个请求携带
+    # Authorization: Bearer <server_token>（TokenAuthMiddleware）；
+    # 空 = 不启用鉴权（默认，兼容 loopback / 内嵌 server 场景）。
+    server_token: str = ""                    # BLADE_AI_SERVER_TOKEN
 
     # Skill配置
     skills_dir: Path = Path("~/.blade-ai/skills")  # BLADE_AI_SKILLS_DIR，运行时通过 get_skills_dir() 动态解析
@@ -435,7 +439,7 @@ class Settings(BaseSettings):
     chaosblade_vendor_dir: Path = Path("~/.blade-ai/vendor")  # BLADE_AI_CHAOSBLADE_VENDOR_DIR
 
     # 确认开关
-    confirmation_required: bool = True        # BLADE_AI_CONFIRMATION_REQUIRED
+    confirmation_required: bool = False       # BLADE_AI_CONFIRMATION_REQUIRED，默认 auto（自动模式）
 
     # 经验自进化开关
     self_evolution: bool = False              # BLADE_AI_SELF_EVOLUTION
@@ -457,6 +461,28 @@ class Settings(BaseSettings):
     # 也是隐私边界：减小可缩小上传 LLM 的对话窗口
     postmortem_max_messages: int = 100         # BLADE_AI_POSTMORTEM_MAX_MESSAGES
 
+    # 通用 GitHub PAT（public_repo 即可），issue 上报只是它的第一个
+    # 用途，后续其他 GitHub 相关能力复用同一个 token。
+    # 演练失败上报 —— token 即开关：
+    # 配置了 token 就开（失败演练的事后分析 + 脱敏执行记录摘要自动
+    # 发布为 chaosblade-io/chaosblade 的 issue），没配置就是关，
+    # 不设独立的 enabled 字段。
+    #
+    # ⚠️ 隐私：issue 发布到 PUBLIC 仓库，内容**永久公开、可搜索**。
+    #   正文已做脱敏（token/password/Authorization/kubeconfig 内容清洗）
+    #   且只嵌摘要（完整执行记录只留本地），但仍会包含故障类型、
+    #   验证结论等演练元数据。涉及敏感业务时删掉 token 即关闭。
+    # 空值 = 上报功能关闭，不发布、不留档。
+    github_token: str = Field(
+        default="",
+        validation_alias=AliasChoices("BLADE_AI_GITHUB_TOKEN", "GITHUB_TOKEN"),
+    )  # BLADE_AI_GITHUB_TOKEN / GITHUB_TOKEN
+    issue_report_repo: str = "chaosblade-io/chaosblade"  # BLADE_AI_ISSUE_REPORT_REPO
+    # 网络隔离环境（堡垒机/air-gapped）快速放弃，绝不阻塞演练收尾
+    issue_report_timeout_seconds: int = 15      # BLADE_AI_ISSUE_REPORT_TIMEOUT_SECONDS
+    # 每机每日发布上限，防止异常循环刷上游仓库
+    issue_report_daily_cap: int = 5             # BLADE_AI_ISSUE_REPORT_DAILY_CAP
+
     # 工具路径 (blade_path 使用 get_bundled_blade_path() 自动检测内嵌/系统 blade)
     blade_path: str = ""                    # BLADE_AI_BLADE_PATH, 空值则自动检测
     kubectl_path: str = "kubectl"             # BLADE_AI_KUBECTL_PATH
@@ -471,7 +497,7 @@ class Settings(BaseSettings):
 
     # Kubewiz 连接模式配置（网络隔离场景下通过 kubewiz 通道连接集群）
     # 显式通道覆盖开关：空=按字段自动推断，非空=强制指定通道（唯一标准）
-    kube_connection_mode: str = ""            # BLADE_AI_KUBE_CONNECTION_MODE ("" | "kubeconfig" | "kubewiz_k8s" | "kubewiz_host" | "ssh")
+    kube_connection_mode: str = "kubeconfig"   # BLADE_AI_KUBE_CONNECTION_MODE ("" | "kubeconfig" | "kubewiz_k8s" | "kubewiz_host" | "ssh")
     kubewiz_url: str = ""                      # BLADE_AI_KUBEWIZ_URL (kubewiz-core 服务地址，blade 用)
     kubewiz_cluster_uuid: str = ""             # BLADE_AI_KUBEWIZ_CLUSTER_UUID (目标集群 UUID)
     kubewiz_token: str = ""                    # BLADE_AI_KUBEWIZ_TOKEN (认证 token，blade 用)

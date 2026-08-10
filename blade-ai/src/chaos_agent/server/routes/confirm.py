@@ -38,8 +38,6 @@ async def confirm_task(task_id: str, request: ConfirmRequest, req: Request):
         resume_value = "approved" if request.action == "approve" else "rejected"
         await agents["pipeline"].ainvoke(Command(resume=resume_value), config)
 
-        new_state = "injecting" if request.action == "approve" else "cancelled"
-
         return JSONEnvelope.ok(
             data={
                 "task_id": task_id,

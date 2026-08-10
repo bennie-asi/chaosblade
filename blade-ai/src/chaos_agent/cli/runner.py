@@ -19,6 +19,10 @@ from chaos_agent.agent.result.operation_summary import build_operation_record
 from chaos_agent.agent.state_mgmt.state_builders import build_inject_initial_state
 from chaos_agent.agent.streaming import StreamEvent, parse_stream_events
 from chaos_agent.config.settings import settings
+from chaos_agent.persistence.task_identity import (
+    new_inject_task_id,
+    new_recover_task_id,
+)
 from chaos_agent.memory.operation_summary_writer import write_operation_summary
 from chaos_agent.models.schemas import JSONEnvelope, ResponseCode, build_inject_envelope
 from chaos_agent.observability.status_tracker import (
@@ -212,7 +216,7 @@ class AgentRunner:
         if kwargs.get("profile"):
             settings.kubewiz_profile = kwargs["profile"]
 
-        task_id = f"task-{uuid.uuid4()}"
+        task_id = new_inject_task_id()
         tui_session_id = kwargs.get("tui_session_id", "") or ""
 
         # Build initial state. FaultSpec is the single source of truth
@@ -523,7 +527,7 @@ class AgentRunner:
         if kwargs.get("profile"):
             settings.kubewiz_profile = kwargs["profile"]
 
-        task_id = f"task-{uuid.uuid4()}"
+        task_id = new_inject_task_id()
         tui_session_id = kwargs.get("tui_session_id", "") or ""
 
         # Same single-source-of-truth pattern as inject_stream: FaultSpec
@@ -875,7 +879,7 @@ class AgentRunner:
             # ── Phase 2: Pipeline Graph (inject only) ──────────────
             if confirmed == "inject" and iv.get("fault_spec"):
                 pipeline_started = True
-                task_id = iv.get("task_id", f"task-{uuid.uuid4()}")
+                task_id = iv.get("task_id", "") or new_inject_task_id()
                 pipeline_task_id = task_id
                 handoff = iv.get("handoff_summary", "")
                 tui_sid = iv.get("tui_session_id", "") or session_id
@@ -1136,7 +1140,7 @@ class AgentRunner:
             yield StreamEvent(type="error", content=f"Resume failed: {e}", task_id=task_id)
         finally:
             done_event.set()
-            unsubscribe(task_id)
+            unsubscribe(task_id, status_queue)
             try:
                 printer_task.cancel()
             except Exception:
@@ -1344,7 +1348,7 @@ class AgentRunner:
         # Recover gets its own task record file, cross-referenced back to inject
         # via parent_task_id. The langgraph thread_id stays = inject_task_id so
         # the recover graph can read inject's checkpoint.
-        record_task_id = f"task-{uuid.uuid4()}"
+        record_task_id = new_recover_task_id()
         config = {"configurable": {"thread_id": inject_task_id}, "recursion_limit": settings.recursion_limit}
 
         # Subscribe to status events emitted by recover nodes (keyed by state.task_id)
@@ -1424,8 +1428,11 @@ class AgentRunner:
             if recover_data.get("result") == "failed":
                 error_msg = recover_data.get("error") or "Recovery verification failed"
                 recover_fail_data = {**recover_data, "error": error_msg}
+                # RECOVERY_FAILED (4xxx operational), matching the remote
+                # path in cli/client.py — the legacy raw 5000 surfaced an
+                # operational failure under an internal-error code.
                 return JSONEnvelope.fail(
-                    code=ResponseCode.NO_BLADE_UID,
+                    code=ResponseCode.RECOVERY_FAILED,
                     message=error_msg,
                     data=recover_fail_data,
                 )
@@ -1654,7 +1661,7 @@ class AgentRunner:
         Worse, partial init left aiosqlite worker threads dangling so
         the process hung after the traceback.
         Init only what the response needs: the SkillRegistry, so we
-        can count ``supported_fault_count``. No LLM, no checkpointer,
+        can count ``skill_count``. No LLM, no checkpointer,
         no prerequisites.
         """
         if self._registry is None:
@@ -1663,6 +1670,6 @@ class AgentRunner:
         return JSONEnvelope.ok(
             data={
                 "version": __version__,
-                "supported_fault_count": len(self._registry),
+                "skill_count": len(self._registry),
             },
         )

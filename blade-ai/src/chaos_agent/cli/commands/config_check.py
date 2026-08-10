@@ -2,8 +2,9 @@
 
 Mirrors the Python TUI's missing-fields check in ``tui/app.py:160-170``
 verbatim — three fields, ``(val or "").strip()`` rule, same field
-ordering. The TS TUI launcher calls this before deciding whether to
-spawn ``blade-ai config-wizard``.
+ordering. A machine-readable gate for scripts and CI
+(``blade-ai config-check && ...``); the interactive TUIs use the
+HTTP ``/api/v1/wizard/needs-setup`` endpoint instead.
 
 Why not let TS read ``~/.blade-ai/config.json`` directly:
     Python's ``Settings`` class layers env > config.json > built-in

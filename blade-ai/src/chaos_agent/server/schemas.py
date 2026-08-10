@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 
 # Re-export public types for backward compatibility
 from chaos_agent.models.schemas import JSONEnvelope, ResponseCode, ResponseStatus  # noqa: F401
+from chaos_agent import __version__ as _PKG_VERSION
 from chaos_agent.agent.spec.fault_registry import aggregate_cluster_scoped, aggregate_scopes
 
 
@@ -201,11 +202,13 @@ class CapabilitiesListResponse(BaseModel):
 class VersionResponse(BaseModel):
     """Response data for version command."""
 
-    version: str = "0.1.0"
+    # Default derives from the package's single source of truth
+    # (chaos_agent.__version__) — no lockstep edit on version bump.
+    version: str = _PKG_VERSION
     build_time: str = ""
     git_commit: str = ""
     blade_version: str = ""
     kubectl_version: str = ""
-    supported_fault_count: int = 0
+    skill_count: int = 0
 
 

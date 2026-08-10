@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import uuid
 
 from fastapi import Request
 from fastapi.responses import StreamingResponse
@@ -16,6 +15,7 @@ from chaos_agent.memory.session_finalizer import (
     RESULT_SUMMARY_DATA_ENVELOPE,
     finalize_inject_session,
 )
+from chaos_agent.persistence.task_identity import new_inject_task_id
 from chaos_agent.models.schemas import JSONEnvelope
 from chaos_agent.server.routes import inject_router
 from chaos_agent.server.schemas import InjectRequest
@@ -35,7 +35,7 @@ async def inject_stream(request: InjectRequest, req: Request):
     - result: Final result envelope
     - error: Error message
     """
-    task_id = f"task-{uuid.uuid4()}"
+    task_id = new_inject_task_id()
     agents = req.app.state.agents
     task_tracker = req.app.state.task_tracker
 

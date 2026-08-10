@@ -52,6 +52,9 @@ _SAVABLE_KEYS: frozenset[str] = frozenset(
                        # route refuses it on purpose. The wizard path
                        # is the canonical entry for first-run secret
                        # capture.
+        "github_token",  # same rationale: optional wizard
+                       # step, secret, doubles as the issue-report
+                       # on/off switch.
         "kubeconfig_path",
         "kube_context",
         "confirmation_required",

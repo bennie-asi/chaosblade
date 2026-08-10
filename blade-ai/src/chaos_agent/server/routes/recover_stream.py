@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import time
-import uuid
 
 from fastapi import Request
 from fastapi.responses import StreamingResponse
@@ -15,6 +14,7 @@ from chaos_agent.memory.session_finalizer import (
     RESULT_SUMMARY_RECOVER_PAYLOAD,
     finalize_recover_session,
 )
+from chaos_agent.persistence.task_identity import new_recover_task_id
 from chaos_agent.server.routes import recover_router
 from chaos_agent.server.routes.recover_common import (
     RecoverSetupError,
@@ -40,7 +40,7 @@ async def recover_stream(request: RecoverRequest, req: Request):
     - done: Stream complete sentinel
     """
     inject_task_id = request.task_id
-    record_task_id = f"task-{uuid.uuid4()}"
+    record_task_id = new_recover_task_id()
     agents = req.app.state.agents
     task_tracker = req.app.state.task_tracker
     req_id = getattr(req.state, "request_id", "")
