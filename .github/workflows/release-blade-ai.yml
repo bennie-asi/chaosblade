@@ -177,6 +177,7 @@ jobs:
             target: linux_amd64
             node_arch: linux-x64
             node_ext: tar.xz
+            pkg_ext: tar.gz
             runner: ubuntu-latest
             use_docker: true
           - os: linux
@@ -184,6 +185,7 @@ jobs:
             target: linux_arm64
             node_arch: linux-arm64
             node_ext: tar.xz
+            pkg_ext: tar.gz
             runner: ubuntu-24.04-arm
             use_docker: true
           - os: darwin
@@ -191,13 +193,28 @@ jobs:
             target: darwin_amd64
             node_arch: darwin-x64
             node_ext: tar.gz
+            pkg_ext: tar.gz
             runner: macos-15
           - os: darwin
             arch: arm64
             target: darwin_arm64
             node_arch: darwin-arm64
             node_ext: tar.gz
+            pkg_ext: tar.gz
             runner: macos-15
+          # Windows client. No ChaosBlade vendor bundle (upstream ships
+          # no Windows agent) — fault injection still works end-to-end
+          # because all carriers run on the REMOTE target: kubectl-native
+          # control-plane faults, `kubectl exec <pod> -- blade create`
+          # fallback, and ssh/kubewiz host transports. Locally only
+          # kubectl.exe is expected on PATH.
+          - os: windows
+            arch: x64
+            target: windows_x64
+            node_arch: win-x64
+            node_ext: zip
+            pkg_ext: zip
+            runner: windows-latest
 
     runs-on: ${{ matrix.runner }}
     steps:
@@ -216,6 +233,11 @@ jobs:
         run: ls -la blade-ai/tui/dist/cli.js
 
       - name: Download ChaosBlade tool
+        # No upstream Windows agent release — skip on Windows. The spec
+        # tolerates an absent vendor dir (blade-ai.spec skips bundling),
+        # and injection falls back to kubectl-native / kubectl-exec /
+        # remote-transport carriers.
+        if: matrix.os != 'windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -251,23 +273,30 @@ jobs:
           mkdir -p blade-ai/vendor/node
           if [ "$EXT" = "tar.xz" ]; then
             tar -xJf /tmp/node-archive -C /tmp
-            cp "/tmp/${BASENAME}/bin/node" blade-ai/vendor/node/node
+          elif [ "$EXT" = "zip" ]; then
+            # windows-latest: bsdtar (C:\Windows\System32\tar) reads zip.
+            tar -xf /tmp/node-archive -C /tmp
           else
             tar -xzf /tmp/node-archive -C /tmp
-            cp "/tmp/${BASENAME}/bin/node" blade-ai/vendor/node/node
           fi
-          chmod +x blade-ai/vendor/node/node* 2>/dev/null || true
-          # Bundle libstdc++/libgcc_s that this Node was linked against.
-          # On old-glibc targets (Alinux 3 / RHEL 8) the system libstdc++
-          # lacks GLIBCXX_3.4.30; shipping Node's own copy ensures it works.
-          mkdir -p blade-ai/vendor/node/lib
-          for lib in $(ldd blade-ai/vendor/node/node 2>/dev/null | grep -oP '/\S+lib(stdc\+\+|gcc_s)\S+' || true); do
-            [ -f "$lib" ] && cp -L "$lib" blade-ai/vendor/node/lib/ && echo "Bundled: $lib"
-          done
-          ls -la blade-ai/vendor/node/lib/ 2>/dev/null || true
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            # Windows archive lays node.exe at the top level (no bin/).
+            cp "/tmp/${BASENAME}/node.exe" blade-ai/vendor/node/node.exe
+          else
+            cp "/tmp/${BASENAME}/bin/node" blade-ai/vendor/node/node
+            chmod +x blade-ai/vendor/node/node
+            # Bundle libstdc++/libgcc_s that this Node was linked against.
+            # On old-glibc targets (Alinux 3 / RHEL 8) the system libstdc++
+            # lacks GLIBCXX_3.4.30; shipping Node's own copy ensures it works.
+            mkdir -p blade-ai/vendor/node/lib
+            for lib in $(ldd blade-ai/vendor/node/node 2>/dev/null | grep -oP '/\S+lib(stdc\+\+|gcc_s)\S+' || true); do
+              [ -f "$lib" ] && cp -L "$lib" blade-ai/vendor/node/lib/ && echo "Bundled: $lib"
+            done
+            ls -la blade-ai/vendor/node/lib/ 2>/dev/null || true
+          fi
           echo "blade-ai/vendor/node contents:"
           ls -laR blade-ai/vendor/node
-          file blade-ai/vendor/node/node* || true
+          file blade-ai/vendor/node/node* 2>/dev/null || true
 
       # ── Linux: build inside Debian Bullseye Docker (glibc 2.31 baseline) ─
       #
@@ -427,16 +456,29 @@ jobs:
         run: |
           codesign --force --deep --sign - blade-ai/dist/blade-ai/blade-ai
 
-      - name: Package Unix archive
+      - name: Package archive
         shell: bash
         run: |
+          set -euo pipefail
           PLATFORM="${{ matrix.os }}-${{ matrix.arch }}"
-          tar -czf "blade-ai-${PLATFORM}.tar.gz" -C blade-ai/dist blade-ai
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            # Git-Bash's tar is GNU tar (no zip write), so use 7z
+            # (preinstalled on windows-latest) with a PowerShell
+            # Compress-Archive fallback. Archive layout stays identical
+            # to the Unix tarballs: ``blade-ai/`` at the root.
+            if command -v 7z >/dev/null 2>&1; then
+              7z a -tzip "blade-ai-${PLATFORM}.zip" "blade-ai/dist/blade-ai" >/dev/null
+            else
+              powershell -NoProfile -Command "Compress-Archive -Path 'blade-ai/dist/blade-ai' -DestinationPath 'blade-ai-${PLATFORM}.zip' -Force"
+            fi
+          else
+            tar -czf "blade-ai-${PLATFORM}.tar.gz" -C blade-ai/dist blade-ai
+          fi
 
       - uses: actions/upload-artifact@v6
         with:
           name: blade-ai-${{ matrix.os }}-${{ matrix.arch }}
-          path: blade-ai-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          path: blade-ai-${{ matrix.os }}-${{ matrix.arch }}.${{ matrix.pkg_ext }}
           if-no-files-found: error
           retention-days: 1
 
@@ -453,8 +495,10 @@ jobs:
         shell: bash
         run: |
           cd artifacts
-          find . -type f -name "*.tar.gz" -exec mv {} . \;
-          sha256sum *.tar.gz > checksums.txt
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} . \;
+          shopt -s nullglob
+          files=(*.tar.gz *.zip)
+          sha256sum "${files[@]}" > checksums.txt
           cat checksums.txt
 
       # Mirror the release artifacts to Alibaba Cloud OSS so users in
@@ -474,14 +518,14 @@ jobs:
           RELEASE_TAG: ${{ needs.verify-versions.outputs.tag }}
         run: |
           echo "Uploading blade-ai packages to OSS..."
-          for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
-            package_file="artifacts/blade-ai-${platform}.tar.gz"
+          for entry in linux-amd64.tar.gz linux-arm64.tar.gz darwin-amd64.tar.gz darwin-arm64.tar.gz windows-x64.zip; do
+            package_file="artifacts/blade-ai-${entry}"
             if [[ -f "$package_file" ]]; then
-              echo "Uploading $platform package..."
-              ossutil cp -f "$package_file" "oss://chaosblade/blade-ai/github/${RELEASE_TAG}/blade-ai-${platform}.tar.gz"
-              echo "✅ $platform package uploaded successfully"
+              echo "Uploading ${entry} package..."
+              ossutil cp -f "$package_file" "oss://chaosblade/blade-ai/github/${RELEASE_TAG}/blade-ai-${entry}"
+              echo "✅ ${entry} package uploaded successfully"
             else
-              echo "❌ $platform package not found: $package_file"
+              echo "❌ ${entry} package not found: $package_file"
             fi
           done
           if [[ -f "artifacts/checksums.txt" ]]; then
@@ -500,11 +544,17 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/*.tar.gz
+            artifacts/*.zip
             artifacts/checksums.txt
           body: |
             ## blade-ai ${{ needs.verify-versions.outputs.tag }}
 
             Bundles ChaosBlade tool v${{ env.CHAOSBLADE_VERSION }} for Linux / macOS.
+            The Windows client ships without the blade binary (no upstream
+            Windows agent) — injection there runs through kubectl-native
+            control-plane faults, `kubectl exec` into cluster tool pods, and
+            remote ssh/kubewiz host transports. `kubectl.exe` on PATH is the
+            only local prerequisite.
 
             ### Installation
 
@@ -518,6 +568,11 @@ jobs:
             curl -fsSL https://chaosblade.io/install-agent.sh | bash -s -- --version ${{ needs.verify-versions.outputs.version }}
             ```
 
+            **Windows (PowerShell):**
+            ```powershell
+            irm https://chaosblade.io/install-agent.ps1 | iex
+            ```
+
             ### 🌐 OSS Download Links
             Alternative download links from Alibaba Cloud OSS (faster in mainland China):
 
@@ -525,6 +580,7 @@ jobs:
             - [blade-ai-linux-arm64.tar.gz](https://chaosblade.oss-cn-hangzhou.aliyuncs.com/blade-ai/github/${{ needs.verify-versions.outputs.tag }}/blade-ai-linux-arm64.tar.gz)
             - [blade-ai-darwin-amd64.tar.gz](https://chaosblade.oss-cn-hangzhou.aliyuncs.com/blade-ai/github/${{ needs.verify-versions.outputs.tag }}/blade-ai-darwin-amd64.tar.gz)
             - [blade-ai-darwin-arm64.tar.gz](https://chaosblade.oss-cn-hangzhou.aliyuncs.com/blade-ai/github/${{ needs.verify-versions.outputs.tag }}/blade-ai-darwin-arm64.tar.gz)
+            - [blade-ai-windows-x64.zip](https://chaosblade.oss-cn-hangzhou.aliyuncs.com/blade-ai/github/${{ needs.verify-versions.outputs.tag }}/blade-ai-windows-x64.zip)
             - [checksums.txt](https://chaosblade.oss-cn-hangzhou.aliyuncs.com/blade-ai/github/${{ needs.verify-versions.outputs.tag }}/checksums.txt) - SHA256 checksums
 
             **Install from the OSS mirror:**

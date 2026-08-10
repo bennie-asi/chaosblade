@@ -28,8 +28,11 @@ on Linux). CI's ``release.yml`` downloads the correct tarball from
 ``github.com/chaosblade-io/chaosblade/releases`` for each matrix
 target and extracts it into ``vendor/chaosblade/`` BEFORE pyinstaller
 runs, so this spec just bundles whatever's there. Windows skips the
-vendor bundle entirely — chaosblade has no Windows release; the
-Windows binary is informational/TUI-only.
+vendor bundle entirely — chaosblade has no Windows release. Fault
+injection still works from a Windows client: all carriers execute on
+the REMOTE target (kubectl-native control-plane faults, ``kubectl
+exec`` into cluster tool pods, ssh/kubewiz host transports), so no
+local blade binary is required.
 """
 
 import os

@@ -35,28 +35,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# ── Windows not yet supported ──────────────────────────────────────────────────
-#
-# The release-blade-ai.yml build matrix currently ships only
-# linux-{amd64,arm64} and darwin-{amd64,arm64} tarballs — there is no
-# blade-ai-windows-x64.zip published for any tag. Running the rest of
-# this script would just fetch a 404 and corrupt the user's terminal
-# with red errors. Bail out early with an explicit message until a
-# Windows matrix entry lands.
-#
-# Track restoration in:
-#   chaosblade/.github/workflows/release-blade-ai.yml (build matrix)
-#   chaosblade/blade-ai/blade-ai.spec  (Windows codepath audit)
-Write-Host ""
-Write-Host "  ✗ blade-ai does not yet ship a Windows binary." -ForegroundColor Red
-Write-Host "    Linux / macOS users: use the bash installer instead:" -ForegroundColor Yellow
-Write-Host "      curl -fsSL https://chaosblade.io/install-agent.sh | bash" -ForegroundColor Yellow
-Write-Host "    Windows users: please track" -ForegroundColor Yellow
-Write-Host "      https://github.com/chaosblade-io/chaosblade/issues" -ForegroundColor Yellow
-Write-Host "    for Windows support, or build from source via WSL2." -ForegroundColor Yellow
-Write-Host ""
-exit 1
-
 $ToolName = "blade-ai"
 
 # Version resolution order:
@@ -163,8 +141,18 @@ $Arch = if ([System.Environment]::Is64BitOperatingSystem) {
 }
 
 Write-Step "Detecting system architecture..."
-$Platform = "windows-$Arch"
-Write-Ok "Detected $Platform"
+# The release matrix ships no native Windows ARM64 bundle (PyInstaller
+# cannot cross-compile and GitHub has no Windows ARM runners). On
+# ARM64 we install the x64 package, which runs under Windows-on-ARM's
+# Prism x64 emulation (analogous to macOS Rosetta). Drop this fallback
+# once a windows-arm64 matrix entry lands.
+$PkgArch = if ($Arch -eq "arm64") { "x64" } else { $Arch }
+$Platform = "windows-$PkgArch"
+if ($PkgArch -ne $Arch) {
+    Write-Ok "Detected $Arch — using the windows-$PkgArch package (runs via x64 emulation)"
+} else {
+    Write-Ok "Detected $Platform"
+}
 
 # ── Resolve version (lazy) ─────────────────────────────────────────────────────
 # At this point either:
@@ -283,12 +271,16 @@ Set-Content -Path $ManifestPath -Value $Manifest
 # ── PATH configuration ────────────────────────────────────────────────────────
 Write-Step "Configuring PATH..."
 
+# The zip expands to ``$InstallDir\blade-ai\`` (archive layout mirrors
+# the Unix tarballs: ``blade-ai/`` at the root), so the directory that
+# goes on PATH is the ``blade-ai`` subfolder — NOT $InstallDir itself.
+$BinDir = Join-Path $InstallDir "blade-ai"
 $UserPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
-if ($UserPath -notlike "*$InstallDir*") {
-    $NewPath = "$UserPath;$InstallDir"
+if ($UserPath -notlike "*$BinDir*") {
+    $NewPath = "$UserPath;$BinDir"
     [System.Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
     # Update current session PATH too
-    $env:Path = "$env:Path;$InstallDir"
+    $env:Path = "$env:Path;$BinDir"
 
     # Update manifest
     $ManifestObj = Get-Content $ManifestPath | ConvertFrom-Json
@@ -308,7 +300,7 @@ Write-Host ""
 Write-Host "  ✨ blade-ai $Version installed!" -ForegroundColor Green
 Write-Host ""
 
-$BladeAiExe = Join-Path $InstallDir "blade-ai.exe"
+$BladeAiExe = Join-Path (Join-Path $InstallDir "blade-ai") "blade-ai.exe"
 if (Test-Path $BladeAiExe) {
     Write-Host "  Start using blade-ai:" -ForegroundColor White
     Write-Host "    blade-ai" -ForegroundColor Cyan

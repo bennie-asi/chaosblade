@@ -151,19 +151,29 @@ if ($Version) {
 $UserPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
 if ($null -eq $UserPath) { $UserPath = "" }
 
+# install.ps1 adds the ``blade-ai`` SUBFOLDER of the install dir to PATH
+# (the zip extracts to $InstallDir\blade-ai\). An older layout added
+# $InstallDir itself — match both so upgrades from either layout clean
+# up completely.
+$PathTargets = @($InstallDir, (Join-Path $InstallDir "blade-ai")) |
+    Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
+
 $PathContainsInstallDir = $false
-if ($InstallDir -and $UserPath) {
-    # Split by ';' and compare each entry exactly to InstallDir
+$MatchedPathTarget = $null
+if ($UserPath) {
+    # Split by ';' and compare each entry exactly to the targets
     # (case-insensitive on Windows). Avoids partial matches like
     # "C:\Programs\blade-ai-old" colliding with "C:\Programs\blade-ai".
-    $PathEntries = $UserPath -split ';' | Where-Object { $_ -ne "" }
-    foreach ($entry in $PathEntries) {
+    foreach ($entry in ($UserPath -split ';' | Where-Object { $_ -ne "" })) {
         $trimmed = $entry.TrimEnd('\')
-        $target = $InstallDir.TrimEnd('\')
-        if ([string]::Equals($trimmed, $target, [StringComparison]::OrdinalIgnoreCase)) {
-            $PathContainsInstallDir = $true
-            break
+        foreach ($t in $PathTargets) {
+            if ([string]::Equals($trimmed, $t, [StringComparison]::OrdinalIgnoreCase)) {
+                $PathContainsInstallDir = $true
+                $MatchedPathTarget = $entry
+                break
+            }
         }
+        if ($PathContainsInstallDir) { break }
     }
 }
 
@@ -192,7 +202,7 @@ if (Test-Path $InstallDir) {
 
 # PATH line
 if ($PathContainsInstallDir) {
-    Write-Host "  User PATH:   will remove '$InstallDir' entry (backup at $ReceiptDir\path-backup.txt)" -ForegroundColor White
+    Write-Host "  User PATH:   will remove '$MatchedPathTarget' entry (backup at $ReceiptDir\path-backup.txt)" -ForegroundColor White
 } else {
     Write-Host "  User PATH:   no entry to remove" -ForegroundColor DarkGray
 }
@@ -284,13 +294,17 @@ if (Test-Path $InstallDir) {
 if ($PathContainsInstallDir) {
     try {
         $newEntries = @()
-        $target = $InstallDir.TrimEnd('\')
         foreach ($entry in ($UserPath -split ';')) {
             if ([string]::IsNullOrEmpty($entry)) { continue }
             $trimmed = $entry.TrimEnd('\')
-            if (-not [string]::Equals($trimmed, $target, [StringComparison]::OrdinalIgnoreCase)) {
-                $newEntries += $entry
+            $isTarget = $false
+            foreach ($t in $PathTargets) {
+                if ([string]::Equals($trimmed, $t, [StringComparison]::OrdinalIgnoreCase)) {
+                    $isTarget = $true
+                    break
+                }
             }
+            if (-not $isTarget) { $newEntries += $entry }
         }
         $newPath = $newEntries -join ';'
         [System.Environment]::SetEnvironmentVariable("Path", $newPath, "User")
@@ -298,12 +312,19 @@ if ($PathContainsInstallDir) {
         # Update current session PATH too so the change is visible
         # without a logoff/login.
         $sessionEntries = ($env:Path -split ';') | Where-Object {
-            $t = $_.TrimEnd('\')
-            -not [string]::Equals($t, $target, [StringComparison]::OrdinalIgnoreCase)
+            $t2 = $_.TrimEnd('\')
+            $hit = $false
+            foreach ($t in $PathTargets) {
+                if ([string]::Equals($t2, $t, [StringComparison]::OrdinalIgnoreCase)) {
+                    $hit = $true
+                    break
+                }
+            }
+            -not $hit
         }
         $env:Path = ($sessionEntries -join ';')
 
-        Write-Ok "Removed '$InstallDir' from User PATH"
+        Write-Ok "Removed '$MatchedPathTarget' from User PATH"
         Write-Info "(Open a new terminal for other apps to see the change.)"
     } catch {
         Write-Warn "Could not update User PATH ($_)"
