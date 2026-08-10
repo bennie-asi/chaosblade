@@ -95,6 +95,10 @@ class K8sNativeProvider:
     supported_targets = (
         "pod", "finalizer", "replicas", "schedule", "pvc",
         "dns", "image", "probe", "volume", "cni", "endpoint",
+        # resources: workload spec 资源配额类故障（limits 单位/数值篡改，
+        # kubectl patch 注入）；file: 容器内文件类故障（kubectl exec 命令
+        # 模式注入，见上方 inject_command_subcommands）
+        "resources", "file",
     )
     supported_actions = (
         "patch", "cordon", "taint", "delete", "drain", "scale",
@@ -297,10 +301,10 @@ class K8sNativeProvider:
         return (
             "\n### Injection Method Note\n"
             "Injection was performed via kubectl-native operations (no ChaosBlade). "
-            "Verify the configuration change directly via kubectl.\n\n"
+            "Verify the configuration change directly via the bound cluster query tools.\n\n"
             "**NOTE**: Some minimal container images lack common shell utilities (top, ps, netstat, etc.). "
-            "If kubectl(subcommand='exec', ...) returns empty output or \"command not found\", do NOT retry — "
-            "use kubectl(subcommand='describe', ...) instead.\n"
+            "If a container exec check returns empty output or \"command not found\", do NOT retry — "
+            "use a cluster API describe-style check instead.\n"
         )
 
     def recover_layer2_context(
@@ -316,7 +320,7 @@ class K8sNativeProvider:
             )
             layer2_instruction = (
                 "This is a non-ChaosBlade fault recovery. "
-                "Verify the fault effect has been removed using kubectl tools.\n"
+                "Verify the fault effect has been removed using the bound cluster query tools.\n"
             )
             return layer1_context, layer2_instruction
 
@@ -329,7 +333,7 @@ class K8sNativeProvider:
             "PHASE TRANSITION: Layer 1 (recovery execution) is COMPLETE. "
             "You are now in Layer 2 (VERIFICATION). "
             "DO NOT execute more recovery actions — only VERIFY the fault effect is removed. "
-            "Use kubectl only to CHECK status, not to modify resources. "
+            "Use the bound cluster query tools only to CHECK status, not to modify resources. "
             "Output RECOVERY_VERIFICATION_RESULT format, NOT RECOVERY_EXECUTION_RESULT.\n"
         )
         return layer1_context, layer2_instruction

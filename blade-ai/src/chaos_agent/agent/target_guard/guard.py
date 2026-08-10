@@ -25,9 +25,13 @@ Output:
     5. **carrier identity drift** — the ``DriftPolicy`` for the target's
        profile compares scope / namespace / names / labels (k8s) or host
        name (host).
-    6. **blade_target lock** — only when ``approved.lock_fault_type`` is
-       True AND both sides carry a blade_target. Method switches
-       (kubectl-native ↔ blade) are intentionally NOT drift.
+    6. **fault-type checks** — a scope change crossing FAULT FAMILIES
+       (``_cross_family_scope_change``) needs a usable blade_target as the
+       only remaining discriminator; then the **blade_target lock**
+       (``_fault_type_lock_drift``) compares fault types when
+       ``approved.lock_fault_type`` is True AND both sides carry a
+       blade_target. Method switches (kubectl-native ↔ blade) are
+       intentionally NOT drift.
 
 Why low-confidence is treated specially: the classifier can fail in
 two ways. ``UNKNOWN`` means it gave up entirely (malformed args, new
@@ -254,9 +258,10 @@ def target_drift_guard(
             verdict=GuardVerdict.REJECT_BANNED,
             reason=f"host-escape primitive not cleared: {escape_detail}",
             effective=effective,
-            # No "this is not a dead-end" coda here — ``decision_to_feedback``
-            # appends it for every retryable verdict, so adding it would
-            # duplicate the sentence in the ToolMessage the model reads.
+            # No "this is not a dead-end" coda here — the screener's rejection
+            # renderer (``tool_screener._format_rejection_for_llm``) appends it
+            # for every retryable verdict, so adding it would duplicate the
+            # sentence in the ToolMessage the model reads.
             suggestion=escape_suggestion,
         )
     if effective.scope == SCOPE_UNKNOWN:
@@ -342,7 +347,7 @@ def target_drift_guard(
     if decision is not None:
         return decision
 
-    # ---- 6. Blade target lock (fault TYPE, not method) — carrier-agnostic --
+    # ---- 6. Fault-type checks (cross-family scope change + blade lock) ----
     # A scope change that crosses FAULT FAMILIES (host ↔ python) survives step 4
     # and carries no comparable identity in step 5, so the fault type is the last
     # discriminator: require it to be usable before trusting it. Same-family

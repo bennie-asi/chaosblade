@@ -66,28 +66,26 @@ def submit_recover_verification(
     layer2_status: str,
     layer2_details: str = "",
     baseline_used: bool = False,
+    residual_attribution: str = "none",
     checklist: list = None,
     warnings: list = None,
 ) -> str:
-    """Recover verifier ONLY. Submit the FINAL recovery verdict and end verification.
-
-    Call this as your LAST action once you have verified (via kubectl) the
-    CURRENT post-recovery state. Do NOT also emit a free-text
-    RECOVERY_VERIFICATION_RESULT — this structured call IS the verdict.
-    Cleanup of debug pods is handled automatically.
+    """Recover verifier ONLY. Submit the FINAL recovery verdict and end
+    verification. Call as your LAST action after observing the CURRENT
+    post-recovery state — this call IS the verdict (no free-text
+    RECOVERY_VERIFICATION_RESULT).
 
     Inputs:
       - overall: "recovered" | "partial" | "unrecovered"
-          recovered = fault effect fully removed; partial = mostly removed;
-          unrecovered = fault effect still present.
       - layer2_status: "passed" | "failed" | "partial" | "skipped"
-          (passed = recovery confirmed; failed = fault still active).
+          (passed = fault effect absent; a converging tail does not block it)
       - layer2_details: one-line evidence summary.
-      - baseline_used: true if you compared against the pre-injection baseline.
-      - checklist: list of {"step": int, "status":
-          "passed|failed|skipped|partial", "evidence": str}, one per recovery
-          verification step.
-      - warnings: optional list of warning strings.
+      - baseline_used: compared against the pre-injection baseline.
+      - residual_attribution: "none" | "recovery_process" | "fault_residual"
+          | "mixed" ("recovered" + fault-attributed residuals: downgraded).
+      - checklist: [{"step": int, "status": "passed|failed|skipped|partial",
+          "evidence": str}], one per verification step.
+      - warnings: optional warning strings.
 
     Output: confirmation string (the verdict is taken from these args).
     """

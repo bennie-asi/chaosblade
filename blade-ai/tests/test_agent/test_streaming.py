@@ -140,6 +140,39 @@ class TestParseStreamEvent:
         }
         assert parse_stream_event(raw) is None
 
+    def test_parse_terminal_reports_token_dropped(self):
+        """terminal_reports' postmortem LLM tokens must NOT stream either.
+
+        Postmortem generation moved from save_memory to the dedicated
+        terminal_reports node; forgetting to extend the silent set there
+        double-rendered the report markdown (raw tokens as agent text,
+        then the PostmortemSection card).
+        """
+        class FakeChunk:
+            content = "## Summary\n本次实验..."
+
+        raw = {
+            "event": "on_chat_model_stream",
+            "data": {"chunk": FakeChunk()},
+            "tags": ["langsmith:nodes:terminal_reports"],
+            "metadata": {},
+        }
+        assert parse_stream_event(raw) is None
+
+    def test_parse_terminal_reports_thinking_dropped(self):
+        """Reasoning chunks from terminal_reports' LLM are also filtered."""
+        class FakeChunk:
+            content = ""
+            additional_kwargs = {"reasoning_content": "drafting the report..."}
+
+        raw = {
+            "event": "on_chat_model_stream",
+            "data": {"chunk": FakeChunk()},
+            "tags": ["langsmith:nodes:terminal_reports"],
+            "metadata": {},
+        }
+        assert parse_stream_event(raw) is None
+
     def test_parse_intent_reply_token_is_streamed(self):
         """Intent replies remain on the live token stream for the TUI."""
         class FakeChunk:

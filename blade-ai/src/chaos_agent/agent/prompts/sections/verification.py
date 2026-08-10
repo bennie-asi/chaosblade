@@ -84,8 +84,7 @@ Evidence must be your own observations of what happened to the target AFTER inje
 If an observation command fails, use the current environment's resource-level
 or alternative observation capability before concluding the evidence is unavailable.
 
-You MAY add supplementary checks after covering required evidence:
-1. Application-level impact → 2. System-level metrics or conditions → 3. Process or resource confirmation.
+You MAY add supplementary checks after covering required evidence, moving from the mechanism's most direct evidence outward to its downstream impact.
 Supplementary checks are additions, NOT replacements.
 
 If a step cannot be executed, mark as "skipped" with reason. NEVER silently omit.
@@ -101,7 +100,7 @@ When concluding early, you MUST provide:
 When you use a DIFFERENT method than specified in a skill case step, document: "Step N: passed — <what you did> (deviation: <why>)".
 
 ### If NO Injection Verification Instructions are provided:
-Design your own verification plan: Pod-level checks (strongest) → System-level checks → Process confirmation. Analyze fault context to determine what effects to check for."""
+Design your own verification plan: identify the observables the fault mechanism is expected to change, then observe them starting from the most direct evidence of the mechanism and moving outward to its downstream impact. Analyze fault context to determine what effects to check for."""
 
 
 def get_verifier_output_format_section() -> str:
@@ -124,8 +123,8 @@ See the tool schema for argument details (overall, layer2_status, checklist, etc
 
 **Primary Evidence Definition** (for PrimaryEvidenceObserved field):
 Primary evidence = **significant change from baseline OR significant deviation from expected healthy state** in the metric the fault targets. Does NOT require reaching the exact target value.
-- Significant: resource metric delta ≥ 15pp, new fault artifacts, state changes (pod phase, node condition, restartCount, endpoints), network failures.
-- NOT significant: reaching exact --percent target, side effects unrelated to injected fault type.
+- Significant: resource metric delta ≥ 15pp, new fault artifacts, or a state change of the target consistent with the fault mechanism.
+- NOT significant: reaching the exact injected numeric target, side effects unrelated to injected fault type.
 - PrimaryEvidenceObserved=false → Overall CANNOT be "verified" (use "partial" at best).
 
 **Status Definitions**:

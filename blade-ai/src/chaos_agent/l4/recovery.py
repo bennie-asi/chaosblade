@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import uuid
 
 from chaos_agent.l4.adapter import make_trajectory_id
 from chaos_agent.l4.error_mapping import map_to_agent_error
@@ -14,6 +13,7 @@ from chaos_agent.l4.events import (
 )
 from chaos_agent.l4.execution import _CancelRequested
 from chaos_agent.l4.pool import _ChaosAgentPool
+from chaos_agent.persistence.task_identity import new_recover_task_id
 from chaos_agent.l4.schemas import L4AgentError, L4TaskResult
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ class _L4RecoveryMixin:
         inject_state = await pool.inject_graph.aget_state(inject_config)
         checkpoint_values = inject_state.values if inject_state and inject_state.values else {}
 
-        record_task_id = f"task-{uuid.uuid4()}"  # Same naming as CLI/HTTP recover
+        record_task_id = new_recover_task_id()  # Same naming as CLI/HTTP recover
         from chaos_agent.agent.result.task_snapshot import resolve_recover_initial_state
 
         resolution = await resolve_recover_initial_state(

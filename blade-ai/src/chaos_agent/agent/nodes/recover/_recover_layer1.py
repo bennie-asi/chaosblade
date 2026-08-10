@@ -16,6 +16,8 @@ Symbols:
 
 import json
 import logging
+import re
+from pathlib import Path
 
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -108,6 +110,38 @@ def _parse_blade_status_destroyed(raw: str) -> tuple[str, str]:
 
 _RECOVER_BASELINE_TOOL_CALL_ID = "recover_baseline_collector"
 
+# Cache-path reference embedded in compactor truncation notices (both the
+# recent "Full output cached at:" and the historical "Cache:" forms).
+_TRUNCATION_CACHE_RE = re.compile(r"(?:Cache:|Full output cached at:)\s*(\S+)")
+
+# Per-observation budget when restoring a truncated baseline from the
+# compactor cache (the cache holds the FULL pre-compaction output).
+_BASELINE_RESTORE_MAX_CHARS = 4000
+
+
+def _recover_baseline_cache_path(output: str) -> str:
+    """Extract the compactor cache path from a truncated baseline output."""
+    m = _TRUNCATION_CACHE_RE.search(output)
+    return m.group(1) if m else ""
+
+
+def _read_baseline_cache_content(cache_path: str, max_chars: int = _BASELINE_RESTORE_MAX_CHARS) -> str:
+    """Restore a truncated baseline observation from the compactor cache.
+
+    Tool-output-format agnostic: returns the cached original content capped
+    at ``max_chars`` — whatever the observation was (describe output, df,
+    /proc reads, ...). Returns "" when the file is unreadable — the caller
+    falls back to an explicit "evidence incomplete" annotation instead of
+    fabricating baseline content.
+    """
+    try:
+        text = Path(cache_path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.warning("Recover baseline cache read failed for %s: %s", cache_path, exc)
+        return ""
+    return text[:max_chars]
+
+
 # Aggregate set of all synthetic tool_call_ids used for state persistence.
 _RECOVER_SYNTHETIC_TOOL_CALL_IDS = frozenset({
     _RECOVER_BASELINE_TOOL_CALL_ID,
@@ -145,9 +179,33 @@ def _build_recover_baseline_tool_messages(baseline: dict) -> list:
             continue
         desc = obs.get("description", "unknown metric")
         cmd = obs.get("command", "")
-        output = obs["stdout"][:1500]
-        if len(obs["stdout"]) > 1500:
-            output += "\n... (truncated)"
+        raw_out = obs["stdout"]
+        if "TRUNCATED" in raw_out:
+            # Compactor already cut this observation. The cache holds the
+            # FULL pre-compaction original — restore it (format-agnostic,
+            # budget-capped) instead of showing only the truncated head;
+            # on failure keep the cache path and flag the evidence as
+            # incomplete instead of hiding the gap.
+            cache_path = _recover_baseline_cache_path(raw_out)
+            restored = (
+                _read_baseline_cache_content(cache_path) if cache_path else ""
+            )
+            if restored:
+                output = (
+                    "[Restored from compactor cache — original observation "
+                    "was truncated]\n" + restored
+                )
+            else:
+                output = raw_out[:1500] + (
+                    f"\n(baseline evidence incomplete — full output at "
+                    f"{cache_path}; re-observe if needed)"
+                    if cache_path
+                    else "\n(baseline evidence incomplete — re-observe if needed)"
+                )
+        else:
+            output = raw_out[:1500]
+            if len(raw_out) > 1500:
+                output += "\n... (truncated)"
         obs_lines.append(
             f"### {desc}\n"
             f"Command: `{cmd}`\n"
@@ -222,33 +280,63 @@ def _build_layer1_recovery_prompt(
     )
 
     if is_kubectl_blade:
+        # U-shaped attention (same architecture as execute_loop / verifiers):
+        # critical constraints at BEGINNING (primacy) + REMEMBER at END
+        # (recency); procedure details in the middle, where attention dips.
         return f"""You are executing recovery actions for a chaos engineering fault.
 
-This is a ChaosBlade fault that was injected via `kubectl exec` into a cluster pod
-(e.g., otel-c-tool). Because the host blade binary cannot access experiments created
-inside the cluster, you must destroy the experiment using `kubectl exec` with the
-`blade destroy` command.
+Your single objective: restore the target to its pre-fault state.
+
+## CRITICAL CONSTRAINTS
+- This fault was injected from INSIDE the cluster — the injection tool ran
+  within a tool pod, not on the host. Host-side recovery tools cannot see or
+  undo such experiments: the undo action MUST go through the same in-cluster
+  channel that performed the injection. DO NOT use host-side destroy/status
+  tools for this experiment.
+- NEVER assume the tool pod namespace — it is deployment-specific; use only
+  the namespace you discover via live cluster queries.
+- DO NOT verify the fault has been removed — that is Layer 2's job, not yours.
+- DO NOT use interactive commands — they do not work in automation; translate
+  them into programmatic equivalents.
 
 {capability_fragment}
 
-## Recovery Procedure
-1. Find a running tool pod in the chaosblade namespace:
-   `kubectl(subcommand='get', args='pods -n chaosblade -l app=otel-c-tool', kubeconfig='<path>')`
-2. Execute blade destroy on the running pod:
-   `kubectl(subcommand='exec', pod='<running-pod>', namespace='chaosblade', command='blade destroy <UID>', kubeconfig='<path>')`
-3. Verify the destroy succeeded (the output should contain "success" or "Success").
+## How to derive recovery commands
+- WHAT to undo comes from the recovery context below: the experiment UID,
+  the original injection pod, and the recorded impact.
+- WHERE to run it comes from live cluster queries — discover the current
+  state first; never assume it.
+- HOW comes from the tools you actually hold: inspect a tool's own
+  help/usage output to confirm the commands and parameters it supports,
+  and trust its runtime output. Documentation and conversation history may
+  be outdated — the tool's runtime behavior is the ground truth.
 
-## Important Constraints
-- DO NOT use `blade_destroy` or `blade_status` tools — they run on the host and cannot see cluster experiments
-- DO NOT use interactive commands like `kubectl edit` — they do not work in automation
-- DO NOT verify the fault has been removed — that is Layer 2's job, not yours
-- The specific tool pod used for injection may no longer exist (DaemonSet rotation).
-  Always discover a current running pod first.
+## Recovery Procedure
+1. Locate a currently running tool pod. The recovery context below names the
+   original injection pod — prefer it, and identify its namespace before use
+   (it is deployment-specific — NEVER assume it). Tool pods rotate, so if
+   that pod no longer exists, discover a running one ACROSS ALL NAMESPACES
+   by its tool label, using live cluster queries.
+2. Inside the located tool pod, in ITS own namespace, run the
+   experiment-destroy command for the experiment UID. Confirm the exact
+   destroy syntax from the injection tool's own help/usage inside the pod
+   before running it.
+3. Confirm the destroy output reports success.
 
 ## Kubeconfig Requirement
-If a kubeconfig path is provided, you MUST include `kubeconfig="<path>"` as a
-parameter in EVERY kubectl tool call. The default kubeconfig cannot access the
-target cluster. Omitting kubeconfig will cause tool calls to connect to the WRONG cluster.
+If a kubeconfig path is provided in the recovery context, you MUST pass it to
+EVERY cluster tool call. The default kubeconfig cannot access the target
+cluster; omitting it connects tool calls to the WRONG cluster.
+
+# REMEMBER
+- Undo through the SAME in-cluster channel that performed the injection —
+  host-side tools cannot reach cluster-created experiments.
+- Discover the tool pod and its namespace with live cluster queries; NEVER
+  assume either.
+- A tool's own help/usage output and runtime behavior are the ground truth
+  over documentation and memory.
+- Your job ends when the undo action is confirmed landed at the API layer —
+  Layer 2 verifies the recovery outcome.
 
 ## Output
 After completing the recovery action (or determining it cannot be completed),
@@ -256,7 +344,7 @@ output a FINAL summary in this EXACT format:
 
 RECOVERY_EXECUTION_RESULT:
 - Status: [success/failed]
-- Actions: [summary of actions taken, e.g., "destroyed blade experiment via kubectl exec"]
+- Actions: [summary of actions taken, e.g., "destroyed the experiment via the in-cluster tool pod"]
 - Details: [any errors, warnings, or notes]
 """
 
@@ -275,7 +363,9 @@ verifying — Layer 2 owns outcome verification.
 - Do NOT use interactive commands that require a TTY — translate them into
   programmatic equivalents.
 - Treat the configured target authority and current tool observations as the
-  authority for recovery actions.
+  authority for recovery actions: inspect a tool's own help/usage output to
+  confirm what it supports, and trust its runtime output over documentation
+  or memory.
 - If an action fails, use another supported recovery approach only when new
   evidence justifies it; otherwise report the blocker precisely, and do not
   broaden scope to compensate for an error.
@@ -284,6 +374,14 @@ verifying — Layer 2 owns outcome verification.
 1. Use the Recovery Actions and injection context to determine what must be undone.
 2. Execute each supported recovery action through the currently bound tools.
 3. Preserve the target boundary.
+
+# REMEMBER
+- Execute ONLY through currently bound tools; inspect their help/usage and
+  trust their runtime output over documentation or memory.
+- Preserve the target boundary — do not broaden scope to compensate for an
+  error.
+- Your job ends when the recovery actions are confirmed landed at the API
+  layer — Layer 2 verifies the recovery outcome.
 
 ## Output
 After completing ALL recovery actions (or determining they cannot be completed),
@@ -341,17 +439,22 @@ def _parse_layer1_recovery_result(text: str) -> RecoverLayer1Result:
 
 async def _run_recover_layer1(
     blade_uid: str, kubeconfig: str, *, messages: list | None = None,
+    injection_method: str | None = None,
 ) -> RecoverLayer1Result:
     """Execute blade_destroy and verify the experiment is destroyed.
 
     Step 1: Call blade_destroy
     Step 2: Call blade_status to confirm Destroyed state
+
+    ``injection_method`` is the durable attribution record from state; see
+    :func:`_was_blade_create_attempted` for why it takes priority over the
+    (possibly compacted) message history.
     """
     if not blade_uid:
         # Distinguish two scenarios when blade_uid is empty during recovery:
         # 1. ChaosBlade injection was done but UID unavailable → "failed" (terminal)
         # 2. Non-ChaosBlade fault (kubectl-based) → "skipped" (not terminal, Layer 2 proceeds)
-        if messages and _was_blade_create_attempted(messages):
+        if messages and _was_blade_create_attempted(messages, injection_method):
             return RecoverLayer1Result(
                 status="failed",
                 details="blade_create was called during injection but no UID available for recovery",

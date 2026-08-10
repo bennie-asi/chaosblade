@@ -3,6 +3,7 @@ from pathlib import Path
 
 from chaos_agent.agent.result.task_snapshot import (
     TaskSnapshot,
+    _rebuild_inject_verification_summary,
     build_recover_initial_from_task_snapshot,
     resolve_recover_initial_state,
 )
@@ -178,6 +179,7 @@ def test_task_snapshot_builds_fault_spec_from_merged_context():
         "duration_seconds": 0,
         "source": "task_snapshot_rebuild",
         "user_description": "",
+        "use_case_name": "",
         "revision": 0,
         "objective": "",
         "boundaries": [],
@@ -426,3 +428,123 @@ async def test_resolver_source_values_preserve_snapshot_verification(monkeypatch
     )
     assert resolution.source_values["kubeconfig"] == "/snapshot/kubeconfig"
     assert resolution.source_values["messages"] == ["baseline-message"]
+
+
+def test_rebuild_inject_verification_summary_includes_warnings():
+    """Side-effect warnings are structural facts and must survive rebuild."""
+    summary = _rebuild_inject_verification_summary({
+        "layer2": {"status": "passed", "details": "fault active as planned"},
+        "warnings": ["endpoint removed from svc", "readiness probe failing"],
+    })
+    assert "Layer2=passed" in summary
+    assert "fault active as planned" in summary
+    assert "Recorded side-effect warnings at injection" in summary
+    assert "(1) endpoint removed from svc" in summary
+    assert "(2) readiness probe failing" in summary
+
+
+def test_rebuild_inject_verification_summary_no_warnings_unchanged():
+    summary = _rebuild_inject_verification_summary({
+        "layer2": {"status": "passed", "details": "ok"},
+        "warnings": [],
+    })
+    assert summary == "Layer2=passed, Details=ok"
+
+
+def test_task_snapshot_prefers_persisted_inject_context():
+    """Durable-first: finalize-persisted inject_context beats record/message scan."""
+    snapshot = TaskSnapshot.from_sources(
+        task_id="task-inject",
+        record={"inject_context": "record context", "target": _target("p")},
+        session={
+            "result_summary": {"data": {"inject_context": "persisted context"}},
+            "messages": [],
+        },
+        has_increment_log=True,
+    )
+    assert snapshot is not None
+    assert snapshot.inject_context == "persisted context"
+
+
+def test_task_snapshot_extracts_blast_radius_and_side_effects():
+    session_data = {
+        "blast_radius_detail": "session blast radius",
+        "side_effects": {"endpoint_removals": ["svc-a"]},
+    }
+    record = {
+        "target": _target("p"),
+        "blast_radius_detail": "record blast radius",
+        "side_effects": {"probe_failures": ["pod-a"]},
+    }
+
+    # increment-log branch: session (finalize-persisted) values win.
+    snapshot = TaskSnapshot.from_sources(
+        task_id="task-inject",
+        record=record,
+        session={"result_summary": {"data": session_data}, "messages": []},
+        has_increment_log=True,
+    )
+    assert snapshot is not None
+    assert snapshot.blast_radius_detail == "session blast radius"
+    assert snapshot.side_effects == {"endpoint_removals": ["svc-a"]}
+
+    # store-preferred branch: record values win.
+    snapshot2 = TaskSnapshot.from_sources(
+        task_id="task-inject",
+        record=record,
+        session={"result_summary": {"data": session_data}, "messages": []},
+        has_increment_log=False,
+    )
+    assert snapshot2 is not None
+    assert snapshot2.blast_radius_detail == "record blast radius"
+    assert snapshot2.side_effects == {"probe_failures": ["pod-a"]}
+
+
+@pytest.mark.asyncio
+async def test_build_recover_initial_from_task_snapshot_carries_side_effects():
+    snapshot = TaskSnapshot.from_sources(
+        task_id="task-inject",
+        record={
+            "skill_name": "pod-network-loss",
+            "target": _target("demo"),
+            "params": {"percent": "100"},
+            "inject_context": "ctx",
+        },
+        session={
+            "result_summary": {
+                "data": {
+                    "blast_radius_detail": "2 replicas impacted",
+                    "side_effects": {"endpoint_removals": ["svc-a"]},
+                }
+            },
+            "messages": [],
+        },
+        has_increment_log=True,
+    )
+    assert snapshot is not None
+
+    initial = await build_recover_initial_from_task_snapshot(
+        snapshot, record_task_id="task-recover"
+    )
+    assert initial is not None
+    assert initial["blast_radius_detail"] == "2 replicas impacted"
+    assert initial["side_effects"] == {"endpoint_removals": ["svc-a"]}
+
+    # Live checkpoint fills fields an older record lacks.
+    initial2 = await build_recover_initial_from_task_snapshot(
+        TaskSnapshot.from_sources(
+            task_id="task-inject",
+            record={
+                "skill_name": "pod-network-loss",
+                "target": _target("demo"),
+                "params": {"percent": "100"},
+                "inject_context": "ctx",
+            },
+            session={"messages": []},
+            has_increment_log=False,
+        ),
+        record_task_id="task-recover",
+        checkpoint_values={"blast_radius_detail": "checkpoint blast radius"},
+    )
+    assert initial2 is not None
+    assert initial2["blast_radius_detail"] == "checkpoint blast radius"

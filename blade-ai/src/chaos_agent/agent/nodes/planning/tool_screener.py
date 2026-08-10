@@ -51,7 +51,10 @@ from langgraph.types import interrupt
 
 from chaos_agent.agent.spec.fault_spec import read_fault_spec
 from chaos_agent.agent.capabilities import explain_tool_refusal, tool_call_allowed
-from chaos_agent.agent.execution_artifacts import is_vehicle_name
+from chaos_agent.agent.execution_artifacts import (
+    is_vehicle_name,
+    vehicle_artifact_types,
+)
 from chaos_agent.agent.nodes.execute.llm_step_helpers import hint_count_key
 from chaos_agent.agent.nodes.execute.react_helpers import _stagnation_key
 from chaos_agent.agent.state import AgentState
@@ -91,8 +94,24 @@ _FAILED_CREATE_UID_RE = re.compile(
 )
 
 
-def _blade_uids_created_by_current_task(messages: list) -> set[str]:
-    """Return experiment UIDs proven by this task's blade_create results."""
+def _blade_uids_created_by_current_task(
+    messages: list, state: AgentState | None = None,
+) -> set[str]:
+    """Return experiment UIDs proven by this task's blade_create results.
+
+    Two evidence sources, unioned:
+
+    1. ``blade_create`` ToolMessages in the visible history — the primary
+       record, covering every UID the task ever created (including
+       failed-create CRDs that still need cleanup).
+    2. ``state["blade_uid"]`` — the framework's durable record of the
+       live experiment. Source 1 is not durable: compression removes old
+       ToolMessages BY DESIGN, which would empty the whitelist mid-task
+       and leave the agent unable to destroy its own injection. The
+       state field is maintained by the execution loop (and preserved by
+       the compressed-history restore path), so it keeps proving
+       provenance across compaction.
+    """
     from chaos_agent.utils.blade_uid import extract_blade_uid
 
     uids: set[str] = set()
@@ -108,6 +127,10 @@ def _blade_uids_created_by_current_task(messages: list) -> set[str]:
         # Terminal create failures deliberately do not count as active UIDs in
         # extract_blade_uid, but their CRDs still need cleanup.
         uids.update(match.group(1) for match in _FAILED_CREATE_UID_RE.finditer(content))
+    if state is not None:
+        durable_uid = str(state.get("blade_uid") or "").strip()
+        if durable_uid:
+            uids.add(durable_uid)
     return uids
 
 
@@ -181,7 +204,79 @@ def _identity_matches_approved(
     return bool(known) and all(n in known for n in effective.names)
 
 
-def _screen_blade_destroy(tool_args: Any, messages: list) -> tuple[EffectiveTarget, GuardDecision]:
+def _screen_vehicle_manifest(
+    effective: EffectiveTarget, approved: ApprovedTarget | None,
+) -> GuardDecision:
+    """Screen an occupant-vehicle Pod manifest against the approval anchor.
+
+    The classifier already enforced the occupant contract (sleep-only
+    command, no privilege, PVC-only volumes, bounded deadline) — this gate
+    answers the IDENTITY question: does the occupancy land on resources the
+    drill target actually uses?
+
+    The anchor is ``approved.pvc_claims``: the PVC claim names the frozen
+    target's pods reference, discovered by safety_check at freeze time. The
+    occupant must claim a non-empty SUBSET of them, in the approved
+    namespace. There is deliberately NO cluster-side marker to identify a
+    vehicle (the drill must stay indistinguishable from a real incident),
+    so claims are the only anchor — without them there is nothing to verify
+    against, and the mechanism stays banned (fail closed → replan).
+    """
+    if approved is None or not approved.pvc_claims:
+        return GuardDecision(
+            verdict=GuardVerdict.REJECT_BANNED,
+            reason=(
+                "occupant vehicle manifests are only permitted when the "
+                "approved target's PVC claims are known; no claim anchor "
+                "exists for this approval"
+            ),
+            suggestion="",
+            effective=replace(effective, mechanism_banned=True),
+        )
+    if (effective.namespace or "default") != (approved.namespace or "default"):
+        return GuardDecision(
+            verdict=GuardVerdict.REJECT_BANNED,
+            reason=(
+                f"occupant pod namespace {effective.namespace or 'default'} "
+                f"is outside the approved namespace "
+                f"{approved.namespace or 'default'}"
+            ),
+            suggestion=(
+                f"apply the occupant pod in namespace "
+                f"{approved.namespace or 'default'}"
+            ),
+            effective=effective,
+        )
+    approved_claims = set(approved.pvc_claims)
+    outside = sorted(set(effective.occupant_claims) - approved_claims)
+    if outside:
+        return GuardDecision(
+            verdict=GuardVerdict.REJECT_BANNED,
+            reason=(
+                "occupant pod claims PVC(s) not used by the approved "
+                f"target: {', '.join(outside)}"
+            ),
+            suggestion=(
+                "the occupant may only claim PVCs of the approved target: "
+                + ", ".join(sorted(approved_claims))
+            ),
+            effective=effective,
+        )
+    return GuardDecision(
+        verdict=GuardVerdict.ALLOW,
+        reason=(
+            "occupant vehicle manifest approved: claims "
+            + ", ".join(sorted(set(effective.occupant_claims)))
+            + " belong to the approved target"
+        ),
+        suggestion="",
+        effective=effective,
+    )
+
+
+def _screen_blade_destroy(
+    tool_args: Any, messages: list, state: AgentState | None = None,
+) -> tuple[EffectiveTarget, GuardDecision]:
     """Allow cleanup only for an experiment created by this graph task."""
     args = tool_args if isinstance(tool_args, dict) else {}
     uid = str(args.get("uid") or "").strip()
@@ -191,7 +286,7 @@ def _screen_blade_destroy(tool_args: Any, messages: list) -> tuple[EffectiveTarg
         confidence=ConfidenceLevel.HIGH,
         raw_command=f"blade_destroy uid={uid}",
     )
-    if uid and uid in _blade_uids_created_by_current_task(messages):
+    if uid and uid in _blade_uids_created_by_current_task(messages, state):
         return effective, GuardDecision(
             verdict=GuardVerdict.ALLOW,
             reason="experiment UID was created by this task",
@@ -468,7 +563,7 @@ async def tool_screener(state: AgentState) -> dict:
 
         try:
             if tool_name == "blade_destroy":
-                effective, decision = _screen_blade_destroy(tool_args, messages)
+                effective, decision = _screen_blade_destroy(tool_args, messages, state)
                 if decision.verdict != GuardVerdict.ALLOW:
                     has_provenance_reject = True
                 feedback = decision_to_feedback(decision)
@@ -477,6 +572,73 @@ async def tool_screener(state: AgentState) -> dict:
                     tool_name, tool_args,
                     skill_script_allowed=skill_script_allowed,
                 )
+            if tool_name != "blade_destroy" and effective.is_vehicle_manifest:
+                # Occupant-vehicle apply: an identity verdict of its own
+                # (claims-vs-approval anchor) instead of check_target — the
+                # occupant's name can never match the approved target's
+                # identity, so the standard drift comparison would always
+                # fire here by construction.
+                decision = _screen_vehicle_manifest(effective, approved)
+                # The decision may carry a rebuilt effective (e.g. the
+                # mechanism_banned marker for the no-anchor case) — that is
+                # the one the rejection renderer must see.
+                effective = decision.effective or effective
+                feedback = decision_to_feedback(decision)
+                if decision.verdict == GuardVerdict.ALLOW:
+                    # Register the occupant as a vehicle artifact NOW
+                    # (screening precedes execution): its identity is only
+                    # tracked task-side — no label marks it in the cluster
+                    # — so the finalize/recover cleanup depends entirely on
+                    # this registration to delete it. Dedup by artifact_id:
+                    # a screening round replays the pending batch as a whole.
+                    occ_name = effective.names[0] if effective.names else ""
+                    occ_ns = effective.namespace or "default"
+                    occ_type = "occupant_pod"
+                    occupant_artifact = {
+                        "artifact_id": f"{occ_type}:{occ_ns}/{occ_name}",
+                        "type": occ_type,
+                        "status": "active",
+                        "task_id": str(state.get("task_id") or ""),
+                        "name": occ_name,
+                        "namespace": occ_ns,
+                        "claims": list(effective.occupant_claims),
+                        "operation_family": "resource_occupancy",
+                        "created_tool_call_id": tool_call_id,
+                        "cleanup": {
+                            "tool": "kubectl",
+                            "subcommand": "delete",
+                            "v_args": (
+                                f"pod {occ_name} -n {occ_ns} "
+                                "--ignore-not-found"
+                            ),
+                        },
+                    }
+                    merged: dict[str, dict] = {
+                        str(a.get("artifact_id") or ""): a
+                        for a in vehicle_cache.get(
+                            "execution_artifacts",
+                            state.get("execution_artifacts") or [],
+                        )
+                        if isinstance(a, dict)
+                    }
+                    merged[occupant_artifact["artifact_id"]] = occupant_artifact
+                    vehicle_cache["execution_artifacts"] = list(merged.values())
+                decisions.append({
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "verdict": decision.verdict.value,
+                    "reason": decision.reason,
+                    "suggestion": decision.suggestion,
+                    "is_hard_floor": feedback.is_hard_floor,
+                    "constraint": feedback.constraint.value,
+                    "carrier_gate": "vehicle_manifest",
+                    "effective": effective,
+                })
+                if decision.verdict in (
+                    GuardVerdict.REJECT_BANNED, GuardVerdict.REJECT_UNKNOWN,
+                ):
+                    has_other_reject = True
+                continue
             if tool_name != "blade_destroy" and (
                 effective.scope in (SCOPE_UNKNOWN, SCOPE_ESCAPE)
                 or (
@@ -615,7 +777,7 @@ async def tool_screener(state: AgentState) -> dict:
                     )
             if (
                 tool_name != "blade_destroy"
-                and effective.scope == "pod"
+                and effective.scope in ("pod", "deployment")
                 and not effective.is_vehicle_exec
                 and effective.names
                 and not _identity_matches_approved(effective, approved)
@@ -640,8 +802,22 @@ async def tool_screener(state: AgentState) -> dict:
                     if not is_vehicle_name(n, state)
                     and n not in cluster_vehicles
                     and n not in probe_misses
+                    # Deployment-scoped vehicles (occupant deployments) are
+                    # only recognisable via task-side registration — the
+                    # tool-pod label probe below discovers PODS, so probing
+                    # a deployment name can only ever return a miss.
+                    and not (
+                        effective.scope == "deployment"
+                        and "occupant_deployment" in vehicle_artifact_types(
+                            n, state,
+                        )
+                    )
                 ]
-                if unregistered and not probed_this_round:
+                if (
+                    unregistered
+                    and effective.scope == "pod"
+                    and not probed_this_round
+                ):
                     probed_this_round = True
                     positives, misses = await _discover_vehicle_pods(
                         state, unregistered,
@@ -665,7 +841,16 @@ async def tool_screener(state: AgentState) -> dict:
                             ),
                         )
                 if not effective.fault_binary_mutation and all(
-                    is_vehicle_name(n, state) or n in cluster_vehicles
+                    is_vehicle_name(n, state)
+                    or n in cluster_vehicles
+                    or (
+                        # A registered occupant deployment exempts a
+                        # deployment-scoped operation on it (its recovery
+                        # deletion); pod-type vehicles never match here.
+                        effective.scope == "deployment"
+                        and "occupant_deployment"
+                        in vehicle_artifact_types(n, state)
+                    )
                     for n in effective.names
                 ):
                     # EffectiveTarget is frozen, so rebuild instead of mutating.
@@ -911,7 +1096,18 @@ def _format_rejection_for_llm(
             "(e.g. `kubectl debug node/<approved-node> --profile=sysadmin`) "
             "— not any other node."
         )
-    if is_hard_floor:
+    mechanism_banned = (
+        bool(getattr(eff, "mechanism_banned", False)) if eff is not None else False
+    )
+    if mechanism_banned:
+        parts.append(
+            "This injection MECHANISM is banned by policy — no reshape of this "
+            "call will pass, so do NOT retry it in another form. If the approved "
+            "plan depends on it, call `request_replan` to switch to a mechanism "
+            "that acts on the existing approved target instead of creating a new "
+            "workload."
+        )
+    elif is_hard_floor:
         parts.append(
             "This is a boundary the guard will not relax; operate within the "
             "approved target or abort if the task cannot proceed."
@@ -1039,10 +1235,19 @@ def _apply_drift_correction(
     else:
         owner_names = tuple(existing.get("owner_names") or ())
         resolved_names = tuple(existing.get("resolved_names") or ())
+    # pvc_claims anchor the occupant-vehicle exception and were discovered
+    # against the CONCRETE approved pod identities: any identity change
+    # (names OR labels) stales them — drop, fail closed (the vehicle
+    # exception stays banned until a fresh approval re-discovers claims).
+    if "labels" in corrections or "names" in corrections:
+        pvc_claims: tuple[str, ...] = ()
+    else:
+        pvc_claims = tuple(existing.get("pvc_claims") or ())
 
     result: dict = {"fault_spec": new_spec.to_dict()}
     result["approved_target"] = freeze_approved_target_from_spec(
         new_spec, owner_names=owner_names, resolved_names=resolved_names,
+        pvc_claims=pvc_claims,
     )
     return result
 

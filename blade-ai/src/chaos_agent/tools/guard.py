@@ -255,7 +255,13 @@ class ToolGuard:
 
     PARAM_BLACKLIST_PATTERNS = [
         r"rm\s+-rf",
-        r">\s*/dev/",
+        # Redirects into block devices destroy data; redirects into the
+        # pseudo-devices null/stdout/stderr/fd are harmless discard sinks
+        # (``2>/dev/null``). A bare ``>`` token stays caught by
+        # SUSPICIOUS_SOLO_TOKENS — exec-form cannot redirect at all — so
+        # this exemption only stops mislabelling glued tokens as a
+        # device-write hard floor (task-4208d61c read-only probe).
+        r">\s*/dev/(?!(?:null|stdout|stderr|fd)(?:\b|/))",
         r";\s*rm",
         r"\|\s*bash",
         r"\|\s*sh",
@@ -526,9 +532,8 @@ class ToolGuard:
         recoverability to its own cause.
 
         Returns the rejection feedback, or ``None`` when the call is fine.
-        Returning the full :class:`GuardFeedback` (rather than a
-        ``(ok, reason)`` pair like the other per-binary checks) is what lets the
-        per-flag cause go in ``reason`` and the alternative in
+        Like every per-binary check it returns a full :class:`GuardFeedback`
+        so the per-flag cause goes in ``reason`` and the alternative in
         ``compliant_form``, instead of concatenating both into one string.
 
         Both ``--flag`` and ``--flag=value`` are matched; kubectl's pflag accepts

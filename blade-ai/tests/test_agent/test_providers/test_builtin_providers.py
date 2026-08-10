@@ -508,6 +508,108 @@ async def test_chaosblade_recover_local_blade_destroy_passed():
     assert any("Layer 2" in w for w in result.warnings)
 
 
+async def test_chaosblade_recover_combo_never_recovered_no_llm():
+    """Combo injection (blade + kubectl-native) in the no-LLM path: even a
+    successful blade destroy leaves the native component active, so the
+    verdict must NOT be 'recovered' and must warn about the leak."""
+    from unittest.mock import patch
+
+    from chaos_agent.agent.result.verdict import Layer1Result, Layer1Status
+
+    with patch(
+        "chaos_agent.agent.nodes.recover._recover_layer1._run_recover_layer1"
+    ) as mock_l1:
+        mock_l1.return_value = Layer1Result(
+            status=Layer1Status.PASSED, details="blade_destroy: success",
+        )
+        result = await ChaosbladeProvider().recover(
+            {"combo_native_issued": True}, None,
+            blade_uid="uid-host", kubeconfig="", messages=[],
+        )
+    assert result.recovered is False
+    assert result.level == "unrecovered"
+    assert result.failure is not None
+    assert any("native" in w and "NOT undone" in w for w in result.warnings)
+
+
+async def test_chaosblade_recover_combo_kubectl_exec_warning_no_llm():
+    """kubectl_exec delivery + combo in the no-LLM path: the early-return
+    branch must ALSO surface the native-component leak (not only the
+    experiment-destroy guidance)."""
+    from chaos_agent.agent.providers.chaosblade import ChaosbladeProvider
+
+    result = await ChaosbladeProvider().recover(
+        {"injection_method": "kubectl_exec", "combo_native_issued": True},
+        None,
+        blade_uid="uid-exec", kubeconfig="", messages=[],
+    )
+    assert result.recovered is False
+    assert result.level == "unrecovered"
+    assert any("blade destroy uid-exec" in w for w in result.warnings)
+    assert any("Combo injection" in w and "ALSO" in w for w in result.warnings)
+
+
+async def test_chaosblade_python_recover_combo_never_recovered_no_llm():
+    """ChaosbladePythonProvider parity: the python-agent experiment path has
+    has_experiment_uid=True, so blade-first combos can occur there too — the
+    no-LLM path must never report recovered for a combo."""
+    from unittest.mock import patch
+
+    from chaos_agent.agent.providers.chaosblade_python import (
+        ChaosbladePythonProvider,
+    )
+    from chaos_agent.agent.result.verdict import Layer1Result, Layer1Status
+
+    with patch(
+        "chaos_agent.agent.nodes.recover._recover_layer1._run_recover_layer1"
+    ) as mock_l1:
+        mock_l1.return_value = Layer1Result(
+            status=Layer1Status.PASSED, details="blade_destroy: success",
+        )
+        result = await ChaosbladePythonProvider().recover(
+            {"combo_native_issued": True}, None,
+            blade_uid="uid-py", kubeconfig="", messages=[],
+        )
+    assert result.recovered is False
+    assert result.level == "unrecovered"
+    assert result.failure is not None
+    assert any("native" in w and "NOT undone" in w for w in result.warnings)
+
+
+def test_provider_capability_matrix_pins_combo_criteria():
+    """The combo judgment (Channel A issue-time marking, recover-time
+    cross-check, UPGRADE marking) is driven ENTIRELY by two protocol
+    attributes — pin the family facts so a future provider registration
+    that breaks the semantics fails loudly instead of silently mis-routing
+    recovery:
+
+    - experiment family: has_experiment_uid=True, is_multi_step=False
+      (a live experiment UID is the combo evidence 'experiment present');
+    - native family: is_multi_step=True, has_experiment_uid=False
+      (multi-step config mutation, no UID — the component that leaks if
+      only blade_destroy runs).
+
+    A provider claiming BOTH flags (or neither) would make the combo
+    criteria degenerate — assert the partition explicitly.
+    """
+    FaultProviderRegistry.register_builtins()
+    registry = FaultProviderRegistry
+    experiment_methods = {"host_blade", "kubectl_exec", "python_agent"}
+    native_methods = {"kubectl_native", "host_native"}
+
+    for method in experiment_methods:
+        provider = registry.resolve_by_method(method)
+        assert provider is not None, f"{method} must resolve to a provider"
+        assert provider.has_experiment_uid is True, f"{method} must carry an experiment UID"
+        assert provider.is_multi_step is False, f"{method} must not be multi-step"
+
+    for method in native_methods:
+        provider = registry.resolve_by_method(method)
+        assert provider is not None, f"{method} must resolve to a provider"
+        assert provider.is_multi_step is True, f"{method} must be multi-step"
+        assert provider.has_experiment_uid is False, f"{method} must not carry an experiment UID"
+
+
 async def test_k8s_native_recover_non_chaosblade_unrecovered():
     result = await K8sNativeProvider().recover({}, None, blade_uid="")
     assert result.recovered is False

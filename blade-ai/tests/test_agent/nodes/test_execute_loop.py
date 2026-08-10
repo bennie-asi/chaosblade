@@ -348,6 +348,7 @@ class TestResetAttributionState:
         return {
             "blade_uid": "uid-123",
             "injection_method": "kubectl_exec",
+            "combo_native_issued": True,
             "kubectl_exec_pod_name": "tool-pod",
             "inject_layer1_cache": {"status": "passed"},
             "injection_start_time": 12345.0,
@@ -362,6 +363,7 @@ class TestResetAttributionState:
         reset_attribution_state(result)
         assert result["blade_uid"] is None
         assert result["injection_method"] is None
+        assert result["combo_native_issued"] is None
         assert result["kubectl_exec_pod_name"] is None
         assert result["inject_layer1_cache"] is None
         assert result["injection_start_time"] is None
@@ -378,6 +380,16 @@ class TestResetAttributionState:
         assert result["blade_uid"] == "uid-123"
         assert result["injection_method"] is None
         assert result["kubectl_exec_pod_name"] is None
+
+    def test_keep_blade_uid_preserves_combo_marker(self):
+        """A live experiment keeps its native companion: the combo marker
+        belongs to the same attribution as the UID."""
+        result = self._populated()
+        from chaos_agent.agent.nodes.execute.execute_loop import (
+            reset_attribution_state,
+        )
+        reset_attribution_state(result, keep_blade_uid=True)
+        assert result.get("combo_native_issued") is True
 
     def test_accepts_partial_dict(self):
         """Verify-replan result_update starts sparse; missing keys are fine."""
@@ -718,6 +730,78 @@ class TestIssueTimeRecording:
                 "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
         result = self._run(tcs, state={"injection_method": "host_blade"})
         assert "injection_method" not in result
+
+    def test_combo_marked_when_native_issued_after_experiment_method(self):
+        """blade-first combo: the experiment method is already attributed and
+        a native mutating call is issued → durable combo marker for recovery
+        routing (deterministic destroy would leak the native mutation)."""
+        tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
+                "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
+        result = self._run(tcs, state={"injection_method": "host_blade"})
+        assert result.get("combo_native_issued") is True
+        # Attribution itself stays monotonic.
+        assert "injection_method" not in result
+
+    def test_combo_not_marked_for_second_native_step(self):
+        """Multi-step kubectl-native injections (same carrier, no experiment)
+        are NOT combos — the marker only fires alongside an experiment UID."""
+        tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
+                "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
+        result = self._run(tcs, state={"injection_method": "kubectl_native"})
+        assert result.get("combo_native_issued") is None
+
+    def test_combo_marker_monotonic(self):
+        tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
+                "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
+        result = self._run(
+            tcs, state={"injection_method": "host_blade", "combo_native_issued": True}
+        )
+        assert "combo_native_issued" not in result
+
+    def test_combo_marked_when_native_issued_after_kubectl_exec_method(self):
+        """kubectl_exec is a DELIVERY of the experiment (ChaosbladeProvider,
+        has_experiment_uid=True) — native work issued alongside it is a combo
+        exactly like host_blade. The judgment must be provider-driven, not a
+        literal host_blade name check."""
+        tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
+                "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
+        result = self._run(tcs, state={"injection_method": "kubectl_exec"})
+        assert result.get("combo_native_issued") is True
+
+    def test_combo_marked_when_native_issued_after_python_agent_method(self):
+        """python_agent carries an experiment UID too — same combo semantics."""
+        tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
+                "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
+        result = self._run(tcs, state={"injection_method": "python_agent"})
+        assert result.get("combo_native_issued") is True
+
+    def test_combo_marked_when_native_issued_after_keep_uid_seam(self):
+        """Execute-replan seam with keep_blade_uid: the method is cleared for
+        re-detection but the LIVE experiment's UID survives. Native work in
+        the new epoch is still a combo — the epoch-bounded re-detect scan
+        cannot see the pre-seam blade_create, so issue-time UID evidence is
+        the only coverage."""
+        tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
+                "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
+        result = self._run(tcs, state={"blade_uid": "uid-live"})
+        assert result.get("injection_method") == "kubectl_native"
+        assert result.get("combo_native_issued") is True
+
+    def test_no_combo_when_blade_failed_before_native(self):
+        """blade-first FAILURE then native fallback is NOT a combo: a failed
+        blade_create left no UID, so only the native carrier mutated the
+        target — recovery needs only the LLM-native path."""
+        from langchain_core.messages import ToolMessage
+
+        failed_blade = ToolMessage(
+            content='{"code": 500, "success": false}',
+            name="blade_create", tool_call_id="b1",
+        )
+        tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
+                "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
+        result = self._run(tcs, state={"messages": [failed_blade]})
+        assert result.get("injection_method") == "kubectl_native"
+        assert result.get("combo_native_issued") is None
 
 
 class TestTextOnlyStallGate:

@@ -187,6 +187,7 @@ class ChaosbladePythonProvider:
             kwargs.get("kubeconfig", "") or "",
             task_id=kwargs.get("task_id", ""),
             messages=state.get("messages", []),
+            injection_method=state.get("injection_method"),
         )
 
     def verify_prompt_note(
@@ -258,20 +259,35 @@ class ChaosbladePythonProvider:
         kubeconfig = kwargs.get("kubeconfig", "") or ""
         messages = kwargs.get("messages", []) or []
 
-        layer1 = await _run_recover_layer1(blade_uid, kubeconfig, messages=messages)
-        recovered = layer1.is_passed()
+        layer1 = await _run_recover_layer1(
+            blade_uid, kubeconfig, messages=messages,
+            injection_method=state.get("injection_method"),
+        )
+        # COMBO injection parity with ChaosbladeProvider.recover: a
+        # kubectl-native component alongside the experiment cannot be undone
+        # without an LLM, so even a successful destroy leaves the fault
+        # partially active — never report recovered.
+        _combo = bool(state.get("combo_native_issued"))
+        recovered = layer1.is_passed() and not _combo
         layer2 = {
             "status": "skipped",
             "details": "No LLM available for application-side verification",
         }
-        warnings = (
-            (
+        _warnings: list[str] = []
+        if layer1.is_passed() and not _combo:
+            _warnings.append(
                 "Layer 2 (application-side) recovery verification was skipped. "
-                "Only blade_destroy + blade_status verification was performed.",
+                "Only blade_destroy + blade_status verification was performed."
             )
-            if recovered
-            else ()
-        )
+        if _combo:
+            _warnings.append(
+                f"Combo injection: besides the experiment (uid={blade_uid}), a "
+                f"kubectl-native component was injected. The deterministic (no-LLM) "
+                f"recovery path can ONLY destroy the experiment — the native "
+                f"component was NOT undone. Use LLM-based recovery (blade-ai recover "
+                f"with LLM) to reverse the native mutations."
+            )
+        warnings = tuple(_warnings)
         return RecoverResult(
             recovered=recovered,
             level="recovered" if recovered else "unrecovered",

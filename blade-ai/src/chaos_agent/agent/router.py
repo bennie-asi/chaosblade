@@ -706,6 +706,12 @@ def should_continue_recover_verifier(state: AgentState) -> str:
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             return "continue"
         if hasattr(last_msg, "type") and last_msg.type == "ai":
+            # The text fallback needs TEXT. An empty turn has none, and
+            # finalize would parse "" into a verdict — the task-a8ad1602
+            # failure mode (verdict stranded in reasoning_content).
+            # Mirrors should_continue_verifier's protection.
+            if _is_empty_ai_turn(last_msg):
+                return "continue"
             # AI text: a Layer 2 verdict (context built) → finalize;
             # a Layer 1 → Layer 2 transition (context not yet built) → continue.
             if state.get("layer2_context_added"):
@@ -844,12 +850,23 @@ def route_after_direct_execute(state: AgentState) -> str:
     """Decide what happens after direct_execute.
 
     Returns:
-        "verifier" - blade_uid present, proceed to verification
-        "end" - error occurred, skip verification
+        "verifier" - proceed to verification (the default)
+        "end" - pre-injection rejection only (``safety_status ==
+                "rejected"``), where nothing was ever issued
+
+    An execution error is a signal, not a verdict — the same policy the
+    execute_loop router enforces (task-ff057e7f). The injection command may
+    have failed to RETURN (transport drop, UID parse miss) while the fault
+    actually took effect; only the verifier can tell, and the envelope must
+    carry a verification record instead of ``verification=null`` next to a
+    failure claim. This used to ``return "end"`` on any error, which skipped
+    verification for exactly the uncertain case. The only short-circuit is a
+    pre-injection rejection (capability gate), mirroring
+    ``route_after_safety``'s REJECT.
     """
     if state.get("blade_uid"):
         return "verifier"
-    if read_operation_outcome(state).error:
+    if state.get("safety_status") == "rejected":
         return "end"
     return "verifier"
 

@@ -362,8 +362,10 @@ async def create_and_wait_debug_pod(
 async def delete_debug_pod(
     pod_name: str, kubeconfig: str, task_id: str,
     namespace: str = "",
+    kind: str = "pod",
 ) -> str:
-    """Force-delete a debug pod. Best-effort, logs warning on failure.
+    """Force-delete a debug pod (or another task vehicle, e.g. an occupant
+    Deployment). Best-effort, logs warning on failure.
 
     Returns a confirmation outcome so callers can distinguish a confirmed
     removal from an unlanded request:
@@ -382,7 +384,7 @@ async def delete_debug_pod(
     """
     ns = namespace or _DEFAULT_DEBUG_NS
     del_cmd = build_kubectl_cmd("delete", [
-        "pod", pod_name, "-n", ns,
+        kind, pod_name, "-n", ns,
         "--force", "--grace-period=0",
     ], kubeconfig=kubeconfig)
     _target = TransportTarget.from_state({})

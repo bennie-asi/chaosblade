@@ -36,6 +36,21 @@ _CLEANUP_CONCURRENCY = 10
 
 _DEBUG_META_RE = re.compile(r"\[debug-pod-meta:\s*(\{.*?\})\]")
 
+# Drill occupancy vehicle registration emitted by skill scripts (e.g.
+# inject_cni_exhaust.py): a machine-readable line naming the transient
+# workload the script created so the task can exempt it from drift and
+# guarantee cleanup. Consumed by this module only — it never lands in the
+# cluster, so the drill stays indistinguishable from a real incident.
+_DRILL_VEHICLE_RE = re.compile(r"\[drill-vehicle:\s*(\{.*?\})\]")
+
+# Artifact types that count as injection VEHICLES (task-owned machinery,
+# never fault targets): debug pods plus the two drill-occupancy forms
+# (a behaviourless occupant Pod holding a resource; an exhauster Deployment
+# created by a curated skill script).
+_VEHICLE_ARTIFACT_TYPES: frozenset[str] = frozenset({
+    "debug_pod", "occupant_pod", "occupant_deployment",
+})
+
 
 def parse_debug_pod_metadata(content: str) -> dict:
     """Parse the structured marker emitted by ``tools.kubectl``."""
@@ -51,6 +66,49 @@ def parse_debug_pod_metadata(content: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def parse_drill_vehicle_markers(content: str) -> list[dict]:
+    """Parse ``[drill-vehicle: {...}]`` registration lines from script output.
+
+    A skill script that creates a transient occupancy workload emits one line
+    per created resource (``{"kind": "deployment", "name": ..., "namespace":
+    ...}``). Returns the parsed dicts (empty list when none / malformed) so
+    ``collect_execution_artifacts`` can register them as vehicle artifacts —
+    which is what makes their later delete drift-exempt and their cleanup
+    guaranteed even when the task dies before recovery runs.
+    """
+    if not isinstance(content, str):
+        return []
+    vehicles: list[dict] = []
+    for match in _DRILL_VEHICLE_RE.finditer(content):
+        try:
+            value = json.loads(match.group(1))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict) and value.get("name"):
+            vehicles.append(value)
+    return vehicles
+
+
+def vehicle_artifact_types(name: str, state: dict | None) -> frozenset[str]:
+    """The vehicle artifact TYPES registered under ``name`` (empty = none).
+
+    Finer-grained than :func:`is_vehicle_name`: the screener's drift
+    exemption must match the vehicle's KIND to the operation's scope (a
+    registered occupant Deployment exempts ``delete deployment``; it must not
+    exempt a same-named pod operation, and debug pods never exempt deployment
+    operations).
+    """
+    if not name or not isinstance(state, dict):
+        return frozenset()
+    return frozenset(
+        str(artifact.get("type"))
+        for artifact in state.get("execution_artifacts") or []
+        if isinstance(artifact, dict)
+        and artifact.get("type") in _VEHICLE_ARTIFACT_TYPES
+        and artifact.get("name") == name
+    )
+
+
 def is_vehicle_name(name: str, state: dict | None) -> bool:
     """True if ``name`` is a transient injection vehicle, not a fault target.
 
@@ -58,8 +116,9 @@ def is_vehicle_name(name: str, state: dict | None) -> bool:
     name as the fault target and the verifier validated against the vehicle.
     Data sources first, naming-convention heuristic last:
 
-      1. ``execution_artifacts`` — any registered ``debug_pod`` artifact name
-         (durable fact; survives message trimming).
+      1. ``execution_artifacts`` — any registered vehicle artifact name
+         (``debug_pod``, ``occupant_pod``, ``occupant_deployment``; durable
+         facts that survive message trimming).
       2. ``kubectl_exec_pod_name`` — the tool pod used for exec-injection.
       3. ``debug-pod-meta`` tags in message history (covers artifacts not yet
          collected this iteration).
@@ -70,7 +129,7 @@ def is_vehicle_name(name: str, state: dict | None) -> bool:
     for artifact in state.get("execution_artifacts") or []:
         if (
             isinstance(artifact, dict)
-            and artifact.get("type") == "debug_pod"
+            and artifact.get("type") in _VEHICLE_ARTIFACT_TYPES
             and artifact.get("name") == name
         ):
             return True
@@ -108,12 +167,30 @@ def collect_execution_artifacts(
             continue
         call = tool_calls.get(getattr(message, "tool_call_id", ""), {})
         tool_name = call.get("name")
+        content = message.content if isinstance(message.content, str) else ""
+
+        # Skill scripts that create occupancy workloads register them via a
+        # ``[drill-vehicle: {...}]`` line (see parse_drill_vehicle_markers).
+        # Registration here — not in the screener — because the script's
+        # inner kubectl calls never pass the guard: the marker is the ONLY
+        # durable record of what the script created.
+        if tool_name == "execute_skill_script":
+            for vehicle in parse_drill_vehicle_markers(content):
+                artifact = _drill_vehicle_artifact(
+                    vehicle,
+                    task_id=task_id,
+                    operation_family=operation_family,
+                    tool_call_id=getattr(message, "tool_call_id", ""),
+                )
+                key = _artifact_key(artifact)
+                if key and key not in artifacts:
+                    artifacts[key] = artifact
+            continue
 
         if tool_name != "kubectl":
             continue
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
         subcommand = args.get("subcommand", "")
-        content = message.content if isinstance(message.content, str) else ""
 
         if subcommand == "debug":
             metadata = parse_debug_pod_metadata(content)
@@ -222,7 +299,7 @@ async def cleanup_debug_pod_artifacts(
     sem = asyncio.Semaphore(_CLEANUP_CONCURRENCY)
 
     async def _clean_one(artifact: dict) -> None:
-        if not isinstance(artifact, dict) or artifact.get("type") != "debug_pod":
+        if not isinstance(artifact, dict) or artifact.get("type") not in _VEHICLE_ARTIFACT_TYPES:
             return
         if artifact.get("status") == "cleaned":
             return
@@ -237,11 +314,16 @@ async def cleanup_debug_pod_artifacts(
         namespace = str(artifact.get("namespace") or "")
         if not name or not namespace:
             return
+        kind = (
+            "deployment"
+            if artifact.get("type") == "occupant_deployment"
+            else "pod"
+        )
         # Fire-and-forget: one delete attempt, bounded by the shared semaphore
         # so at most ``_CLEANUP_CONCURRENCY`` are in flight at once.
         async with sem:
             outcome = await delete_debug_pod(
-                name, kubeconfig, task_id, namespace=namespace,
+                name, kubeconfig, task_id, namespace=namespace, kind=kind,
             )
         # Mark cleaned regardless of outcome — the pod's ``-- sleep 3600`` bound
         # lets an unlanded delete lapse on its own; we never retry it.
@@ -307,6 +389,45 @@ def _debug_pod_artifact(
             "tool": "kubectl",
             "subcommand": "delete",
             "v_args": f"pod {name} -n {namespace} --ignore-not-found",
+        },
+    }
+
+
+def _drill_vehicle_artifact(
+    vehicle: dict,
+    *,
+    task_id: str,
+    operation_family: str,
+    tool_call_id: str,
+) -> dict:
+    """Build a vehicle artifact from a script-emitted registration line."""
+    kind = str(vehicle.get("kind") or "").strip().lower()
+    name = str(vehicle.get("name") or "")
+    namespace = str(vehicle.get("namespace") or "")
+    if kind == "deployment":
+        artifact_type = "occupant_deployment"
+    elif kind == "pod":
+        artifact_type = "occupant_pod"
+    else:
+        return {}
+    if not name or not namespace:
+        return {}
+    return {
+        "artifact_id": f"{artifact_type}:{namespace}/{name}",
+        "type": artifact_type,
+        "status": "active",
+        "task_id": task_id,
+        "name": name,
+        "namespace": namespace,
+        "operation_family": operation_family or "resource_occupancy",
+        "created_tool_call_id": tool_call_id,
+        "cleanup": {
+            "tool": "kubectl",
+            "subcommand": "delete",
+            "v_args": (
+                f"{'deployment' if kind == 'deployment' else 'pod'} {name} "
+                f"-n {namespace} --ignore-not-found"
+            ),
         },
     }
 
@@ -473,4 +594,6 @@ __all__ = [
     "find_active_debug_pod",
     "is_vehicle_name",
     "parse_debug_pod_metadata",
+    "parse_drill_vehicle_markers",
+    "vehicle_artifact_types",
 ]

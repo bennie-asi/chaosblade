@@ -55,8 +55,9 @@ def _extract_aimessage(output: Any) -> Any | None:
 
 
 # 与 TUI streaming.py 的 _SILENT_TOKEN_NODES 保持一致：
-# 这些节点的 LLM 输出以专用卡片展示（如 postmortem），流式 token 会重复。
-_SILENT_TOKEN_NODES: frozenset = frozenset({"save_memory"})
+# 这些节点的 LLM 输出以专用卡片展示（postmortem 由 terminal_reports
+# 生成、经 result envelope 交付），流式 token 会重复。
+_SILENT_TOKEN_NODES: frozenset = frozenset({"terminal_reports", "save_memory"})
 
 
 def _is_silent_node(event: dict) -> bool:
@@ -330,18 +331,32 @@ def _conn_to_state_patch(conn: dict) -> dict:
     state values with empty strings. This is the wire-format used by both
     ``clarify(conn=...)`` (initial inject) and ``update_connection``
     (mid-conversation env switch).
+
+    MUST cover the same field set as ``interaction._conn_state_fields``:
+    mid-conversation channel switches (e.g. K8s → SSH) that drop the
+    host-channel fields reproduce the skill-mis-selection bug that
+    commit 67ab08e fixed for the clarify path — the graph would keep
+    ``kube_connection_mode = None`` after ``update_connection`` and load
+    ``k8s-chaos-skills`` for a host environment.
     """
     patch: dict = {}
     for key in ("kubeconfig", "kube_context",
-                "kubewiz_cluster_uuid", "kubewiz_profile"):
+                "kubewiz_cluster_uuid", "kubewiz_profile",
+                "kube_connection_mode", "host_name",
+                "ssh_host", "ssh_user"):
         if key in conn:
             patch[key] = conn.get(key) or ""
+    # ssh_port is numeric — degrade to None like _conn_state_fields does.
+    if "ssh_port" in conn:
+        patch["ssh_port"] = conn.get("ssh_port") or None
     return patch
 
 # phase_started node → runtime.step() name mapping.
 # Only nodes wrapped with with_phase_events() emit events.
 # direct_setup, load_memory do NOT emit phase events.
-# save_memory IS wrapped (phase="postmortem") — see graph.py.
+# terminal_reports IS wrapped (phase="postmortem") — it carries the
+# postmortem / issue-report generation ahead of save_memory, which is
+# deliberately NOT wrapped (pure persistence, no user-facing phase).
 _PHASE_STEP_MAP: dict[str, str] = {
     "intent_clarification": "planning",
     "plan_builder": "planning",
@@ -354,13 +369,10 @@ _PHASE_STEP_MAP: dict[str, str] = {
     "direct_execute": "fault_injection",
     "verifier_loop": "verification",
     "finalize_verification": "verification",
+    "terminal_reports": "postmortem",
     "save_memory": "postmortem",
     # Recover graph phases
     "recover_verifier_loop": "recovery",
     "finalize_recover_verification": "recovery",
 }
-
-
-_logging_configured = False
-_log_dir: "Path | None" = None
 

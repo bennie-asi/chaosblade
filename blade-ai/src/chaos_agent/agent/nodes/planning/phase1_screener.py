@@ -143,16 +143,25 @@ def _make_violation_message(
     )
 
 
-def _is_debug_subcommand(tc_args: Any) -> bool:
-    """True if a ``kubectl_read`` tool_call's subcommand is ``debug``.
+def is_capability_probe_call(tool_name: str | None, tc_args: Any) -> bool:
+    """True for a ``kubectl_read`` tool_call whose subcommand is ``debug``.
 
-    Used by the capability-probe exception: a ``kubectl_read debug`` call
+    Capability-probe exception shared by every read-only phase screen
+    (Phase 1 planning, recover Layer 2): a ``kubectl_read debug`` call
     creates an ephemeral, self-gated, auto-cleaned probe pod, which the
-    screener allows even though the classifier scopes it node/pod.
+    screens allow even though the classifier scopes it node/pod.
+    ``kubectl_read`` rejects mutating inner commands at the tool layer
+    and the finalize nodes clean the probe pod programmatically.
     """
+    if tool_name != "kubectl_read":
+        return False
     if isinstance(tc_args, dict):
         return str(tc_args.get("subcommand") or "").strip() == "debug"
     return False
+
+
+# Back-compat alias: earlier revisions used a private name.
+_is_debug_subcommand = lambda tc_args: is_capability_probe_call("kubectl_read", tc_args)  # noqa: E731
 
 
 def _make_skipped_message(tool_name: str, tc_id: str) -> ToolMessage:
@@ -283,7 +292,7 @@ async def phase1_screener(state: AgentState) -> dict[str, Any]:
         # it so planning can verify image/host capability (e.g. does the
         # candidate image carry sh/chroot) before committing to a plan — the
         # same probe the verify phase already performs.
-        if tool_name == "kubectl_read" and _is_debug_subcommand(tc_args):
+        if is_capability_probe_call(tool_name, tc_args):
             legitimate_ids.append((tool_name, tc_id))
             continue
 

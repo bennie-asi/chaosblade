@@ -225,7 +225,10 @@ def test_unknown_inject_data_uses_complete_result_card_shape():
         "execution_artifacts": [],
         "verification": None,
         "side_effects": None,
+        "blast_radius_detail": "",
+        "inject_context": "",
         "postmortem": None,
+        "issue_report": None,
         "error": "",
     }
 

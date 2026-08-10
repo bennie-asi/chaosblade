@@ -296,8 +296,29 @@ class TestRouteAfterDirectExecute:
         state = {"blade_uid": "abc123"}
         assert route_after_direct_execute(state) == "verifier"
 
-    def test_has_error_goes_to_end(self):
+    def test_error_still_goes_to_verifier(self):
+        """Error is a signal, not a verdict (task-ff057e7f policy).
+
+        The injection command may have failed to RETURN while the fault
+        actually took effect; verification must not be skipped.
+        """
         state = {"blade_uid": None, "error": "failed"}
+        assert route_after_direct_execute(state) == "verifier"
+
+    def test_failure_detail_error_still_goes_to_verifier(self):
+        state = {
+            "blade_uid": None,
+            "failure_detail": {"category": "execution_failed", "context": "x"},
+        }
+        assert route_after_direct_execute(state) == "verifier"
+
+    def test_pre_injection_rejection_goes_to_end(self):
+        """Capability-gate rejection issued nothing — nothing to verify."""
+        state = {
+            "blade_uid": None,
+            "safety_status": "rejected",
+            "error": "refused",
+        }
         assert route_after_direct_execute(state) == "end"
 
     def test_no_result_goes_to_verifier(self):
@@ -657,6 +678,24 @@ class TestSchemeBVerifierRouting:
             {"verifier_loop_count": 1, "recover_verification": None,
              "layer2_context_added": False,
              "messages": [AIMessage(content="RECOVERY_EXECUTION_RESULT: ...")]}
+        ) == "continue"
+
+    def test_recover_empty_ai_turn_in_layer2_continues(self):
+        """An empty turn is not a verdict — finalize would parse "" into
+        level=unrecovered (task-a8ad1602 failure mode; the verdict may be
+        stranded in reasoning_content). Mirrors should_continue_verifier.
+        """
+        assert should_continue_recover_verifier(
+            {"verifier_loop_count": 2, "recover_verification": None,
+             "layer2_context_added": True,
+             "messages": [AIMessage(content="")]}
+        ) == "continue"
+
+    def test_recover_blank_ai_turn_in_layer2_continues(self):
+        assert should_continue_recover_verifier(
+            {"verifier_loop_count": 2, "recover_verification": None,
+             "layer2_context_added": True,
+             "messages": [AIMessage(content="   \n  ")]}
         ) == "continue"
 
     def test_route_after_recover_tools_submit_finalizes(self):

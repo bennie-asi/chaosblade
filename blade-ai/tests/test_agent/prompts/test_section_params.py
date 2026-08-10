@@ -79,7 +79,7 @@ class TestGuidelinesSectionMethodSwitching:
 
     def test_omit_keeps_follow_instructions_token(self):
         s = get_guidelines_section(include_method_switching=False)
-        assert "improvise" in s
+        assert "Skill-case methods come first" in s
 
     def test_phase1_omits_runtime_feedback(self):
         # Phase 1: Ground Truth in Workflow covers this principle.

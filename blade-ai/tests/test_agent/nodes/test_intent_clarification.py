@@ -74,8 +74,8 @@ def test_tui_turn_ids_allocate_distinct_operation_task_ids():
     first = _allocate_operation_task_id("turn-first")
     second = _allocate_operation_task_id("turn-second")
 
-    assert first.startswith("task-")
-    assert second.startswith("task-")
+    assert first.startswith("inject-")
+    assert second.startswith("inject-")
     assert first != second
 
 
@@ -368,7 +368,7 @@ class TestIntentClarificationNode:
             result = await node(state)
             assert result["confirmed_intent"] == "inject"
             op_task_id = result["task_id"]
-            assert op_task_id.startswith("task-")
+            assert op_task_id.startswith("inject-")
             # The on-disk JSON file must NOT exist yet — bootstrap is
             # deferred to ``intent_confirm.approved``.
             task_json = tmp_path / "tasks" / f"{op_task_id}.json"

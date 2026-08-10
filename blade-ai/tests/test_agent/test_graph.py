@@ -65,6 +65,7 @@ class TestBuildPipelineGraph:
             "verifier_loop",
             "finalize_verification",
             "se_detect",
+            "terminal_reports",
             "save_memory",
             "reject",
             "plan_change_confirm",
@@ -90,6 +91,27 @@ class TestBuildPipelineGraph:
         graph = build_pipeline_graph(phase1_tools=[], phase2_tools=[])
         branch = graph.branches["finalize_verification"]["route_after_finalize"]
         assert branch.ends["replan"] == "agent_loop"
+
+    def test_terminal_funnel_edges(self):
+        """task-349ccf5d: every experiment terminal path funnels through
+        terminal_reports BEFORE save_memory, so report generation
+        (postmortem / issue) also runs on the reject and pre-injection
+        end paths — not only the verify path."""
+        graph = build_pipeline_graph(phase1_tools=[], phase2_tools=[])
+        edges = set(graph.edges)
+        assert ("se_detect", "terminal_reports") in edges
+        assert ("terminal_reports", "save_memory") in edges
+        assert ("reject", "terminal_reports") in edges
+        # reject no longer carries its own post-save routing — the
+        # batch_next / END decision is save_memory's existing edge.
+        assert "reject" not in graph.branches
+
+    def test_direct_execute_end_routes_to_terminal_reports(self):
+        """Pre-injection safety rejection ("end") still gets reports."""
+        graph = build_pipeline_graph(phase1_tools=[], phase2_tools=[])
+        branch = graph.branches["direct_execute"]["route_after_direct_execute"]
+        assert branch.ends["end"] == "terminal_reports"
+        assert branch.ends["verifier"] == "verifier_loop"
 
     def test_pipeline_graph_with_tools(self):
         """Pipeline graph should accept non-empty tool lists."""

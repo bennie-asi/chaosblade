@@ -22,7 +22,6 @@ from chaos_agent.memory.context_manager import (
     calculate_token_warning_state,
     ensure_pair_integrity,
     group_messages_by_round,
-    post_compact_cleanup,
     resolve_auto_compact_threshold,
     strip_large_outputs,
 )
@@ -503,47 +502,3 @@ class TestStripLargeOutputs:
     def test_empty_messages(self):
         result = strip_large_outputs([])
         assert result == []
-
-
-# ---------------------------------------------------------------------------
-# New tests: post_compact_cleanup (Migration Point 8)
-# ---------------------------------------------------------------------------
-
-
-class TestPostCompactCleanup:
-    """Test post_compact_cleanup() cache clearing."""
-
-    def test_returns_dict(self):
-        state = {"task_id": "test-task"}
-        result = post_compact_cleanup(state)
-        assert isinstance(result, dict)
-
-    def test_marks_compacted_this_turn(self):
-        state = {"task_id": "test-task"}
-        result = post_compact_cleanup(state)
-        assert result.get("_compacted_this_turn") is True
-
-    def test_empty_task_id(self):
-        state = {}
-        result = post_compact_cleanup(state)
-        assert isinstance(result, dict)
-        # Should still mark compaction
-        assert result.get("_compacted_this_turn") is True
-
-    def test_clears_env_cache(self):
-        """Verify env cache is cleared for the task."""
-        import asyncio
-        from chaos_agent.agent.env_info import compute_env_info, clear_env_cache
-
-        # Populate cache
-        asyncio.run(compute_env_info(task_id="cleanup-test"))
-
-        state = {"task_id": "cleanup-test"}
-        result = post_compact_cleanup(state)
-
-        # After cleanup, next compute_env_info should re-collect
-        # (we can't easily verify this without mocking, but at least no error)
-        assert isinstance(result, dict)
-
-        # Clean up
-        clear_env_cache()

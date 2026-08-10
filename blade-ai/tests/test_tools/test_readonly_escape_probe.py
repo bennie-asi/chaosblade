@@ -239,3 +239,50 @@ class TestClassifierScopeForEscapeProbe:
         from chaos_agent.agent.target_guard.classifier import SCOPE_ESCAPE
 
         assert self._scope(inner) == SCOPE_ESCAPE
+
+
+class TestHostPrefixedAbsolutePaths:
+    """``/host/...`` binaries classify by BASENAME — the path prefix is inert.
+
+    A dead ``binary.startswith("/host")`` branch once sat next to the escape
+    check (born dead: ``binary`` is already the basename, so it never fired).
+    These tests pin the semantics the dead branch was never allowed to change:
+    a ``/host``-prefixed probe is a legitimate debug-pod node-inspection path
+    and must be judged by the REAL binary, fail-closed when unknown.
+    """
+
+    @pytest.mark.parametrize("inner", [
+        "/host/usr/bin/cat /etc/os-release",
+        "/host/usr/bin/iptables -L INPUT -n",
+        "/host/usr/bin/systemctl status kubelet",
+        "/host/usr/bin/df -h | grep -v tmpfs",
+    ])
+    def test_readonly_host_paths_allowed_in_exec(self, inner):
+        assert is_readonly_kubectl_exec(_exec(inner)), (
+            kubectl_exec_rejection_reason(_exec(inner))
+        )
+
+    @pytest.mark.parametrize("inner", [
+        "/host/usr/bin/iptables -A INPUT -j DROP",
+        "/host/usr/bin/systemctl stop kubelet",
+        "/host/usr/bin/dd if=/dev/zero of=/tmp/f bs=1M count=10",
+        "/host/usr/sbin/totally-unknown-tool --whatever",  # fail closed
+    ])
+    def test_mutating_or_unknown_host_paths_rejected_in_exec(self, inner):
+        assert not is_readonly_kubectl_exec(_exec(inner))
+
+    @pytest.mark.parametrize("command", [
+        "/host/usr/bin/cat /etc/os-release",
+        "/host/usr/bin/df -h",
+    ])
+    def test_readonly_host_paths_allowed_on_bare_host(self, command):
+        assert host_command_rejection_reason(command) is None, (
+            host_command_rejection_reason(command)
+        )
+
+    @pytest.mark.parametrize("command", [
+        "/host/usr/bin/iptables -F",
+        "/host/usr/sbin/totally-unknown-tool --whatever",
+    ])
+    def test_mutating_or_unknown_host_paths_rejected_on_bare_host(self, command):
+        assert host_command_rejection_reason(command) is not None

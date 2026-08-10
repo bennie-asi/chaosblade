@@ -25,7 +25,7 @@ import json
 import logging
 from typing import Annotated, Literal, Optional
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
 from pydantic import BeforeValidator
 
@@ -55,7 +55,11 @@ from chaos_agent.agent.dispatch import dispatch_node_message
 from chaos_agent.agent.spec.fault_registry import family_for_scope
 from chaos_agent.agent.prompts.builders import build_system_prompt
 from chaos_agent.agent.prompts.modes import PromptMode
-from chaos_agent.persistence.task_identity import is_real_task_id, new_task_id
+from chaos_agent.persistence.task_identity import (
+    is_real_task_id,
+    new_inject_task_id,
+    new_recover_task_id,
+)
 from chaos_agent.agent.state import AgentState
 from chaos_agent.config.settings import settings
 from chaos_agent.memory.hook import merge_hook_updates
@@ -280,8 +284,12 @@ def bootstrap_task_session(
         )
 
 
-def _allocate_operation_task_id(current_task_id: str) -> str:
-    """Allocate a real ``task-<hex>`` ID for an inject / recover op.
+def _allocate_operation_task_id(current_task_id: str, operation: str = "inject") -> str:
+    """Allocate a real task ID for an inject / recover op.
+
+    The prefix names the owning pipeline: ``inject-<uuid4>`` for inject
+    (including batch inject) and ``recover-<uuid4>`` for recover, so the
+    task kind is visible directly in the persisted json filenames.
 
     Only the inject and recover pipelines own the concept of a "task";
     intent clarification, chat, and capability Q&A do not. This helper
@@ -289,7 +297,7 @@ def _allocate_operation_task_id(current_task_id: str) -> str:
     two pipelines (i.e. when ``intent_clarification`` returns
     ``confirmed_intent="inject"`` or ``"recover"``) so the task
     identity is born inside the pipeline that owns it — turn.py /
-    routes do NOT mint ``task-`` IDs themselves.
+    routes do NOT mint task IDs themselves.
 
     If the state already carries a real task id (CLI runner mints one
     externally before entering the graph), reuse it so we don't clobber
@@ -304,7 +312,9 @@ def _allocate_operation_task_id(current_task_id: str) -> str:
     """
     if is_real_task_id(current_task_id):
         return current_task_id
-    return new_task_id()
+    if operation == "recover":
+        return new_recover_task_id()
+    return new_inject_task_id()
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +489,7 @@ def submit_fault_intent(
     labels: Annotated[Optional[dict[str, str]], BeforeValidator(_validate_labels)] = None,
     params: Annotated[Optional[dict[str, str]], BeforeValidator(_validate_params)] = None,
     user_description: str = "",
+    use_case_name: str = "",
 ) -> str:
     """Submit the collected fault injection intent (planning ONLY —
     structured handoff to execution confirmation).
@@ -494,7 +505,14 @@ def submit_fault_intent(
     Inputs: fault_type "<scope>-<target>-<action>"; target = subsystem,
     NOT a resource instance name; fault_revision replayed exactly
     (0 = none yet); namespace empty for host/cluster-scoped;
-    names/labels/params per the reviewed spec.
+    names/labels/params per the reviewed spec. Environment-bound params
+    values must carry a probe trail from the CURRENT environment — on a
+    probe/user conflict do NOT submit; go back to the user with the
+    environment-verified recommendation. Skill-case example literals are
+    templates, never data. Downstream preserves params verbatim as
+    user-approved.
+    use_case_name: skill use case the user chose in this dialogue; omit
+    when none was chosen.
 
     Output: acknowledgment. Side effects: none (NO injection here).
     """
@@ -613,7 +631,7 @@ async def query_active_experiments() -> str:
     When to use:
       - The user wants to recover / undo / rollback a fault but did NOT give a
         task_id — call this FIRST to discover candidates, then
-        ``recover_task(task_id="task-xxx")``.
+        ``recover_task(task_id="<id from the list>")``.
       - Do NOT use to inspect cluster/experiment health (use blade_status /
         kubectl); this only lists THIS tenant's recoverable experiments.
 
@@ -656,8 +674,8 @@ def recover_task(task_id: str) -> str:
         FIRST to find it — never guess a task_id.
 
     Inputs:
-      - task_id: the experiment's task_id (e.g. "task-xxx"), from the user or
-        from ``query_active_experiments``.
+      - task_id: the experiment's task_id (e.g. "inject-xxx"), from the user
+        or from ``query_active_experiments``.
 
     Output: an acknowledgment string; the recover graph then runs the reverse
       operation and its Layer-2 verification.
@@ -705,6 +723,7 @@ def _extract_submit_args(messages: list) -> dict:
                         args.get("fault_revision")
                     ),
                     "user_description": _scalar_str(args.get("user_description")),
+                    "use_case_name": _scalar_str(args.get("use_case_name")),
                 }
             # AIMessage without a submit call — older turn we don't
             # care about; abandon the walk.
@@ -1171,7 +1190,7 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
                 # preserves tracker continuity for the downstream
                 # ``intent_confirm`` node (whose tracker is keyed on
                 # ``state.task_id``).
-                op_task_id = _allocate_operation_task_id(state.get("task_id", ""))
+                op_task_id = _allocate_operation_task_id(state.get("task_id", ""), operation="inject")
                 # NOTE — Option A: intentionally NOT trimming messages
                 # here, NOT building the IntentClarificationSummary, and
                 # NOT calling ``bootstrap_task_session``. Those side
@@ -1269,7 +1288,7 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
                     dialogue_round=dialogue_round,
                 )
                 _persist_dialogue(tui_session_id, persist_list)
-                op_task_id = _allocate_operation_task_id(state.get("task_id", ""))
+                op_task_id = _allocate_operation_task_id(state.get("task_id", ""), operation="inject")
                 return merge_hook_updates({
                     "confirmed_intent": "batch_inject",
                     "fault_spec": existing_batch[0].to_dict(),
@@ -1309,7 +1328,7 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
                 dialogue_round=dialogue_round,
             )
             _persist_dialogue(tui_session_id, persist_list)
-            op_task_id = _allocate_operation_task_id(state.get("task_id", ""))
+            op_task_id = _allocate_operation_task_id(state.get("task_id", ""), operation="recover")
             bootstrap_task_session(
                 op_task_id,
                 operation="recover",

@@ -17,7 +17,6 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
-from uuid import uuid4
 
 from langchain_core.messages import HumanMessage, RemoveMessage
 
@@ -25,6 +24,7 @@ from chaos_agent.agent.spec.fault_spec import SOURCE_TUI, FaultSpec
 from chaos_agent.agent.nodes.store._store_sync import sync_to_store
 from chaos_agent.agent.state import AgentState
 from chaos_agent.agent.state_mgmt.state_lifecycle import build_batch_iteration_state
+from chaos_agent.persistence.task_identity import new_inject_task_id
 from chaos_agent.utils.time import now_iso
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ async def batch_setup(state: AgentState) -> dict:
             user_description=existing.get("user_description", ""),
         )
 
-    new_task_id = f"task-{uuid4()}"
+    new_task_id = new_inject_task_id()
     tui_sid = state.get("tui_session_id", "")
 
     try:

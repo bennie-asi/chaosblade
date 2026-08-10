@@ -304,6 +304,24 @@ def _retired_uids_from_residuals(residuals_cleaned: list[dict]) -> list[str]:
     ]
 
 
+def _verify_replan_eligible(state, verification: dict) -> bool:
+    """Whether an unverified verdict may re-enter Phase 1 for re-planning.
+
+    The verdict gate itself (unverified + Layer 2 failed) is necessary but
+    not sufficient: direct mode is excluded. A direct run carries the
+    injection the USER specified verbatim — there is no plan to revise, and
+    ``agent_loop`` has no Phase-1 planning context to replan against
+    (direct runs skip Phase 1). Re-planning would silently substitute a
+    different injection for the one ordered. Such runs finalize the verdict
+    as-is; budget gating stays at the call site.
+    """
+    return (
+        verification.get("level", "") == "unverified"
+        and verification.get("layer2", {}).get("status", "unknown") == "failed"
+        and not state.get("direct", False)
+    )
+
+
 def _build_verify_replan_context(
     verification: dict,
     residuals_cleaned: list[dict],
@@ -860,8 +878,7 @@ def make_finalize_verification(registry=None):
         # ---- Verify-Replan: unverified + L2 failed → replan to Phase 1 ----
         _level = verification.get("level", "")
         _l2_status = verification.get("layer2", {}).get("status", "unknown")
-
-        if _level == "unverified" and _l2_status == "failed":
+        if _verify_replan_eligible(state, verification):
             verify_replan_count = state.get("verify_replan_count", 0)
             try:
                 _max_verify_replan = int(settings.max_verify_replan_count)

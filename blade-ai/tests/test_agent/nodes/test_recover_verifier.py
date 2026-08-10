@@ -4,7 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from chaos_agent.agent.nodes.execute._injection_detection import (
     _was_kubectl_blade_injection_successful,
@@ -563,10 +563,126 @@ class TestBuildLayer1RecoveryPrompt:
         assert "Do NOT use interactive commands" in prompt
         assert "there is no ChaosBlade" in prompt
 
+    def test_landed_reminder_kept_but_no_heuristic_gate(self):
+        """Batch 2 (revised): enforcement is programmatic (Layer 1 success
+        guard), not prompt rules. The prompt keeps a ONE-line intent
+        reminder only — no heuristic Completion Gate rule block."""
+        for prompt in (
+            _build_layer1_recovery_prompt(),
+            _build_layer1_recovery_prompt(is_kubectl_blade=True),
+        ):
+            assert "Completion Gate" not in prompt
+            assert "confirmed landed at the API" in prompt
+
     def test_contains_programmatic_patterns(self):
         prompt = _build_layer1_recovery_prompt()
         # Interactive commands must be translated into programmatic equivalents.
         assert "programmatic equivalents" in prompt
+
+    def test_kubectl_blade_recovery_prompt_is_tool_agnostic(self):
+        """The kubectl-exec recovery prompt follows the tool-abstraction
+        boundary: namespace-agnostic discovery semantics in GENERIC terms,
+        no literal tool-call syntax (concrete forms live in knowledge docs).
+
+        task-e9bae269: the cluster's tool pods lived in `default`, so the
+        legacy 'look in the chaosblade namespace' instruction found nothing
+        and recovery could never reach the experiment.
+        """
+        prompt = _build_layer1_recovery_prompt(is_kubectl_blade=True)
+        # Namespace-agnostic discovery semantics
+        assert "NEVER assume" in prompt
+        assert "ACROSS ALL NAMESPACES" in prompt
+        assert "deployment-specific" in prompt
+        # Recovery must mirror the in-cluster injection channel
+        assert "in-cluster channel" in prompt
+        # First-principles command authority: the tool's own help/usage and
+        # runtime output are the ground truth — docs/history may lag
+        assert "help/usage" in prompt
+        assert "runtime behavior is the ground truth" in prompt
+        # Documentation must never be positioned as the command authority
+        assert "knowledge reading tool" not in prompt
+        # No dangling references to sections that don't carry the namespace
+        assert "shows the exact pod (and its namespace)" not in prompt
+        # No hardcoded namespace assumption anywhere
+        assert "pods -n chaosblade" not in prompt
+        assert "namespace='chaosblade'" not in prompt
+        # Tool-agnostic: no literal tool-call syntax or tool names
+        assert "kubectl(" not in prompt
+        assert "blade destroy" not in prompt
+        assert "blade_destroy" not in prompt
+        assert "blade_status" not in prompt
+
+
+class TestLayer1SuccessGuard:
+    """Programmatic acceptance gate for Layer 1 success claims (mirrors the
+    Layer 2 anti-laziness guard): a success with no post-mutation read-only
+    observation is rejected once and bounced back into the ReAct loop."""
+
+    @staticmethod
+    def _ai(tool_calls):
+        return AIMessage(content="", tool_calls=tool_calls)
+
+    @staticmethod
+    def _tc(cmd_id, *cmd):
+        return {
+            "name": "kubectl",
+            "args": {"command": list(cmd)},
+            "id": cmd_id,
+            "type": "tool_call",
+        }
+
+    def test_success_with_post_mutation_observation_passes(self):
+        from chaos_agent.agent.nodes.recover._recover_verifier_loop import (
+            _layer1_success_guard_feedback,
+        )
+
+        messages = [
+            self._ai([self._tc("c1", "scale", "deployment/app", "--replicas", "3", "-n", "default")]),
+            self._ai([self._tc("c2", "get", "deployment", "app", "-n", "default")]),
+        ]
+        layer1 = RecoverLayer1Result(status="passed", details="")
+        assert _layer1_success_guard_feedback(layer1, {"messages": messages}) is None
+
+    def test_success_without_observation_rejected_once(self):
+        from chaos_agent.agent.nodes.recover._recover_verifier_loop import (
+            _layer1_success_guard_feedback,
+        )
+
+        messages = [
+            self._ai([self._tc("c1", "scale", "deployment/app", "--replicas", "3", "-n", "default")]),
+        ]
+        layer1 = RecoverLayer1Result(status="passed", details="")
+        state = {"messages": messages}
+        feedback = _layer1_success_guard_feedback(layer1, state)
+        assert feedback is not None
+        assert "RECOVERY EXECUTION GUARD" in feedback
+        # One-shot: the second claim passes (Layer 2 still verifies truth).
+        state["_layer1_success_guard_fired"] = True
+        assert _layer1_success_guard_feedback(layer1, state) is None
+
+    def test_readonly_only_layer1_passes(self):
+        from chaos_agent.agent.nodes.recover._recover_verifier_loop import (
+            _layer1_success_guard_feedback,
+        )
+
+        # No mutating call at all (e.g., pure observation) — nothing to
+        # confirm landed.
+        messages = [
+            self._ai([self._tc("c1", "get", "pods", "-n", "default")]),
+        ]
+        layer1 = RecoverLayer1Result(status="passed", details="")
+        assert _layer1_success_guard_feedback(layer1, {"messages": messages}) is None
+
+    def test_failed_status_not_gated(self):
+        from chaos_agent.agent.nodes.recover._recover_verifier_loop import (
+            _layer1_success_guard_feedback,
+        )
+
+        messages = [
+            self._ai([self._tc("c1", "scale", "deployment/app", "--replicas", "3", "-n", "default")]),
+        ]
+        layer1 = RecoverLayer1Result(status="failed", details="422")
+        assert _layer1_success_guard_feedback(layer1, {"messages": messages}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1225,6 +1341,12 @@ class TestMakeRecoverVerifierKubectlExecRouting:
             "otel-c-tool -n chaosblade -- blade create k8s pod-cpu fullload",
             json.dumps({"code": 200, "success": True, "result": "uid-k8s-abc"}),
         )
+        # Real runs observe the target after injection (verify phase); the
+        # Layer 1 success guard requires a read-only call after the last
+        # mutation, so model that observation here.
+        kubectl_inject_msgs += _make_kubectl_tool_call_pair(
+            "tc2", "get", "pods -n default", "NAME  READY  STATUS",
+        )
 
         state1 = {
             "task_id": "t1",
@@ -1273,6 +1395,10 @@ class TestMakeRecoverVerifierKubectlExecRouting:
             "tc1", "exec",
             "otel-c-tool -n chaosblade -- blade create k8s pod-cpu fullload",
             json.dumps({"code": 200, "success": True, "result": "uid-k8s-abc"}),
+        )
+        # Post-injection observation (see the first part of this test).
+        kubectl_inject_msgs += _make_kubectl_tool_call_pair(
+            "tc2", "get", "pods -n default", "NAME  READY  STATUS",
         )
 
         state1 = {
@@ -1325,9 +1451,63 @@ class TestMakeRecoverVerifierKubectlExecRouting:
         assert fin["recover_verification"]["level"] == "recovered"
 
     @pytest.mark.asyncio
+    async def test_layer1_success_without_observation_bounces_back(self):
+        """Programmatic success guard wiring: a Layer 1 success claim with no
+        read-only observation after the last mutation is rejected once and
+        bounced back into the Layer 1 ReAct loop instead of transitioning to
+        Layer 2 (mirrors the Layer 2 anti-laziness guard)."""
+        mock_l1_response = MagicMock()
+        mock_l1_response.content = (
+            "RECOVERY_EXECUTION_RESULT:\n"
+            "- Status: success\n"
+            "- Actions: destroyed experiment\n"
+            "- Details: none"
+        )
+        mock_l1_response.tool_calls = []
+
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_l1_response)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+
+        node = make_recover_verifier(llm=mock_llm, tools=[], registry=None)
+
+        # Injection mutation with NO post-mutation observation anywhere.
+        kubectl_inject_msgs = _make_kubectl_tool_call_pair(
+            "tc1", "exec",
+            "otel-c-tool -n chaosblade -- blade create k8s pod-cpu fullload",
+            json.dumps({"code": 200, "success": True, "result": "uid-k8s-abc"}),
+        )
+
+        state1 = {
+            "task_id": "t1",
+            "blade_uid": "uid-k8s-abc",
+            "skill_name": "cpu-stress",
+            "kubeconfig": "/path/to/kubeconfig",
+            "verifier_loop_count": 0,
+            "messages": kubectl_inject_msgs,
+            "target": {"namespace": "default", "names": ["test-pod"]},
+            "inject_context": "Injected CPU stress via ChaosBlade kubectl exec",
+            "recover_phase": "layer1_recovery",
+            "layer1_iteration_count": 0,
+        }
+        result1 = await node(state1)
+
+        # No Layer 2 transition — the claim was rejected.
+        assert result1.get("recover_phase") != "layer2_verification"
+        assert result1.get("_layer1_success_guard_fired") is True
+        # Layer 1 stays in progress for the bounce-back iteration.
+        assert result1["recover_layer1_cache"]["status"] == "in_progress"
+        # Guidance message appended after the LLM's conclusion.
+        msgs = result1["messages"]
+        assert isinstance(msgs[-1], HumanMessage)
+        assert "RECOVERY EXECUTION GUARD" in msgs[-1].content
+
+    @pytest.mark.asyncio
     async def test_kubectl_exec_inject_context_contains_destroy_instructions(self):
         """When kubectl exec injection is detected, the inject_context passed to
-        the Layer 1 LLM should contain blade destroy instructions."""
+        the Layer 1 LLM should contain tool-agnostic destroy instructions
+        (in-cluster channel semantics, no literal tool syntax)."""
         mock_l1_response = MagicMock()
         mock_l1_response.content = (
             "RECOVERY_EXECUTION_RESULT:\n"
@@ -1374,13 +1554,18 @@ class TestMakeRecoverVerifierKubectlExecRouting:
         }
         result = await node(state)
 
-        # The LLM's first call should contain blade destroy instructions in inject context
+        # The LLM's first call should contain tool-agnostic destroy instructions
         first_call_args = mock_llm.ainvoke.call_args_list[0]
         messages_arg = first_call_args[0][0]
-        # Find any message that contains blade destroy instructions
         all_content = " ".join(getattr(m, "content", "") for m in messages_arg if hasattr(m, "content"))
         assert "uid-k8s-abc" in all_content
-        assert "blade destroy" in all_content
+        assert "experiment-destroy command" in all_content
+        assert "in-cluster channel" in all_content
+        assert "do NOT assume" in all_content
+        # Tool-agnostic: no literal tool-call syntax
+        assert "kubectl(subcommand=" not in all_content
+        # Kubeconfig mandate wording is tool-agnostic too
+        assert "EVERY kubectl tool call" not in all_content
 
     @pytest.mark.asyncio
     async def test_kubectl_exec_layer2_uses_llm_driven_prompt(self):
@@ -1449,6 +1634,98 @@ class TestMakeRecoverVerifierKubectlExecRouting:
         second_call_args = mock_llm.ainvoke.call_args_list[1]
         system_msg = second_call_args[0][0][0]
         assert "recovery execution" in system_msg.content
+
+    @pytest.mark.asyncio
+    async def test_kubectl_exec_layer2_tool_pod_block_is_tool_agnostic(self):
+        """The recover Layer-2 tool pod context must follow the same boundary
+        as the inject verifier: namespace-agnostic discovery semantics and no
+        literal tool-call syntax (task-e9bae269; concrete forms live in
+        knowledge docs)."""
+        from chaos_agent.agent.spec.fault_spec import FaultSpec
+
+        # Layer 1 response
+        mock_l1_response = MagicMock()
+        mock_l1_response.content = (
+            "RECOVERY_EXECUTION_RESULT:\n"
+            "- Status: success\n"
+            "- Actions: destroyed experiment\n"
+            "- Details: ok"
+        )
+        mock_l1_response.tool_calls = []
+
+        # Layer 2 first iteration: executes verification command
+        mock_l2_tool_response = MagicMock()
+        mock_l2_tool_response.content = ""
+        mock_l2_tool_response.tool_calls = [{"name": "kubectl", "args": {"subcommand": "get", "v_args": "pod test-pod -n default", "kubeconfig": "/path/to/kubeconfig"}}]
+
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(side_effect=[mock_l1_response, mock_l2_tool_response])
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+
+        node = make_recover_verifier(llm=mock_llm, tools=["kubectl"], registry=None)
+
+        kubectl_inject_msgs = _make_kubectl_tool_call_pair(
+            "tc1", "exec",
+            "otel-c-tool -n chaosblade -- blade create k8s node-disk fill",
+            json.dumps({"code": 200, "success": True, "result": "uid-k8s-abc"}),
+        )
+
+        spec = FaultSpec(
+            namespace="cms-demo",
+            scope="node",
+            names=("node-a",),
+            blade_target="disk",
+            blade_action="fill",
+            params={"path": "/", "percent": "80"},
+        )
+
+        state1 = {
+            "task_id": "t1",
+            "blade_uid": "uid-k8s-abc",
+            "skill_name": "disk-fill",
+            "kubeconfig": "/path/to/kubeconfig",
+            "verifier_loop_count": 0,
+            "messages": kubectl_inject_msgs,
+            "target": {"namespace": "default", "names": ["node-a"]},
+            "inject_context": "Injected disk fill via in-cluster tool pod",
+            "recover_phase": "layer1_recovery",
+            "layer1_iteration_count": 0,
+            "fault_spec": spec.to_dict(),
+            "kubectl_exec_pod_name": "otel-c-tool-x",
+        }
+        result1 = await node(state1)
+
+        state2 = {
+            **state1,
+            "verifier_loop_count": 1,
+            "recover_phase": "layer2_verification",
+            "layer1_iteration_count": 1,
+            "recover_layer1_cache": result1.get("recover_layer1_cache"),
+            "messages": result1.get("messages", []),
+            "layer2_context_added": False,
+            "recover_layer1_type": "llm_driven",
+        }
+        await node(state2)
+
+        # The Layer-2 iteration call carries the tool pod context block
+        l2_call_args = mock_llm.ainvoke.call_args_list[1]
+        all_content = " ".join(
+            getattr(m, "content", "") for m in l2_call_args[0][0]
+            if hasattr(m, "content") and isinstance(m.content, str)
+        )
+        assert "## Available Tool Pod" in all_content
+        # Namespace-agnostic discovery semantics
+        assert "identify it across all namespaces before exec" in all_content
+        # No hardcoded namespace assertion anywhere in the block
+        assert "- Namespace: `chaosblade`" not in all_content
+        # Tool-agnostic: no literal tool-call syntax or injection-tool names
+        assert "kubectl(subcommand=" not in all_content
+        assert "blade status" not in all_content
+        assert "blade query" not in all_content
+        # Kubeconfig mandate is tool-agnostic too
+        assert "EVERY kubectl tool call" not in all_content
+        assert "cluster tool call" in all_content
 
 
 # ---------------------------------------------------------------------------
@@ -2418,9 +2695,10 @@ class TestBuildRecoverVerifierSystemPrompt:
         remember_pos = prompt.index("REMEMBER")
         output_format_pos = prompt.index("RECOVERY_VERIFICATION_RESULT")
         assert remember_pos > output_format_pos
-        # Tail of prompt must contain the REMEMBER recap
-        assert "REMEMBER" in prompt[-500:]
-        assert "stale data is NOT evidence" in prompt[-400:]
+        # Tail of prompt must contain the REMEMBER recap (window sized for
+        # the full recap, including the attribution line)
+        assert "REMEMBER" in prompt[-700:]
+        assert "stale data is NOT evidence" in prompt[-600:]
 
     def test_chaosblade_label(self):
         """is_chaosblade=True → Layer1 label is 'blade_destroy'."""
@@ -2678,3 +2956,470 @@ class TestFinalizeMarksInjectTask:
 
         # No update_task_state should happen (recover_task_id is empty)
         assert len(update_state_calls) == 0, f"Expected no state update, got {update_state_calls}"
+
+
+# ---------------------------------------------------------------------------
+# Combo injection recovery (blade experiment + kubectl-native component)
+# ---------------------------------------------------------------------------
+
+class TestMergeComboBladePart:
+    """Composite Layer-1 verdict: either part failing fails the whole."""
+
+    def _merge(self, layer1, blade_part=None, state=None):
+        from chaos_agent.agent.nodes.recover._recover_verifier_loop import (
+            _merge_combo_blade_part,
+        )
+        return _merge_combo_blade_part(
+            layer1, state or {}, blade_part_override=blade_part
+        )
+
+    def test_no_blade_part_is_identity(self):
+        l1 = RecoverLayer1Result(status="passed", details="native undone")
+        assert self._merge(l1) is l1
+
+    def test_blade_passed_annotates_native_verdict(self):
+        from chaos_agent.agent.result.verdict import Layer1Status
+
+        l1 = RecoverLayer1Result(status="passed", details="native undone")
+        # model_dump keeps enum objects — normalization must handle them.
+        merged = self._merge(l1, blade_part={"status": Layer1Status.PASSED, "details": ""})
+        assert str(getattr(merged.status, "value", merged.status)) == "passed"
+        assert "[blade experiment destroyed deterministically]" in merged.details
+
+    def test_blade_failed_fails_composite(self):
+        l1 = RecoverLayer1Result(status="passed", details="native undone")
+        merged = self._merge(l1, blade_part={"status": "failed", "details": "destroy err"})
+        assert str(getattr(merged.status, "value", merged.status)) == "failed"
+        assert "Combo recovery failed" in merged.details
+        assert "destroy err" in merged.details
+
+
+class TestComboRecoveryRouting:
+    """Combo injection must run the deterministic blade destroy FIRST, then
+    route to the LLM-driven Layer-1 flow for the native undo — deterministic
+    recovery alone would leak the native mutation."""
+
+    def _combo_state(self):
+        return {
+            "task_id": "t1",
+            "blade_uid": "uid-combo",
+            "skill_name": "combo-skill",
+            "kubeconfig": "/path/to/config",
+            "verifier_loop_count": 0,
+            "messages": [],
+            "target": {"namespace": "default", "names": ["test-pod"]},
+            "recover_phase": "layer1_recovery",
+            "layer1_iteration_count": 0,
+            "injection_method": "host_blade",
+            "combo_native_issued": True,
+            "inject_context": "Scaled deploy/foo to 0 replicas via kubectl patch",
+        }
+
+    def _mock_l1_llm(self):
+        resp = MagicMock()
+        resp.content = (
+            "RECOVERY_EXECUTION_RESULT:\n"
+            "- Status: success\n"
+            "- Actions: reverted kubectl patch on deploy/foo\n"
+            "- Details: none"
+        )
+        resp.tool_calls = []
+        llm = AsyncMock()
+        llm.ainvoke = AsyncMock(return_value=resp)
+        llm.bind_tools = MagicMock(return_value=llm)
+        llm.bind = MagicMock(return_value=llm)
+        return llm
+
+    @pytest.mark.asyncio
+    async def test_combo_routes_to_llm_after_deterministic_blade_destroy(self):
+        from chaos_agent.agent.nodes.recover import _recover_verifier_loop as rvl
+
+        blade_result = RecoverLayer1Result(status="passed", details="destroyed")
+        llm = self._mock_l1_llm()
+        node = make_recover_verifier(llm=llm, tools=[], registry=None)
+        with patch.object(
+            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            return_value=blade_result,
+        ) as mock_l1:
+            result = await node(self._combo_state())
+
+        # Blade part destroyed deterministically first...
+        mock_l1.assert_awaited_once()
+        # ...then the LLM flow was entered (not the deterministic terminal).
+        assert llm.ainvoke.await_count >= 1
+        bp = result.get("combo_blade_part")
+        assert bp is not None
+        assert str(getattr(bp.get("status"), "value", bp.get("status"))) == "passed"
+        # Composite verdict: native passed, blade part annotated.
+        cache = result.get("recover_layer1_cache", {})
+        assert "[blade experiment destroyed deterministically]" in cache.get("details", "")
+        # Combo context reached the LLM messages.
+        msgs = result.get("messages", [])
+        assert any(
+            "handled by the framework" in str(getattr(m, "content", "")) for m in msgs
+        )
+
+    @pytest.mark.asyncio
+    async def test_combo_blade_destroy_failure_fails_composite(self):
+        from chaos_agent.agent.nodes.recover import _recover_verifier_loop as rvl
+
+        blade_result = RecoverLayer1Result(status="failed", details="destroy error xyz")
+        llm = self._mock_l1_llm()
+        node = make_recover_verifier(llm=llm, tools=[], registry=None)
+        with patch.object(
+            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            return_value=blade_result,
+        ):
+            result = await node(self._combo_state())
+
+        cache = result.get("recover_layer1_cache", {})
+        assert str(getattr(cache.get("status"), "value", cache.get("status"))) == "failed"
+        assert "Combo recovery failed" in cache.get("details", "")
+        assert "destroy error xyz" in cache.get("details", "")
+
+    @pytest.mark.asyncio
+    async def test_implicit_combo_by_durable_cross_check(self):
+        """Marker absent, but durable cross-check proves the combo: a
+        native-family attribution alongside a live blade_uid cannot arise
+        legitimately — recovery must still destroy the blade part first and
+        route the native undo to the LLM flow."""
+        from chaos_agent.agent.nodes.recover import _recover_verifier_loop as rvl
+
+        blade_result = RecoverLayer1Result(status="passed", details="destroyed")
+        llm = self._mock_l1_llm()
+        node = make_recover_verifier(llm=llm, tools=[], registry=None)
+        state = self._combo_state()
+        del state["combo_native_issued"]  # marker never landed
+        # The cross-check evidence itself: native-family attribution with a
+        # live blade_uid.
+        state["injection_method"] = "kubectl_native"
+        with patch.object(
+            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            return_value=blade_result,
+        ) as mock_l1:
+            result = await node(state)
+
+        mock_l1.assert_awaited_once()
+        assert llm.ainvoke.await_count >= 1
+        assert result.get("combo_blade_part") is not None
+        cache = result.get("recover_layer1_cache", {})
+        assert "[blade experiment destroyed deterministically]" in cache.get("details", "")
+
+    @pytest.mark.asyncio
+    async def test_stale_combo_blade_part_cleared_for_non_combo_run(self):
+        """Defense against cross-run contamination: a blade-part verdict
+        inherited in state from an earlier recover run must be cleared at
+        the LLM-flow entry of a NON-combo run — otherwise the composite
+        merge would mis-report this run as a combo failure."""
+        llm = self._mock_l1_llm()
+        node = make_recover_verifier(llm=llm, tools=[], registry=None)
+        state = self._combo_state()
+        # Pure native run: no blade UID, no marker — but a stale verdict
+        # lingers in the inherited state.
+        del state["combo_native_issued"]
+        state["blade_uid"] = None
+        state["injection_method"] = "kubectl_native"
+        state["combo_blade_part"] = {"status": "failed", "details": "stale verdict"}
+        result = await node(state)
+
+        assert result.get("combo_blade_part") is None
+        cache = result.get("recover_layer1_cache", {})
+        assert "Combo recovery failed" not in cache.get("details", "")
+        assert "stale verdict" not in cache.get("details", "")
+
+    @pytest.mark.asyncio
+    async def test_pure_blade_not_implicit_combo(self):
+        """Experiment-method attribution + UID is NOT a combo: the
+        cross-check only fires for native-family methods, so pure-blade
+        tasks keep the zero-LLM deterministic route."""
+        from chaos_agent.agent.nodes.recover import _recover_verifier_loop as rvl
+
+        blade_result = RecoverLayer1Result(status="passed", details="destroyed")
+        llm = self._mock_l1_llm()
+        node = make_recover_verifier(llm=llm, tools=[], registry=None)
+        state = self._combo_state()
+        del state["combo_native_issued"]
+        with patch.object(
+            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            return_value=blade_result,
+        ) as mock_l1:
+            result = await node(state)
+
+        mock_l1.assert_awaited_once()
+        # The combo flow did NOT run: no blade-part record and no composite
+        # annotation on the Layer-1 verdict (the LLM call count is not a
+        # discriminator — a deterministic Layer 1 still transitions to the
+        # LLM-driven Layer 2 verification within the same invocation).
+        assert result.get("combo_blade_part") is None
+        cache = result.get("recover_layer1_cache", {})
+        assert "[blade experiment destroyed deterministically]" not in cache.get("details", "")
+
+    @pytest.mark.asyncio
+    async def test_combo_not_stealed_by_stale_blade_message_without_method(self):
+        """Regression for the elif-steal edge: a combo marked ONLY by the
+        durable flag (injection_method cleared by a keep_blade_uid replan
+        seam) with a stale failed blade_create ToolMessage still in the
+        history must NOT fall into the terminal "blade attempted, no UID"
+        branch — the UID exists, the blade part was pre-destroyed, and the
+        native undo must reach the LLM flow."""
+        from chaos_agent.agent.nodes.recover import _recover_verifier_loop as rvl
+
+        blade_result = RecoverLayer1Result(status="passed", details="destroyed")
+        llm = self._mock_l1_llm()
+        node = make_recover_verifier(llm=llm, tools=[], registry=None)
+        state = self._combo_state()
+        state["injection_method"] = None  # cleared by the replan seam
+        # Stale evidence: blade_create was called (and failed) before the
+        # successful re-attribution; no durable method backs the scan.
+        state["messages"] = [
+            ToolMessage(content="Error: create failed", name="blade_create", tool_call_id="tc1"),
+        ]
+        with patch.object(
+            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            return_value=blade_result,
+        ) as mock_l1:
+            result = await node(state)
+
+        # Pre-destroy ran and the LLM flow was entered (not the terminal
+        # "no UID available" failure).
+        mock_l1.assert_awaited_once()
+        assert llm.ainvoke.await_count >= 1
+        assert result.get("combo_blade_part") is not None
+        cache = result.get("recover_layer1_cache", {})
+        assert "no UID available" not in cache.get("details", "")
+
+    @pytest.mark.asyncio
+    async def test_implicit_cross_check_host_native(self):
+        """The cross-check is provider-driven, not kubectl-specific: a
+        host_native attribution (HostShellProvider, is_multi_step=True)
+        alongside a live blade_uid is combo evidence on the host scope too."""
+        from chaos_agent.agent.nodes.recover import _recover_verifier_loop as rvl
+
+        blade_result = RecoverLayer1Result(status="passed", details="destroyed")
+        llm = self._mock_l1_llm()
+        node = make_recover_verifier(llm=llm, tools=[], registry=None)
+        state = self._combo_state()
+        del state["combo_native_issued"]
+        state["injection_method"] = "host_native"
+        with patch.object(
+            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            return_value=blade_result,
+        ) as mock_l1:
+            result = await node(state)
+
+        mock_l1.assert_awaited_once()
+        assert llm.ainvoke.await_count >= 1
+        assert result.get("combo_blade_part") is not None
+        cache = result.get("recover_layer1_cache", {})
+        assert "[blade experiment destroyed deterministically]" in cache.get("details", "")
+
+
+# ---------------------------------------------------------------------------
+# Layer 2 read-only screen (problem B)
+# ---------------------------------------------------------------------------
+
+class TestLayer2ReadOnlyScreen:
+    """The verifier observes; it never repairs. Mutating tool calls in a
+    Layer 2 turn are refused by the recover_verifier_screener graph-edge
+    node (phase1/tool_screener paradigm) with unrecovered guidance.
+    Layer 1 still repairs: the read-only gate keys off recover_phase."""
+
+    @staticmethod
+    def _make():
+        from chaos_agent.agent.nodes._phase_screener import make_phase_screener
+        return make_phase_screener(
+            capability_phase="recover_verify",
+            readonly=lambda s: s.get("recover_phase", "layer1_recovery") == "layer2_verification",
+            phase_duty=(
+                "Layer 2 verifies recovery outcome with read-only observations "
+                "only — it never repairs. Recovery actions belong to Layer 1, "
+                "which has already run."
+            ),
+            verdict_guidance=(
+                "If your observations show residual fault effects, submit your "
+                "verdict as `unrecovered` and describe in details exactly which "
+                "recovery action is needed. If the residual matches a recorded "
+                "side effect, report it as a warning. Do not re-attempt the "
+                "refused call in any form."
+            ),
+        )
+
+    @staticmethod
+    def _state(tool_calls, *, layer2=True):
+        return {
+            "messages": [AIMessage(content="", tool_calls=tool_calls)],
+            "recover_phase": "layer2_verification" if layer2 else "layer1_recovery",
+        }
+
+    @pytest.mark.asyncio
+    async def test_read_only_batch_passes(self):
+        node, _ = self._make()
+        state = self._state([{
+            "name": "kubectl", "id": "c1", "type": "tool_call",
+            "args": {"command": ["get", "pods", "-n", "default"]},
+        }])
+        update = await node(state)
+        assert update["screener_route"] == "pass"
+        assert "messages" not in update
+
+    @pytest.mark.asyncio
+    async def test_mutating_call_refused_with_paired_feedback(self):
+        node, route = self._make()
+        state = self._state([{
+            "name": "kubectl", "id": "c1", "type": "tool_call",
+            "args": {"command": ["delete", "pod", "pod-a", "-n", "default"]},
+        }])
+        update = await node(state)
+        assert update["screener_route"] == "retry"
+        assert route({**state, **update}) == "retry"
+        fabricated = update["messages"]
+        assert len(fabricated) == 1
+        msg = fabricated[0]
+        assert msg.tool_call_id == "c1"
+        assert getattr(msg, "status", None) == "error"
+        assert "readonly_phase_violation" in msg.content
+        assert "unrecovered" in msg.content
+
+    @pytest.mark.asyncio
+    async def test_layer1_mutating_call_allowed(self):
+        """Layer 1 repairs — the read-only gate must NOT fire while
+        recover_phase is layer1_recovery (the Layer 1/2 branch is the
+        whole point of the state-driven readonly predicate)."""
+        node, _ = self._make()
+        state = self._state([{
+            "name": "kubectl", "id": "c1", "type": "tool_call",
+            "args": {"command": ["delete", "pod", "pod-a", "-n", "default"]},
+        }], layer2=False)
+        update = await node(state)
+        assert update["screener_route"] == "pass"
+
+    @pytest.mark.asyncio
+    async def test_submit_verdict_tool_passes(self):
+        node, _ = self._make()
+        state = self._state([{
+            "name": "submit_recover_verification", "id": "c1", "type": "tool_call",
+            "args": {"overall": "recovered"},
+        }])
+        update = await node(state)
+        assert update["screener_route"] == "pass"
+
+    @pytest.mark.asyncio
+    async def test_capability_probe_debug_exempt(self):
+        """kubectl_read debug is the capability-probe exception (shared
+        with phase1_screener): verification may create the ephemeral,
+        self-gated probe pod to inspect host-level state. The classifier
+        scopes it node/pod, so without the exemption Layer 2 probing
+        would be wrongly refused."""
+        node, _ = self._make()
+        state = self._state([{
+            "name": "kubectl_read", "id": "c1", "type": "tool_call",
+            "args": {"subcommand": "debug", "command": ["node/node-a"]},
+        }])
+        update = await node(state)
+        assert update["screener_route"] == "pass"
+
+    def test_recover_graph_wires_the_screener(self):
+        """The recover graph routes tool_calls through
+        recover_verifier_screener before recover_verifier_tools."""
+        from pathlib import Path
+
+        src = (
+            Path(__file__).resolve().parents[3]
+            / "src/chaos_agent/agent/graph.py"
+        ).read_text(encoding="utf-8")
+        assert "recover_verifier_screener" in src
+        assert '"continue": "recover_verifier_screener"' in src
+        assert "layer2_verification" in src
+
+
+# ---------------------------------------------------------------------------
+# Side-effect reconciliation contract (problems E, ①, ③)
+# ---------------------------------------------------------------------------
+
+def test_recover_prompts_carry_side_effect_reconciliation_contract():
+    """Layer 1 must undo/reconcile recorded side effects; Layer 2 must
+    verify each one. Keyword assertion on the loop source (the context
+    assembly is inline in the node)."""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[3]
+        / "src/chaos_agent/agent/nodes/recover/_recover_verifier_loop.py"
+    ).read_text(encoding="utf-8")
+    assert "Recorded Side Effects (must be undone or reconciled)" in src
+    assert "Side-Effect Reconciliation (verification duty)" in src
+    assert "the overall verdict must be unrecovered" in src
+
+
+# ---------------------------------------------------------------------------
+# Baseline truncation restoration (problem D)
+# ---------------------------------------------------------------------------
+
+class TestRecoverBaselineTruncationRestore:
+    def _baseline(self, stdout: str) -> dict:
+        return {
+            "success_count": 1,
+            "total_count": 1,
+            "captured_at": "2026-07-01T00:00:00",
+            "source": "skill",
+            "observations": [{
+                "exit_code": 0,
+                "description": "pod describe",
+                "command": "kubectl describe pod pod-a",
+                "stdout": stdout,
+            }],
+        }
+
+    def test_cached_original_restored_format_agnostic(self, tmp_path):
+        from chaos_agent.agent.nodes.recover.recover_verifier import (
+            _build_recover_baseline_tool_messages,
+        )
+
+        # Host-channel baseline output (df) — no kubectl describe sections:
+        # the restore must work for ANY observation format.
+        cache = tmp_path / "out.txt"
+        cached_original = (
+            "Filesystem  Size  Used Avail Use% Mounted on\n"
+            "/dev/vda1   40G   30G   10G  75% /\n"
+            "tmpfs       7.8G  100M  7.7G   2% /dev/shm\n"
+        )
+        cache.write_text(cached_original, encoding="utf-8")
+        stdout = (
+            "Filesystem  Size  Used Avail Use% Mounted on\n"
+            "\n⚠️ TRUNCATED. Use field_selector. Cache: " + str(cache)
+        )
+        msgs = _build_recover_baseline_tool_messages(self._baseline(stdout))
+        assert msgs
+        content = msgs[-1].content
+        assert "Restored from compactor cache" in content
+        # The full cached original is back, tail included.
+        assert "/dev/shm" in content
+
+    def test_missing_cache_flags_incomplete_evidence(self, tmp_path):
+        from chaos_agent.agent.nodes.recover.recover_verifier import (
+            _build_recover_baseline_tool_messages,
+        )
+
+        missing = tmp_path / "does-not-exist.txt"
+        stdout = (
+            "head of output\n"
+            "\n⚠️ TRUNCATED. Use field_selector. Cache: " + str(missing)
+        )
+        msgs = _build_recover_baseline_tool_messages(self._baseline(stdout))
+        assert msgs
+        content = msgs[-1].content
+        assert "baseline evidence incomplete" in content
+        assert str(missing) in content
+
+    def test_untruncated_baseline_unchanged(self):
+        from chaos_agent.agent.nodes.recover.recover_verifier import (
+            _build_recover_baseline_tool_messages,
+        )
+
+        msgs = _build_recover_baseline_tool_messages(
+            self._baseline("plain short output")
+        )
+        assert msgs
+        content = msgs[-1].content
+        assert "plain short output" in content
+        assert "restored from compactor cache" not in content

@@ -1,32 +1,11 @@
 """Memory nodes: load and save operational/session memory within the graph."""
 
-import asyncio
 import logging
 from uuid import uuid4
 
 from langchain_core.messages import HumanMessage
 
 from chaos_agent.agent.node_names import MEMORY_NODE
-
-
-def _format_duration_ms(ms) -> str:
-    """Render a duration in ms as ``Ns`` / ``Nm Ns``; empty when unknown."""
-    try:
-        ms_int = int(ms or 0)
-    except (TypeError, ValueError):
-        return ""
-    if ms_int <= 0:
-        return ""
-    seconds = ms_int // 1000
-    if seconds < 60:
-        return f"{seconds}s"
-    return f"{seconds // 60}m {seconds % 60}s"
-
-
-def read_fault_spec_lazy(state):
-    """Defer fault_spec import to avoid eager top-level cycle."""
-    from chaos_agent.agent.spec.fault_spec import read_fault_spec
-    return read_fault_spec(state)
 
 from chaos_agent.agent.nodes.store._store_sync import sync_to_store, sync_node_status_to_session
 from chaos_agent.persistence.task_identity import is_real_task_id
@@ -38,7 +17,6 @@ from chaos_agent.observability.status_tracker import (
     get_tracker,
     StatusCategory,
 )
-from chaos_agent.agent.dispatch import dispatch_node_message
 from chaos_agent.utils.time import now_iso
 
 logger = logging.getLogger(__name__)
@@ -292,129 +270,6 @@ async def _run_self_evolution(state: AgentState, task_id: str, tracker) -> None:
                 pass
 
 
-async def _generate_postmortem(
-    state: AgentState, task_id: str, tracker,
-) -> dict | None:
-    """Generate postmortem report via LLM when conditions are met.
-
-    All exceptions are swallowed so the result envelope ships unimpeded.
-    """
-    postmortem_payload: dict | None = None
-    try:
-        from chaos_agent.agent.postmortem import (
-            build_postmortem_context,
-            generate_postmortem,
-            save_postmortem,
-            should_generate_postmortem,
-        )
-        from chaos_agent.agent.postmortem.generator import make_summary
-
-        if should_generate_postmortem(dict(state), settings):
-            tracker.start(
-                StatusCategory.NODE, "postmortem",
-                "Generating postmortem (LLM)...",
-            )
-            await dispatch_node_message("postmortem", "Generating postmortem (LLM)...")
-            # R10 — wire the SAME tracing / OTel callbacks as the main
-            # graph LLM so postmortem's token usage flows into
-            # ``TaskTrace.total_token_input/output`` + OTel GenAI export.
-            from chaos_agent.agent.factory import make_llm
-            from chaos_agent.observability import status_tracker as _st_mod
-            _pm_callbacks: list = []
-            _trace_cb = getattr(_st_mod, "_tracing_callback", None)
-            if _trace_cb is not None:
-                _pm_callbacks.append(_trace_cb)
-            _otel_cb = getattr(_st_mod, "_otel_callback", None)
-            if _otel_cb is not None:
-                _pm_callbacks.append(_otel_cb)
-            pm_llm = make_llm(callbacks=_pm_callbacks or None)
-            context = build_postmortem_context(
-                dict(state),
-                max_messages=settings.postmortem_max_messages,
-            )
-            try:
-                markdown_body = await generate_postmortem(
-                    context, pm_llm,
-                    timeout=settings.postmortem_timeout_seconds,
-                )
-                # Audit trail: the postmortem LLM call is off the main graph and
-                # its request never enters ``messages`` — only the resulting
-                # markdown is kept. Record the call so an audit can see what the
-                # model was given, not just what it produced.
-                try:
-                    import json as _json
-
-                    from chaos_agent.memory.session_store import (
-                        get_global_session_store,
-                    )
-                    _store = get_global_session_store()
-                    if _store is not None:
-                        _store.record_aux_llm_call(
-                            task_id, purpose="postmortem",
-                            request=_json.dumps(context, ensure_ascii=False, default=str),
-                            response=markdown_body or "",
-                        )
-                except Exception as _e:
-                    logger.debug("postmortem aux record skipped: %s", _e)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Postmortem LLM call timed out after %ds for task %s",
-                    settings.postmortem_timeout_seconds, task_id,
-                )
-                tracker.update("Postmortem skipped (timeout)")
-                markdown_body = ""
-            except Exception as e:
-                logger.warning(
-                    "Postmortem LLM call failed for task %s: %s", task_id, e,
-                )
-                tracker.update(f"Postmortem skipped ({type(e).__name__})")
-                markdown_body = ""
-
-            if markdown_body:
-                from chaos_agent.agent.spec.fault_spec import fault_type_from_state
-                _spec = read_fault_spec_lazy(state)
-                verification = read_inject_verification(state) or {}
-                outcome = read_operation_outcome(state)
-                header_meta = {
-                    "fault_type": fault_type_from_state(state) or "unknown",
-                    "namespace": (_spec.namespace if _spec else "") or "unknown",
-                    "status": verification.get("level", "unknown"),
-                    "duration": _format_duration_ms(
-                        outcome.result.get("duration_ms", 0)
-                    ) if isinstance(outcome.result, dict) else "",
-                    "generated_at": now_iso(),
-                }
-                try:
-                    pm_path = save_postmortem(
-                        task_id, markdown_body, header_meta=header_meta,
-                    )
-                    postmortem_payload = {
-                        "path": str(pm_path),
-                        "markdown": markdown_body,
-                        "summary": make_summary(markdown_body),
-                    }
-                    tracker.update(
-                        f"Postmortem saved ({len(markdown_body)} chars)",
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Postmortem write failed for task %s: %s", task_id, e,
-                    )
-                    tracker.update("Postmortem skipped (write error)")
-    except Exception:
-        logger.exception("Postmortem subsystem unexpected error for task %s", task_id)
-    # Emit a completion event so the platform UI can show postmortem finished.
-    # The tracker.start("postmortem", ...) is emitted inside the try block;
-    # this complete pairs with it regardless of success/skip/error.
-    try:
-        tracker.complete(
-            f"Postmortem {'generated' if postmortem_payload else 'skipped'}"
-        )
-    except Exception:
-        pass
-    return postmortem_payload
-
-
 def _infer_failure_detail(state: AgentState) -> dict:
     """Infer failure_detail when task is in a failed state but none was set."""
     outcome = read_operation_outcome(state)
@@ -477,26 +332,11 @@ async def _finalize_session_store(
         from chaos_agent.memory.session_store import get_global_session_store
         store = get_global_session_store()
         if store is not None and is_real_task_id(task_id):
-            from chaos_agent.agent.state import infer_task_state
             merged = dict(state)
             merged.update(updates)
-            task_state = infer_task_state(merged)
-            if task_state == "injecting":
-                task_state = "injected" if merged.get("blade_uid") else "failed"
-
-            merged_outcome = read_operation_outcome(merged)
-            if confirmed_intent in ("chat", "recover"):
-                final_status = "completed"
-            elif not merged_outcome.error and (
-                merged.get("blade_uid")
-                or merged.get("injection_method")
-                or task_state in ("injected", "recovered", "partial_recovered")
-            ):
-                final_status = "completed"
-            else:
-                final_status = "failed"
 
             result_summary: str | dict = ""
+            _data: dict | None = None
             try:
                 from chaos_agent.agent.result.operation_result import build_inject_data_from_state
                 from chaos_agent.memory.session_finalizer import (
@@ -510,12 +350,35 @@ async def _finalize_session_store(
                     "build result_summary failed for task=%s",
                     task_id, exc_info=True,
                 )
+
+            # Derive the session status from the same canonical result
+            # projection the defensive finalize uses (task-ff057e7f):
+            # ``build_inject_data_from_state`` applies the fail-closed
+            # ``terminal_task_state`` and ``inject_session_status`` maps
+            # it to a status. A blade_uid proves a creation request was
+            # accepted, not that the fault took effect, so it must never
+            # upgrade a run without a verdict to "completed" — the old
+            # blade_uid-leniency here contradicted the result_summary
+            # written by this very function.
+            from chaos_agent.memory.session_finalizer import inject_session_status
+            if confirmed_intent in ("chat", "recover"):
+                final_status = "completed"
+            elif _data is not None:
+                final_status = inject_session_status(_data)
+            else:
+                final_status = "failed"
             full_messages = list(state.get("messages") or [])
             store.finalize_session(
                 task_id,
                 remaining_messages=full_messages,
                 result_summary=result_summary,
                 status=final_status,
+                # The working ledger lives only in LangGraph state unless
+                # handed over here — finalize_session supports the field
+                # and the task schema carries it, but no caller passed it,
+                # so every archived task showed progress_ledger=null even
+                # when update_progress had been used.
+                progress_ledger=merged.get("progress_ledger"),
             )
     except Exception:
         logger.warning(
@@ -567,16 +430,24 @@ async def save_memory(state: AgentState) -> dict:
     sync_node_status_to_session(state, "save_memory", "Experiment saved to TaskStore",
         detail={"verification_level": verification.get("level", "unknown")})
 
-    postmortem_payload = await _generate_postmortem(state, task_id, tracker)
+    inferred_failure = _infer_failure_detail(state)
 
     # Set finished_at timestamp for the task
     updates = {"finished_at": now_iso()}
-    # R11 — ALWAYS write the postmortem field (even when None) to
-    # OVERWRITE any leftover value from a prior experiment that shares
-    # this LangGraph thread.
-    updates["postmortem"] = postmortem_payload
+    # R11 — ALWAYS write the postmortem / issue-report fields (even when
+    # None) to OVERWRITE any leftover value from a prior experiment that
+    # shares this LangGraph thread. The artifacts are produced upstream
+    # by ``terminal_reports`` (runs on every experiment terminal path
+    # ahead of this node); pass them through so the single
+    # ``sync_to_store`` below persists them. Read through the canonical
+    # outcome reader (state-field contract: terminal outcome fields are
+    # high-risk direct reads).
+    _report_outcome = read_operation_outcome(state)
+    updates["postmortem"] = _report_outcome.postmortem
+    # Same R11 overwrite contract for the issue-report payload.
+    updates["issue_report"] = _report_outcome.issue_report
 
-    updates.update(_infer_failure_detail(state))
+    updates.update(inferred_failure)
 
     # Persist inject_context for cross-session recovery.
     if not state.get("inject_context"):

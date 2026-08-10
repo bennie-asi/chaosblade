@@ -35,6 +35,7 @@ from .freeze import (
     approved_from_dict,
     discover_names_by_labels,
     discover_owner_names,
+    discover_pod_pvc_claims,
     freeze_approved_target,
     freeze_approved_target_from_spec,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "canonicalise_kind",
     "discover_names_by_labels",
     "discover_owner_names",
+    "discover_pod_pvc_claims",
     "freeze_approved_target",
     "freeze_approved_target_from_spec",
     "infer_effective_target",

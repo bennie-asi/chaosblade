@@ -427,6 +427,24 @@ class TestToolGuardCheck:
         allowed, reason = self.guard.check(["blade", "create", ">", "/dev/null"])
         assert allowed is False
 
+    def test_redirect_dev_null_glued_is_not_a_device_write(self):
+        """A glued ``2>/dev/null`` token is a discard sink, not disk destruction.
+
+        Regression for task-4208d61c: a read-only probe carrying ``2>/dev/null``
+        was rejected as 'redirect to a device node' — a hard floor mislabel.
+        The regex blacklist now exempts the null/stdout/stderr/fd pseudo-devices;
+        a bare ``>`` token still trips SUSPICIOUS_SOLO_TOKENS above.
+        """
+        allowed, reason = self.guard.check(
+            ["kubectl", "get", "pods", "2>/dev/null"]
+        )
+        assert allowed is True, reason
+
+    def test_redirect_block_device_glued_still_blocked(self):
+        allowed, reason = self.guard.check(["blade", "create", ">/dev/sda"])
+        assert allowed is False
+        assert "Dangerous pattern" in reason
+
     def test_command_substitution_dollar_blocked(self):
         allowed, reason = self.guard.check(["blade", "$(", "whoami", ")"])
         assert allowed is False

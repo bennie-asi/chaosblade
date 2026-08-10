@@ -18,6 +18,7 @@ from chaos_agent.agent.state_mgmt.state_helpers import fail_state
 from chaos_agent.agent.target_guard import (
     discover_names_by_labels,
     discover_owner_names,
+    discover_pod_pvc_claims,
     freeze_approved_target_from_spec,
 )
 from chaos_agent.agent.result.verdict import FailureCategory
@@ -492,10 +493,21 @@ async def safety_check(state: AgentState) -> dict:
     resolved_names = await discover_names_by_labels(
         spec.scope, spec.namespace, dict(spec.labels), kubeconfig,
     )
+    # Freeze the PVC claim names the approved pod(s) reference — the anchor
+    # for the drill-occupancy-vehicle exception (a resource-occupancy drill
+    # creates a behaviourless pod claiming the SAME PVC; the screener
+    # validates the occupant's claims against this frozen set).
+    pvc_claims: tuple[str, ...] = ()
+    if (spec.scope or "").strip().lower() in ("pod", "container"):
+        pod_identities = tuple(spec.names) if spec.names else resolved_names
+        pvc_claims = await discover_pod_pvc_claims(
+            spec.namespace, pod_identities, kubeconfig,
+        )
     result["approved_target"] = freeze_approved_target_from_spec(
         spec,
         owner_names=owner_names,
         resolved_names=resolved_names,
+        pvc_claims=pvc_claims,
     )
 
     result = _attach_safety_score(result, spec, state, deep_signal)

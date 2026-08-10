@@ -37,6 +37,7 @@ class TestFreezeApprovedTarget:
             "lock_fault_type": True,
             "owner_names": [],
             "resolved_names": [],
+            "pvc_claims": [],
             "secondary_scopes": ["pvc", "persistentvolumeclaim", "pv", "persistentvolume", "configmap", "secret", "pod", "node"],
             "secondary_namespace": "prod",
             "host_name": "",

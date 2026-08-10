@@ -96,7 +96,7 @@ from chaos_agent.agent.dispatch import dispatch_node_message
 
 logger = logging.getLogger(__name__)
 
-# settings.max_verifier_loop is now configurable via settings.max_verifier_loop (default 10)
+# Loop budget: settings.max_verifier_loop (default 60, env BLADE_AI_MAX_VERIFIER_LOOP)
 
 
 # moved to _verifier_layer1.py: Layer1Result, _EXPIRED_STATES, _RUNNING_STATES,
@@ -545,6 +545,10 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
         inject_kubeconfig_into_tool_calls(response, kubeconfig)
         inject_task_id_into_tool_calls(response, task_id)
         sync_kubewiz_runtime(state)
+
+        # Read-only phase discipline is enforced by the verifier_screener
+        # graph-edge node (graph.py) between this node and verifier_tools,
+        # mirroring phase1_screener / tool_screener.
 
         # Build result
         result_update = {

@@ -250,6 +250,16 @@ async def finalize_recover_session(
             ),
             status=status,
             progress_ledger=values_fin.get("progress_ledger") if values_fin else None,
+            # Task-chain persistence: the recover record must point back at
+            # its inject task (state carries it via recovery_state; the
+            # inject_task_id argument is the fallback). Without this the
+            # task json loses the link and post-hoc analysis cannot pair
+            # recovery with its fault.
+            parent_task_id=str(
+                (values_fin.get("parent_task_id") if values_fin else "")
+                or inject_task_id
+                or ""
+            ),
         )
     except Exception:
         log = logger.warning if error_log_level == "warning" else logger.debug

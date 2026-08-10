@@ -53,6 +53,7 @@ from chaos_agent.agent.state import AgentState
 from chaos_agent.agent.state_mgmt.state_helpers import fail_state
 from chaos_agent.agent.result.verdict import FailureCategory
 from chaos_agent.config.settings import settings
+from chaos_agent.errors import ErrorAction, classify_error
 from chaos_agent.observability.status_tracker import (
     get_tracker,
     StatusCategory,
@@ -288,10 +289,16 @@ def _parse_blade_create_from_v_args(v_args: str) -> dict | None:
 
 
 def _build_replan_context(state: AgentState, request: ReplanRequest) -> dict:
-    """Extract structured error context from conversation history for Phase 1 replan."""
+    """Extract structured error context from conversation history for Phase 1 replan.
+
+    NOTE: live-experiment uids are deliberately NOT collected here. This
+    scan stops after 5 failed messages, so a successful ``blade_create``
+    buried deeper in history goes unseen (task-349ccf5d lost uid
+    ``5aaa51dbcb78a25d`` exactly this way). ``_fire_replan_seam`` fills
+    ``existing_blade_uids`` from the canonical extractor instead.
+    """
     messages = state.get("messages", [])
     failed_calls = []
-    existing_uids = []
 
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
@@ -299,7 +306,7 @@ def _build_replan_context(state: AgentState, request: ReplanRequest) -> dict:
             content = msg.content if isinstance(msg.content, str) else str(msg.content)
             tool_call_id = getattr(msg, "tool_call_id", "")
 
-            # Collect failed and successful blade_create calls
+            # Collect failed blade_create calls
             if name == "blade_create":
                 try:
                     data = json.loads(content)
@@ -309,10 +316,6 @@ def _build_replan_context(state: AgentState, request: ReplanRequest) -> dict:
                             "tool_call_id": tool_call_id,
                             "error": content[:500],
                         })
-                    else:
-                        uid = data.get("result", "")
-                        if uid:
-                            existing_uids.append(uid)
                 except (json.JSONDecodeError, TypeError):
                     if "error" in content.lower() or "fail" in content.lower():
                         failed_calls.append({
@@ -356,7 +359,8 @@ def _build_replan_context(state: AgentState, request: ReplanRequest) -> dict:
         "model_evidence_refs": list(request.evidence_refs),
         "evidence_refs": runtime_evidence_refs,
         "failed_tool_calls": failed_calls,
-        "existing_blade_uids": existing_uids,
+        # Filled canonically by _fire_replan_seam (see module note above).
+        "existing_blade_uids": [],
         "iteration_at_failure": state.get("execute_loop_count", 0),
         "rejected_params": list(dict.fromkeys(all_rejected)),
         "failed_tool_names": sorted(failed_tool_names),
@@ -566,6 +570,10 @@ def reset_attribution_state(
     """
     if not keep_blade_uid:
         result["blade_uid"] = None
+        # The combo marker belongs to the same attribution: the UID's
+        # native companion is invalidated together with it (keep_blade_uid
+        # keeps both — a live experiment keeps its native component).
+        result["combo_native_issued"] = None
     result["injection_method"] = None
     result["kubectl_exec_pod_name"] = None
     result["inject_layer1_cache"] = None
@@ -785,26 +793,65 @@ def _process_response_tool_calls(
     # failed blade attempt that falls back to kubectl-native is not
     # mis-recorded. Never overrides an already-set method (monotonic); the
     # blade_uid upgrade stays in the caller's re-detect block.
-    if not (state.get("injection_method") or result.get("injection_method")):
-        from chaos_agent.agent.nodes.execute._injection_detection import (
-            classify_issue_time_method,
-        )
-        from chaos_agent.transports.registry import is_host_scope_channel
+    from chaos_agent.agent.nodes.execute._injection_detection import (
+        classify_issue_time_method,
+    )
+    from chaos_agent.transports.registry import is_host_scope_channel
 
-        _is_host = is_host_scope_channel(state)
-        for tc in tool_calls:
-            tc_name, tc_args = extract_tool_call_fields(tc)
-            _issued = classify_issue_time_method(tc_name, tc_args, is_host=_is_host)
-            if _issued in ("kubectl_native", "host_native"):
-                result["injection_method"] = _issued
-                logger.info("Recorded injection_method at issue time: %s", _issued)
-                if (
-                    not state.get("injection_start_time")
-                    and "injection_start_time" not in result
-                ):
-                    result["injection_start_time"] = now_iso()
-                    logger.info("Set injection_start_time (%s issued)", _issued)
-                break
+    _is_host = is_host_scope_channel(state)
+    _current_method = state.get("injection_method") or result.get("injection_method")
+    for tc in tool_calls:
+        tc_name, tc_args = extract_tool_call_fields(tc)
+        _issued = classify_issue_time_method(tc_name, tc_args, is_host=_is_host)
+        if _issued not in ("kubectl_native", "host_native"):
+            continue
+        if not _current_method:
+            result["injection_method"] = _issued
+            logger.info("Recorded injection_method at issue time: %s", _issued)
+            if (
+                not state.get("injection_start_time")
+                and "injection_start_time" not in result
+            ):
+                result["injection_start_time"] = now_iso()
+                logger.info("Set injection_start_time (%s issued)", _issued)
+            # A carried-over blade_uid with no attributed method means a LIVE
+            # experiment survived an execute-time replan seam (keep_blade_uid
+            # keeps the UID but clears the method for re-detection). Native
+            # work issued in that epoch is still a combo — the experiment is
+            # alive even though nothing is attributed yet. The epoch-bounded
+            # re-detect scan cannot see the pre-seam blade_create, so this
+            # issue-time check is the only coverage for that ordering.
+            _experiment_live = bool(
+                state.get("blade_uid") or result.get("blade_uid")
+            )
+        else:
+            # COMBO (blade-first order): a native mutating injection was
+            # issued while an experiment method is already attributed — both
+            # vehicles mutated the target. Record it durably (messages may be
+            # compacted before recovery) so the recover graph routes to the
+            # LLM-driven Layer-1 flow: deterministic recovery can ONLY destroy
+            # the blade experiment and would leak the native mutation.
+            from chaos_agent.agent.providers import FaultProviderRegistry
+
+            _cur_combo_provider = FaultProviderRegistry.resolve_by_method(
+                _current_method
+            )
+            _experiment_live = (
+                _cur_combo_provider is not None
+                and _cur_combo_provider.has_experiment_uid
+            )
+        if _experiment_live and not (
+            state.get("combo_native_issued")
+            or result.get("combo_native_issued")
+        ):
+            result["combo_native_issued"] = True
+            logger.info(
+                "Combo injection: native issued alongside a live experiment "
+                "(method=%s, blade_uid=%s) — recovery will use the LLM route",
+                _current_method,
+                state.get("blade_uid") or result.get("blade_uid"),
+            )
+        break
 
     post_invoke_debug(tracker, response, count, "Iteration")
 
@@ -1004,6 +1051,100 @@ def _answer_replan_tool_calls(
         result.setdefault("messages", []).extend(synthesized)
 
 
+def _fire_replan_seam(
+    state: AgentState,
+    result: dict,
+    replan_request: ReplanRequest,
+    replan_context: dict,
+) -> None:
+    """Write the replan seam transition into ``result``.
+
+    Single seam writer for EVERY trigger source (LLM tool call, free-text
+    marker, system auto-trigger): budget, context, attribution reset, history
+    and attempt tracking must never differ by how the replan was initiated.
+    Callers gate on budget and structural review BEFORE calling; this function
+    only performs the transition.
+    """
+    current_replan_count = state.get("replan_count", 0)
+    result["replan_requested"] = True
+    result["replan_context"] = replan_context
+    result["replan_request"] = replan_request.model_dump()
+    result["replan_count"] = current_replan_count + 1
+    if settings.replan_reset_execute_count:
+        result["execute_loop_count"] = 0
+    # Clear the WHOLE terminal-error triple, not just ``error``:
+    # ``read_merged_error`` falls back to ``failure_detail`` (via
+    # ``read_failure_reason``), so a lingering detail dict would keep
+    # ``outcome.error`` non-empty and ``should_continue_agent_loop``
+    # would reject the re-planned run on its very first evaluation.
+    result["error"] = None
+    result["failure_detail"] = None
+    result["failure_reason"] = None
+    result["approved_target"] = None
+    if replan_request.changes_target_or_risk:
+        # The structured request is the authoritative declaration that the next
+        # plan alters a confirmation boundary. Re-entering planning alone is
+        # insufficient; the new boundary must be shown to the user even if
+        # later discovery happens to look similar.
+        result["needs_confirmation"] = True
+    # Attribution reset at the replan seam: the next attempt may switch
+    # carriers, so method/carrier-pod/cache must not leak across.
+    # blade_uid survives ONLY while an experiment is still active.
+    # task-349ccf5d: the keep decision used to trust the truncated raw
+    # scan in replan_context, which cannot see a successful create once
+    # 5 failed messages sit closer to the seam — the live experiment was
+    # orphaned. Use the canonical extractor instead (full history,
+    # destroyed/retired uids filtered out — same contract as the
+    # verifier and the per-iteration re-extraction), and fall back to
+    # the persisted ``state.blade_uid`` for the memory-compression
+    # boundary where the create ToolMessage may have been summarized
+    # away. Worst case of the fallback (uid already dead) is bounded:
+    # recover hits the designed "experiment lost -> alert" branch.
+    all_messages = list(state.get("messages") or []) + list(result.get("messages") or [])
+    retired_uids = state.get("retired_blade_uids")
+    live_uid = _extract_blade_uid_from_messages(all_messages, retired=retired_uids)
+    # Compression-boundary fallback: the persisted uid may be the only
+    # evidence left once the create ToolMessage is summarized away. It
+    # must still pass the SAME death filters as the extractor — nothing
+    # clears ``state.blade_uid`` when the LLM issues ``blade_destroy``,
+    # so an unfiltered fallback would resurrect a destroyed experiment
+    # into ``existing_blade_uids`` (the Phase-1 replan prompt) and the
+    # keep decision.
+    fallback_uid = state.get("blade_uid") or None
+    if fallback_uid:
+        dead_uids = _collect_destroyed_uids(all_messages) | set(retired_uids or [])
+        if fallback_uid in dead_uids:
+            fallback_uid = None
+    blade_uid_at_seam = live_uid or fallback_uid or None
+    replan_context["existing_blade_uids"] = [blade_uid_at_seam] if blade_uid_at_seam else []
+    reset_attribution_state(
+        result,
+        keep_blade_uid=bool(blade_uid_at_seam),
+        message_count=len(all_messages),
+    )
+    history = list(state.get("replan_history") or [])
+    history.append({
+        "attempt": result["replan_count"],
+        "original_error": replan_context.get("error_summary", ""),
+        "action_taken": "(pending Phase 1 analysis)",
+        # Audit trail: record the experiment handle observed at the seam
+        # regardless of the keep decision, so a lost uid stays traceable.
+        "blade_uid_at_seam": blade_uid_at_seam,
+    })
+    result["replan_history"] = history
+    from chaos_agent.agent.attempt_tracker import (
+        REASON_GRAPH_REPLAN,
+        begin_attempt,
+    )
+    attempt_delta = begin_attempt(
+        {**state, **result},
+        target=state.get("fault_spec"),
+        reason=REASON_GRAPH_REPLAN,
+        notes=replan_context.get("error_summary", "")[:200],
+    )
+    result.update(attempt_delta)
+
+
 def _handle_replan(
     response,
     state: AgentState,
@@ -1082,48 +1223,7 @@ def _handle_replan(
             result, replan_tool_calls, replan_tc_id,
             "Replan request recorded; returning to planning.",
         )
-        result["replan_requested"] = True
-        result["replan_context"] = replan_context
-        result["replan_request"] = replan_request.model_dump()
-        result["replan_count"] = current_replan_count + 1
-        if settings.replan_reset_execute_count:
-            result["execute_loop_count"] = 0
-        result["error"] = None
-        result["approved_target"] = None
-        if replan_request.changes_target_or_risk:
-            # The structured request is the authoritative declaration that
-            # the next plan alters a confirmation boundary.  Re-entering
-            # planning alone is insufficient; the new boundary must be shown
-            # to the user even if later discovery happens to look similar.
-            result["needs_confirmation"] = True
-        # Attribution reset at the replan seam: the next attempt may switch
-        # carriers, so method/carrier-pod/cache must not leak across.
-        # blade_uid survives ONLY while an experiment is still active
-        # (existing_blade_uids), so recovery keeps a handle on it.
-        reset_attribution_state(
-            result,
-            keep_blade_uid=bool(replan_context.get("existing_blade_uids")),
-            message_count=len(state.get("messages") or [])
-            + len(result.get("messages") or []),
-        )
-        history = list(state.get("replan_history") or [])
-        history.append({
-            "attempt": result["replan_count"],
-            "original_error": replan_context.get("error_summary", ""),
-            "action_taken": "(pending Phase 1 analysis)",
-        })
-        result["replan_history"] = history
-        from chaos_agent.agent.attempt_tracker import (
-            REASON_GRAPH_REPLAN,
-            begin_attempt,
-        )
-        attempt_delta = begin_attempt(
-            {**state, **result},
-            target=state.get("fault_spec"),
-            reason=REASON_GRAPH_REPLAN,
-            notes=replan_context.get("error_summary", "")[:200],
-        )
-        result.update(attempt_delta)
+        _fire_replan_seam(state, result, replan_request, replan_context)
     else:
         _answer_replan_tool_calls(
             result, replan_tool_calls, replan_tc_id,
@@ -1318,6 +1418,74 @@ async def _check_execute_loop_limits(
         await sync_to_store(state, result)
         return result
     return None
+
+
+def _maybe_auto_trigger_replan(state: AgentState, result: dict) -> None:
+    """Convert this turn's terminal error into a real replan seam.
+
+    The router's error branch auto-routes REPLAN-classified errors to
+    ``agent_loop``, but that path writes NO replan bookkeeping: no
+    ``replan_context`` (Phase 1 re-enters blind), no ``replan_count``
+    increment (the budget gate never engages), and the error stays set —
+    so ``should_continue_agent_loop`` rejects on its very next evaluation.
+    The "replan" was a one-iteration detour straight to failure.
+
+    The fix converges the system auto-trigger with the two LLM channels on
+    the SAME review and seam writer: a synthesized request passes the
+    structural review (:func:`_review_replan_request`) and is fired through
+    :func:`_fire_replan_seam`. The trigger criterion is the canonical
+    classifier — ``classify_error(...).action == REPLAN`` — matching exactly
+    what the router's auto-detect consults, so this function and the router
+    can never disagree about WHICH errors qualify.
+
+    Reads only the error THIS turn stamped into ``result``: a stale error
+    from a previous iteration must not re-fire the conversion mid-loop.
+    """
+    if result.get("replan_requested") or state.get("replan_requested"):
+        return  # this turn already fired (or a sticky flag is pending)
+    if not settings.replan_auto_trigger:
+        return
+    error = str(result.get("error") or "")
+    if not error:
+        return
+    if classify_error(error).action is not ErrorAction.REPLAN:
+        return
+    try:
+        _max_replan = int(settings.max_replan_count)
+    except (TypeError, ValueError):
+        _max_replan = 2
+    if state.get("replan_count", 0) >= _max_replan:
+        return  # budget exhausted — the error proceeds to its normal verdict
+
+    request = ReplanRequest(
+        kind="feasibility",
+        decision="plan_invalid",
+        invalidated_assumption=(
+            "Execution terminated with a replan-classified runtime error: "
+            f"{error[:1800]}"
+        ),
+        observed_evidence=[error[:500]],
+        affected_step="Phase 2 execution terminated with a replan-classified error",
+        changes_target_or_risk=False,
+    )
+    review_reason = _review_replan_request(state, request)
+    if review_reason:
+        # Same outcome as a reviewed rejection of an LLM request: keep
+        # executing. Clear the terminal error or the router's error branch
+        # would bounce the run back to agent_loop and reject instantly.
+        result["error"] = None
+        result["failure_detail"] = None
+        result.setdefault("messages", []).append(HumanMessage(content=(
+            f"[LIFECYCLE REVIEW] Continue execution: {review_reason} A terminal "
+            "error describing a problem is evidence about that call, not by "
+            "itself a conclusion that the approved plan is infeasible."
+        )))
+        return
+    replan_context = _build_replan_context(state, request)
+    _fire_replan_seam(state, result, request, replan_context)
+    logger.info(
+        "System auto-triggered replan seam from terminal error: %s", error[:200]
+    )
 
 
 def _build_convergence_hints(
@@ -1638,7 +1806,17 @@ def make_execute_loop(hook=None, llm=None, tools=None, skill_catalog="", env_inf
                     and _new_provider.has_experiment_uid
                 ):
                     result["injection_method"] = detected_method
-                    logger.info(f"Upgraded injection_method: {current_injection_method} → {detected_method}")
+                    # COMBO (native-first order): the provisional native
+                    # injection committed at issue time DID mutate the target,
+                    # and the blade experiment succeeded too — both vehicles
+                    # acted. Mark the combo durably so recovery routes to the
+                    # LLM-driven Layer-1 flow (deterministic destroy would
+                    # leak the native mutation — see combo_native_issued).
+                    result["combo_native_issued"] = True
+                    logger.info(
+                        f"Upgraded injection_method: {current_injection_method} → {detected_method} "
+                        f"(combo marked — native component needs LLM undo)"
+                    )
                 elif not current_injection_method:
                     result["injection_method"] = detected_method
                     logger.info(f"Detected injection_method: {detected_method}")
@@ -1743,6 +1921,11 @@ def make_execute_loop(hook=None, llm=None, tools=None, skill_catalog="", env_inf
                 result.update(_fs)
 
         _handle_replan(response, state, result)
+
+        # System auto-trigger channel: converge this turn's terminal error
+        # with the LLM channels on the same review + seam writer (see the
+        # function docstring for the broken path this replaces).
+        _maybe_auto_trigger_replan(state, result)
 
         # Replan must not carry helper pods from the failed execution attempt
         # into a newly approved plan. This is artifact cleanup, not fault

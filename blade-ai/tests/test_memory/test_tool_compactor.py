@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 from chaos_agent.memory.tool_compactor import (
     CLEARED_MARKER,
     ToolResultCompactor,
+    build_truncation_notice,
     is_ai_message,
     is_tool_message,
     maybe_time_based_microcompact,
@@ -274,3 +275,26 @@ class TestToolResultCompactorWithTimeMC:
         result = compactor.compact(msgs)
         # Should have processed messages (time cleanup + truncation)
         assert len(result) == len(msgs)
+
+
+class TestTruncationNotice:
+    """Problem D: a compacted historical notice must steer the model away
+    from acting destructively on output whose structure is no longer visible."""
+
+    def test_historical_notice_warns_against_destructive_action(self):
+        notice = build_truncation_notice(
+            original_size=100_000, max_bytes=1024, is_recent=False,
+            cache_path="/tmp/cache/out.txt",
+        )
+        assert "TRUNCATED" in notice
+        assert "/tmp/cache/out.txt" in notice
+        assert "NEVER execute a destructive or structural change" in notice
+        assert "re-read the cache file" in notice
+
+    def test_recent_notice_keeps_strategy_hints(self):
+        notice = build_truncation_notice(
+            original_size=100_000, max_bytes=16 * 1024, is_recent=True,
+            cache_path="/tmp/cache/out.txt",
+        )
+        assert "OUTPUT_TRUNCATED" in notice
+        assert "field-selector" in notice

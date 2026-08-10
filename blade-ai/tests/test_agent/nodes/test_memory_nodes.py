@@ -2,8 +2,179 @@
 
 import pytest
 
-from chaos_agent.agent.nodes.store.memory_nodes import load_memory, pipeline_init, save_memory
+from chaos_agent.agent.nodes.store.memory_nodes import (
+    _finalize_session_store,
+    load_memory,
+    pipeline_init,
+    save_memory,
+)
 from chaos_agent.config.settings import settings
+
+
+class _FakeSessionStore:
+    """Records finalize_session calls for status-contract assertions."""
+
+    def __init__(self):
+        self.finalized = {}
+
+    def finalize_session(self, task_id, **kwargs):
+        self.finalized = {"task_id": task_id, **kwargs}
+
+
+def _verification(l1_status: str, l2_status: str, level: str) -> dict:
+    return {
+        "level": level,
+        "layer1": {"status": l1_status},
+        "layer2": {"status": l2_status},
+    }
+
+
+class TestFinalizeSessionStoreStatusContract:
+    """Session status must follow the fail-closed terminal projection.
+
+    task-ff057e7f: a blade_uid proves a creation request was accepted,
+    not that the fault took effect. The persisted session status must
+    agree with the result_summary written by the same function — a run
+    without a passing verdict is "failed", never "completed".
+    """
+
+    @pytest.mark.asyncio
+    async def test_failed_verification_with_blade_uid_is_failed(self, monkeypatch):
+        """L1 failed + blade_uid present + no error field → failed.
+
+        Regression: the old blade_uid-leniency marked this "completed"
+        while the result_summary in the same record said "failed".
+        """
+        from chaos_agent.persistence.task_identity import new_task_id
+
+        store = _FakeSessionStore()
+        monkeypatch.setattr(
+            "chaos_agent.memory.session_store.get_global_session_store",
+            lambda: store,
+        )
+        task_id = new_task_id()
+        state = {
+            "task_id": task_id,
+            "blade_uid": "exp-abc123",
+            "verification": _verification("failed", "unknown", "unverified"),
+            "messages": [],
+        }
+
+        await _finalize_session_store(state, task_id, "inject", {})
+
+        assert store.finalized["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_blade_uid_without_verification_is_failed(self, monkeypatch):
+        """blade_uid present but no verification on record → failed."""
+        from chaos_agent.persistence.task_identity import new_task_id
+
+        store = _FakeSessionStore()
+        monkeypatch.setattr(
+            "chaos_agent.memory.session_store.get_global_session_store",
+            lambda: store,
+        )
+        task_id = new_task_id()
+        state = {"task_id": task_id, "blade_uid": "exp-abc123", "messages": []}
+
+        await _finalize_session_store(state, task_id, "inject", {})
+
+        assert store.finalized["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_passed_verification_is_completed(self, monkeypatch):
+        from chaos_agent.persistence.task_identity import new_task_id
+
+        store = _FakeSessionStore()
+        monkeypatch.setattr(
+            "chaos_agent.memory.session_store.get_global_session_store",
+            lambda: store,
+        )
+        task_id = new_task_id()
+        state = {
+            "task_id": task_id,
+            "blade_uid": "exp-abc123",
+            "verification": _verification("passed", "passed", "verified"),
+            "messages": [],
+        }
+
+        await _finalize_session_store(state, task_id, "inject", {})
+
+        assert store.finalized["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_chat_intent_stays_completed(self, monkeypatch):
+        from chaos_agent.persistence.task_identity import new_task_id
+
+        store = _FakeSessionStore()
+        monkeypatch.setattr(
+            "chaos_agent.memory.session_store.get_global_session_store",
+            lambda: store,
+        )
+        task_id = new_task_id()
+        state = {"task_id": task_id, "confirmed_intent": "chat", "messages": []}
+
+        await _finalize_session_store(state, task_id, "chat", {})
+
+        assert store.finalized["status"] == "completed"
+
+
+class TestFinalizeSessionStoreProgressLedger:
+    """The update_progress working ledger must reach the task archive.
+
+    finalize_session supports ``progress_ledger`` and the task schema
+    carries the key, but no caller passed it — every archived task
+    showed progress_ledger=null even when update_progress had been
+    used (observed on task-e9bae269).
+    """
+
+    @pytest.mark.asyncio
+    async def test_progress_ledger_is_handed_to_finalize(self, monkeypatch):
+        from chaos_agent.persistence.task_identity import new_task_id
+
+        store = _FakeSessionStore()
+        monkeypatch.setattr(
+            "chaos_agent.memory.session_store.get_global_session_store",
+            lambda: store,
+        )
+        task_id = new_task_id()
+        ledger = {
+            "anchor": {"goal": "inject pod-network-drop"},
+            "state": {"phase": "verify", "established_facts": ["target confirmed"]},
+            "log": [{"event": "injected", "status": "verified"}],
+        }
+        state = {
+            "task_id": task_id,
+            "verification": _verification("passed", "passed", "verified"),
+            "progress_ledger": ledger,
+            "messages": [],
+        }
+
+        await _finalize_session_store(state, task_id, "inject", {})
+
+        assert store.finalized.get("progress_ledger") == ledger
+
+    @pytest.mark.asyncio
+    async def test_missing_ledger_stays_none(self, monkeypatch):
+        from chaos_agent.persistence.task_identity import new_task_id
+
+        store = _FakeSessionStore()
+        monkeypatch.setattr(
+            "chaos_agent.memory.session_store.get_global_session_store",
+            lambda: store,
+        )
+        task_id = new_task_id()
+        state = {
+            "task_id": task_id,
+            "verification": _verification("passed", "passed", "verified"),
+            "messages": [],
+        }
+
+        await _finalize_session_store(state, task_id, "inject", {})
+
+        # No ledger in state -> nothing fabricated; finalize_session's
+        # ``if progress_ledger is not None`` guard keeps the prior one.
+        assert store.finalized.get("progress_ledger") is None
 
 
 class TestLoadMemory:

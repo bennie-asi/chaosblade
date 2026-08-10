@@ -73,6 +73,21 @@ def build_inject_data_from_state(
     except Exception:
         pass
 
+    # Durable inject facts for recover context reconstruction.  Persisting
+    # them here (finalize time) makes recover independent of message-scan
+    # heuristics that compaction can silently degrade (durable-first, scan
+    # as fallback).  inject_context is pre-built from the FINAL message list
+    # so later reads never re-derive it from a truncated/compacted history.
+    inject_context = ""
+    try:
+        from chaos_agent.utils.inject_context import build_inject_context
+
+        inject_context = build_inject_context(
+            list(state_values.get("messages") or [])
+        )
+    except Exception:
+        inject_context = ""
+
     return {
         "task_id": task_id,
         "task_state": task_state,
@@ -86,7 +101,10 @@ def build_inject_data_from_state(
         "execution_artifacts": list(state_values.get("execution_artifacts") or []),
         "verification": strip_side_effects(verification),
         "side_effects": read_verification_side_effects(verification),
+        "blast_radius_detail": str(state_values.get("blast_radius_detail") or ""),
+        "inject_context": inject_context,
         "postmortem": outcome.postmortem,
+        "issue_report": outcome.issue_report,
         "error": outcome.error,
         **diagnostics,
     }
@@ -113,7 +131,10 @@ def build_unknown_inject_data(
         "execution_artifacts": [],
         "verification": None,
         "side_effects": None,
+        "blast_radius_detail": "",
+        "inject_context": "",
         "postmortem": None,
+        "issue_report": None,
         "error": error or "",
     }
 

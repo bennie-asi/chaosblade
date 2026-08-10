@@ -53,7 +53,7 @@ class TestEnumValues:
         }
 
     def test_warning_code_count(self):
-        assert len(WarningCode) == 13
+        assert len(WarningCode) == 15
 
     def test_failure_category_matches_old_failure_reason(self):
         expected = {

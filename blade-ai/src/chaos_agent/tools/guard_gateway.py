@@ -55,7 +55,10 @@ def decision_to_feedback(decision: "GuardDecision") -> GuardFeedback:
       - REJECT_BANNED         → UNSUPPORTED_FORM when a suggestion names a
                                 viable path (e.g. a container-escape primitive
                                 that IS reachable via an approved debug pod),
-                                else DESTRUCTIVE_FLOOR.
+                                else DESTRUCTIVE_FLOOR. A mechanism-banned
+                                rejection (workload creation via manifest) is
+                                a hard floor even though it names the accepted
+                                kinds — no reshape of the SAME call passes.
       - REJECT_UNKNOWN        → UNKNOWN, not a dead-end (state the target /
                                 add the missing field and retry).
 
@@ -75,9 +78,16 @@ def decision_to_feedback(decision: "GuardDecision") -> GuardFeedback:
         constraint = ViolatedConstraint.IDENTITY_DRIFT
         is_hard_floor = True
     elif verdict == GuardVerdict.REJECT_BANNED:
+        # A mechanism ban (e.g. workload kind via manifest apply) names the
+        # accepted kinds, but no reshape of THIS call passes — the mechanism
+        # itself is forbidden. Treat it as a hard floor so the model does not
+        # loop on doomed variants; the screener renders replan guidance.
+        if getattr(decision.effective, "mechanism_banned", False):
+            constraint = ViolatedConstraint.DESTRUCTIVE_FLOOR
+            is_hard_floor = True
         # A suggestion means the guard knows a compliant path exists, so this
         # is a form issue, not an absolute dead-end (the flipped escape case).
-        if suggestion:
+        elif suggestion:
             constraint = ViolatedConstraint.UNSUPPORTED_FORM
             is_hard_floor = False
         else:

@@ -268,6 +268,58 @@ class TestExecuteViaTransport:
 
     @pytest.mark.asyncio
     @patch("chaos_agent.tools.shell.get_tool_guard")
+    @patch("chaos_agent.tools.shell.run_command")
+    async def test_kubewiz_stdin_embedded_not_piped(self, mock_run, mock_guard):
+        """wiz channels fold stdin into the command and pass NO pipe.
+
+        task-349ccf5d: ``kubectl apply -f -`` (occupier-pod manifests)
+        deadlocked on kubewiz because stdin could never reach the executor.
+        The embedding path must (a) put the payload inside --command and
+        (b) hand run_command an EMPTY stdin so nothing gets dropped.
+        """
+        guard = MagicMock()
+        guard.check.return_value = (True, "OK")
+        mock_guard.return_value = guard
+        mock_run.return_value = CommandResult(0, "exit_code: 0\ncreated", "")
+
+        target = TransportTarget(
+            scope="k8s", kubewiz_cluster_uuid="uuid", kubewiz_profile="prof"
+        )
+        manifest = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: probe\n"
+        result = await execute_via_transport(
+            ["kubectl", "apply", "-f", "-"], target,
+            stdin_data=manifest, task_id="t1",
+        )
+        assert result.exit_code == 0
+        wrapped = mock_run.call_args[0][0]
+        cmd_str = wrapped[wrapped.index("--command") + 1]
+        assert "base64 -d" in cmd_str
+        # The native pipe must be suppressed — wiz would drop it silently.
+        assert mock_run.call_args[1]["stdin_data"] == ""
+
+    @pytest.mark.asyncio
+    @patch("chaos_agent.tools.shell.get_tool_guard")
+    @patch("chaos_agent.tools.shell.run_command")
+    async def test_native_stdin_channel_pipes_untouched(self, mock_run, mock_guard):
+        """kubeconfig channel keeps the real pipe — no embedding."""
+        guard = MagicMock()
+        guard.check.return_value = (True, "OK")
+        mock_guard.return_value = guard
+        mock_run.return_value = CommandResult(0, "created", "")
+
+        target = TransportTarget(scope="k8s")  # catch-all → kubeconfig
+        manifest = "apiVersion: v1\nkind: ConfigMap\n"
+        with patch("os.path.isfile", return_value=True):
+            await execute_via_transport(
+                ["kubectl", "apply", "-f", "-"], target,
+                stdin_data=manifest, task_id="t1",
+            )
+        wrapped = mock_run.call_args[0][0]
+        assert wrapped == ["kubectl", "apply", "-f", "-"]
+        assert mock_run.call_args[1]["stdin_data"] == manifest
+
+    @pytest.mark.asyncio
+    @patch("chaos_agent.tools.shell.get_tool_guard")
     async def test_preflight_failure_returns_error(self, mock_guard):
         """Preflight failure should return CommandResult with errors."""
         guard = MagicMock()

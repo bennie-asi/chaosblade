@@ -664,6 +664,7 @@ class TestToIntentDict:
             "params_flags": [],
             "duration_seconds": 0,
             "user_description": "",
+            "use_case_name": "",
             "revision": 0,
             "objective": "",
             "boundaries": [],
@@ -679,6 +680,42 @@ class TestToIntentDict:
         assert d["target"] == ""
         assert d["names"] == []
         assert d["user_description"] == "x"
+
+
+class TestUseCaseName:
+    """use_case_name: user-chosen skill case carried from intent to planning."""
+
+    def test_from_intent_args_picks_up_use_case_name(self):
+        spec = FaultSpec.from_intent_args({
+            "scope": "pod", "target": "volume", "action": "patch",
+            "namespace": "ns", "names": ["p1"],
+            "use_case_name": "Pod_ContainerCreating_无效挂载选项注入",
+        })
+        assert spec.use_case_name == "Pod_ContainerCreating_无效挂载选项注入"
+
+    def test_from_intent_args_defaults_empty_when_absent(self):
+        spec = FaultSpec.from_intent_args({
+            "scope": "pod", "target": "cpu", "action": "fullload",
+            "namespace": "ns",
+        })
+        assert spec.use_case_name == ""
+
+    def test_from_intent_args_inherits_from_existing(self):
+        existing = FaultSpec(use_case_name="case-A", scope="pod", namespace="ns")
+        spec = FaultSpec.from_intent_args({"scope": "pod"}, existing=existing)
+        assert spec.use_case_name == "case-A"
+
+    def test_dict_round_trip(self):
+        spec = FaultSpec(scope="pod", namespace="ns", use_case_name="case-B")
+        rebuilt = FaultSpec.from_dict(spec.to_dict())
+        assert rebuilt is not None
+        assert rebuilt.use_case_name == "case-B"
+        assert rebuilt == spec
+
+    def test_contract_change_when_use_case_differs(self):
+        base = FaultSpec(scope="pod", namespace="ns", use_case_name="case-A")
+        other = FaultSpec(scope="pod", namespace="ns", use_case_name="case-B")
+        assert base.contract_dict() != other.contract_dict()
 
 
 class TestReadFaultSpec:
@@ -771,6 +808,7 @@ class TestLegacyFaultSpecProjection:
             "duration_seconds": 60,
             "source": "test_legacy",
             "user_description": "",
+            "use_case_name": "",
             "revision": 0,
             "objective": "",
             "boundaries": [],
@@ -842,6 +880,9 @@ class TestIntentVocabularySnapshot:
         "cpu", "mem", "network", "disk", "process",
         "pod", "finalizer", "replicas", "schedule", "pvc",
         "dns", "image", "probe", "volume", "cni", "endpoint",
+        # k8s_native 扩展：资源配额类（limits 篡改）与容器内文件类
+        # （kubectl exec 命令模式）故障
+        "resources", "file",
         # chaosblade_python carrier (python_app family): middleware clients the
         # in-process agent intercepts.
         "redis", "mysql", "http", "httpx", "grpc", "kafka", "sqlalchemy",
@@ -897,6 +938,7 @@ class TestIntentVocabularySnapshot:
         assert carrier_targets("k8s_native") == (
             "pod", "finalizer", "replicas", "schedule", "pvc",
             "dns", "image", "probe", "volume", "cni", "endpoint",
+            "resources", "file",
         )
         assert carrier_actions("k8s_native") == (
             "patch", "cordon", "taint", "delete", "drain", "scale",

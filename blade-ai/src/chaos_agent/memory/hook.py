@@ -110,6 +110,48 @@ def _build_tool_call_index(messages: list) -> dict[str, object]:
     return index
 
 
+def _rebase_epoch_index(messages: list, to_compact: list, raw_boundary) -> int | None:
+    """Re-base ``attribution_epoch_index`` after a compaction.
+
+    The boundary is an absolute index into ``messages`` (state_lifecycle
+    contract: "must stay aligned with the message list it indexes"), and
+    compaction is the ONLY in-task mutation of that list — every message
+    it removes shifts the boundary left. Without re-basing, the epoch
+    window (``_epoch_bounded_messages``) drifts: the RESUME/UPGRADE
+    injection re-scan and the replan attempt audit would read the wrong
+    slice and under-attribute the current epoch's attempts.
+
+    Returns the new boundary, or None when nothing must change (no
+    boundary set, or the compaction removed nothing before it).
+
+    The re-base counts how many pre-boundary messages SURVIVE. ``to_keep``
+    is not a clean suffix — ``check_context`` retains the newest
+    [Compressed History] summaries wherever they sit and drops the rest —
+    so "subtract a prefix length" would be wrong. Messages without an id
+    never receive a RemoveMessage (see the caller), so they always
+    survive and keep counting.
+    """
+    try:
+        boundary = int(raw_boundary or 0)
+    except (TypeError, ValueError):
+        return None
+    if boundary <= 0:
+        return None
+    removed_ids = {
+        getattr(msg, "id", None)
+        for msg in to_compact
+        if getattr(msg, "id", None)
+    }
+    new_boundary = sum(
+        1
+        for msg in messages[:boundary]
+        if getattr(msg, "id", None) not in removed_ids
+    )
+    if new_boundary == boundary:
+        return None
+    return new_boundary
+
+
 def _command_from_parent(parent_msg, tool_call_id: str) -> str:
     """Extract the command string for a given tool_call_id from its
     parent AIMessage's tool_calls list.
@@ -726,8 +768,20 @@ class PreReasoningHook:
         self._emit_context_size_snapshot(
             task_id, tokens_after, len(post_compaction_messages),
         )
+
+        # 6. Re-base ``attribution_epoch_index`` — this return is the only
+        #    in-task mutation of the message list the boundary indexes
+        #    (see ``_rebase_epoch_index`` for the full rationale).
+        epoch_update: dict = {}
+        new_boundary = _rebase_epoch_index(
+            messages, to_compact, state.get("attribution_epoch_index"),
+        )
+        if new_boundary is not None:
+            epoch_update = {"attribution_epoch_index": new_boundary}
+
         return {
             **obs_update,
+            **epoch_update,
             "messages": remove_messages + [summary_message],
             "compressed_summary": summary,
         }

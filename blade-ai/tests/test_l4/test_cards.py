@@ -105,13 +105,30 @@ class TestUnknownAdapter:
         assert card.card_type == "unknown"
         assert card.details["raw_payload"] == {"foo": "bar"}
 
-    def test_non_dict_payload(self):
-        card = interrupt_to_card("plain string", "t")
+    def test_non_dict_payload_value_is_forwarded(self):
+        # Regression: the non-dict branch used to drop the original value
+        # (raw_payload was always {}). It must be wrapped as {"value": payload}
+        # so callers still see what was interrupted on.
+        card = interrupt_to_card("please confirm?", "t")
         assert card.card_type == "unknown"
+        assert card.details["raw_payload"] == {"value": "please confirm?"}
 
-    def test_none_payload(self):
+    def test_none_payload_value_is_forwarded(self):
         card = interrupt_to_card(None, "t")
         assert card.card_type == "unknown"
+        assert card.details["raw_payload"] == {"value": None}
+
+    def test_non_dict_payload_other_types_forwarded(self):
+        for raw in (42, ["a", "b"], ("x", "y")):
+            card = interrupt_to_card(raw, "t")
+            assert card.card_type == "unknown"
+            assert card.details["raw_payload"] == {"value": raw}
+
+    def test_dict_payload_not_wrapped(self):
+        # dict payloads must NOT go through the {"value": ...} wrapping.
+        card = interrupt_to_card({"foo": 1}, "t")
+        assert card.card_type == "unknown"
+        assert card.details["raw_payload"] == {"foo": 1}
 
 
 class TestCardIdUnique:

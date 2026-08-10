@@ -208,6 +208,28 @@ class TestWasBladeCreateAttempted:
         msg2 = ToolMessage(content='{"code": 500, "success": false}', name="blade_create", tool_call_id="tc2")
         assert _was_blade_create_attempted([msg1, msg2]) is True
 
+    # --- durable-first: a committed injection_method record overrides the
+    # (possibly compacted) message history ---
+
+    def test_durable_native_record_overrides_stale_blade_create_evidence(self):
+        """Compaction scenario: the kubectl-native fallback evidence was
+        compacted away, but the failed blade_create ToolMessage survived.
+        The durable record must win over the stale history."""
+        msg = ToolMessage(content='{"code": 500, "success": false}', name="blade_create", tool_call_id="tc1")
+        assert _was_blade_create_attempted([msg], injection_method="kubectl_native") is False
+        assert _was_blade_create_attempted([msg], injection_method="host_native") is False
+
+    def test_durable_experiment_record_overrides_stale_blade_create_evidence(self):
+        msg = ToolMessage(content='{"code": 500, "success": false}', name="blade_create", tool_call_id="tc1")
+        assert _was_blade_create_attempted([msg], injection_method="kubectl_exec") is False
+
+    def test_no_durable_record_falls_back_to_message_scan(self):
+        """State-less restored session: no durable record → the message scan
+        still decides (backward-compatible fallback)."""
+        msg = ToolMessage(content='{"code": 500, "success": false}', name="blade_create", tool_call_id="tc1")
+        assert _was_blade_create_attempted([msg], injection_method=None) is True
+        assert _was_blade_create_attempted([msg], injection_method="") is True
+
 
 # ---------------------------------------------------------------------------
 # _run_layer1_verification — distinguishing two no-uid scenarios
@@ -235,6 +257,17 @@ class TestRunLayer1Verification:
     async def test_no_blade_uid_no_messages_arg(self):
         """No blade_uid + messages=None → defaults to skipped (backward compatible)."""
         result = await _run_host_blade_layer1("", "", task_id="t3")
+        assert result.status == "skipped"
+
+    @pytest.mark.asyncio
+    async def test_no_blade_uid_durable_native_record_prevents_warning(self):
+        """Durable kubectl-native attribution + stale blade_create evidence
+        → NOT 'blade attempted' — the fallback injected, so no warning."""
+        msg = ToolMessage(content='{"code": 500, "success": false}', name="blade_create", tool_call_id="tc1")
+        result = await _run_host_blade_layer1(
+            "", "", task_id="t4", messages=[msg],
+            injection_method="kubectl_native",
+        )
         assert result.status == "skipped"
 
     @pytest.mark.asyncio
@@ -275,6 +308,34 @@ class TestRunLayer1Verification:
         """error status IS terminal."""
         r = Layer1Result(status="error", details="test")
         assert r.is_terminal()
+
+
+class TestRunRecoverLayer1DurableRouting:
+    """Recovery Layer-1 no-UID routing must honor the durable record."""
+
+    @pytest.mark.asyncio
+    async def test_durable_native_record_prevents_false_failure(self):
+        """Replan/compaction leaves a failed blade_create ToolMessage but the
+        durable record says kubectl-native → recovery must NOT terminate as
+        'no UID available'; the fault is live and LLM-recoverable."""
+        from chaos_agent.agent.nodes.recover._recover_layer1 import _run_recover_layer1
+
+        msg = ToolMessage(content='{"code": 500, "success": false}', name="blade_create", tool_call_id="tc1")
+        result = await _run_recover_layer1(
+            "", "", messages=[msg], injection_method="kubectl_native",
+        )
+        assert result.status == "skipped"
+
+    @pytest.mark.asyncio
+    async def test_no_durable_record_keeps_failed_branch(self):
+        """Without a durable record the message scan still drives the
+        'blade attempted but no UID' terminal failure (backward compatible)."""
+        from chaos_agent.agent.nodes.recover._recover_layer1 import _run_recover_layer1
+
+        msg = ToolMessage(content='{"code": 500, "success": false}', name="blade_create", tool_call_id="tc1")
+        result = await _run_recover_layer1("", "", messages=[msg])
+        assert result.status == "failed"
+        assert "no UID" in result.details
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +597,29 @@ class TestWasBladeCreateAttemptedKubectlOverride:
         # kubectl get is NOT a blade injection, so blade_create is still "attempted and failed"
         assert _was_blade_create_attempted([msg1] + kubectl_msgs) is True
 
+    def test_failed_blade_create_with_exec_native_fallback(self):
+        """task-09d30662 regression: blade_create failed (chaosblade-tool
+        ImagePullBackOff) and the agent fell back to a kubectl exec python
+        memory stressor. The fallback IS the injection — recover Layer 1 must
+        NOT report 'blade_create was called but no UID available'."""
+        msg1 = ToolMessage(
+            content='Error: injection FAILED permanently (exit 1, class=target_gone)',
+            name="blade_create",
+            tool_call_id="tc1",
+        )
+        # read-only probes in between don't count...
+        probe = _make_kubectl_tool_call_pair(
+            "tc2", "exec", "pod-a -n ns -- which python3", "/usr/bin/python3",
+        )
+        # ...the mutating exec fallback does
+        fallback = _make_kubectl_tool_call_pair(
+            "tc3", "exec",
+            "pod-a -n ns -- sh -c 'nohup python /tmp/mem_stress.py "
+            "</dev/null >/dev/null 2>&1 & echo $!'",
+            "25427",
+        )
+        assert _was_blade_create_attempted([msg1] + probe + fallback) is False
+
 
 # ---------------------------------------------------------------------------
 # _find_blade_query_in_messages
@@ -790,6 +874,73 @@ class TestWasKubectlInjectionAttempted:
         messages = [msg1] + kubectl_msgs
         assert _was_kubectl_injection_attempted(messages) is True
 
+    # --- command-mode (exec/debug) injections --------------------------
+
+    def test_exec_mutating_command_after_blade_create_failure(self):
+        """kubectl exec running a mutating inner command (the python memory
+        stressor fallback, task-09d30662 shape) → detected as alternative
+        injection even though 'exec' is not an object-write verb."""
+        msg1 = ToolMessage(
+            content='Error: injection FAILED permanently (exit 1, class=target_gone)',
+            name="blade_create",
+            tool_call_id="tc-fail1",
+        )
+        kubectl_msgs = _make_kubectl_tool_call_pair(
+            "tc-exec", "exec",
+            "pod-a -n ns -- sh -c 'nohup python /tmp/mem_stress.py "
+            "</dev/null >/dev/null 2>&1 & echo $!'",
+            "25427",
+        )
+        messages = [msg1] + kubectl_msgs
+        assert _was_kubectl_injection_attempted(messages) is True
+
+    def test_exec_mutating_command_error_result_still_counted(self):
+        """Attempt-keyed, not result-keyed: an exec-delivered fault can sever
+        its own feedback channel (forensic paradox), so an Error: result must
+        NOT disprove the injection."""
+        msg1 = ToolMessage(
+            content='Error: blade create failed (exit 1)',
+            name="blade_create",
+            tool_call_id="tc-fail1",
+        )
+        kubectl_msgs = _make_kubectl_tool_call_pair(
+            "tc-exec", "exec",
+            "pod-a -n ns -- sh -c 'iptables -A OUTPUT -j DROP'",
+            "Error: command terminated with non-zero exit code",
+        )
+        messages = [msg1] + kubectl_msgs
+        assert _was_kubectl_injection_attempted(messages) is True
+
+    def test_readonly_exec_after_blade_create_not_counted(self):
+        """Read-only exec probes (df/ps/which...) are NOT injections."""
+        msg1 = ToolMessage(
+            content='Error: blade create failed (exit 1)',
+            name="blade_create",
+            tool_call_id="tc-fail1",
+        )
+        kubectl_msgs = _make_kubectl_tool_call_pair(
+            "tc-exec", "exec",
+            "pod-a -n ns -- df -h /dev/shm",
+            "Filesystem  Size  Used Avail Use%",
+        )
+        messages = [msg1] + kubectl_msgs
+        assert _was_kubectl_injection_attempted(messages) is False
+
+    def test_exec_mutating_before_blade_create_not_counted(self):
+        """A mutating exec BEFORE the last blade_create is not a fallback."""
+        kubectl_msgs = _make_kubectl_tool_call_pair(
+            "tc-exec", "exec",
+            "pod-a -n ns -- sh -c 'nohup python /tmp/mem_stress.py &'",
+            "25427",
+        )
+        msg1 = ToolMessage(
+            content='Error: blade create failed (exit 1)',
+            name="blade_create",
+            tool_call_id="tc-fail1",
+        )
+        messages = kubectl_msgs + [msg1]
+        assert _was_kubectl_injection_attempted(messages) is False
+
 
 class TestKubectlNativeInjectionLayer1:
     """Test Layer 1 behavior when blade_create fails but kubectl-native injection succeeds."""
@@ -968,6 +1119,59 @@ class TestExtractKubectlExecPodName:
         )
         result = _extract_kubectl_exec_pod_name([ai_msg, tool_msg])
         assert result == "otel-c-tool-legacy"
+
+
+class TestLayer2ToolPodNamespace:
+    """Layer 2 prompt must never assert a hardcoded tool pod namespace — it
+    is deployment-specific (task-e9bae269: pods lived in `default`, not
+    `chaosblade`), so the prompt must instruct discovery instead."""
+
+    def _node_scope_state(self) -> dict:
+        from chaos_agent.agent.spec.fault_spec import FaultSpec
+        spec = FaultSpec(
+            namespace="cms-demo",
+            scope="node",
+            names=("node-a",),
+            blade_target="network",
+            blade_action="delay",
+            params={"time": "3000"},
+        )
+        return {
+            "messages": [HumanMessage(content="inject")],
+            "fault_spec": spec.to_dict(),
+            "blade_parsed_flags": {},
+            "params": {},
+            "kubeconfig": "/path/to/kc",
+        }
+
+    def _layer2_text(self, **kwargs) -> str:
+        from chaos_agent.agent.nodes.verify._verifier_messages import (
+            _build_layer2_messages,
+        )
+        from chaos_agent.agent.result.verdict import Layer1Result
+        layer1 = Layer1Result(status="passed", affected_count=1, raw_output="Success")
+        msgs = _build_layer2_messages(
+            self._node_scope_state(), layer1, "uid-tp", "net-delay",
+            "/path/to/kc", count=1, **kwargs,
+        )
+        return "\n".join(
+            m.content for m in msgs
+            if isinstance(m, HumanMessage) and isinstance(m.content, str)
+        )
+
+    def test_namespace_never_asserted_discovery_instructed(self):
+        text = self._layer2_text(tool_pod_name="otel-c-tool-abc")
+        assert "## Available Tool Pod" in text
+        # Namespace-agnostic discovery semantics, tool-agnostic wording
+        assert "identify it across all namespaces before exec" in text
+        assert "never assume it" in text
+        # Never assert a hardcoded namespace anywhere in the tool pod block
+        assert "- Namespace: `chaosblade`" not in text
+        assert "-n chaosblade" not in text
+        # Tool-abstraction boundary: no literal tool-call syntax or tool names
+        assert "kubectl(" not in text
+        assert "blade status" not in text
+        assert "blade query" not in text
 
 
 class TestRunLayer1ViaKubectlExecWithOriginalPod:
@@ -2725,3 +2929,132 @@ class TestSplitCandidates:
         missing, _ = _validate_step_number_coverage(parts[1], items)
         assert 2 in missing
         assert 4 in missing
+
+
+# ---------------------------------------------------------------------------
+# Inject verifier read-only screen (shared with recover Layer 2)
+# ---------------------------------------------------------------------------
+
+class TestVerifierReadOnlyScreen:
+    """The inject verifier judges whether the fault landed; it never
+    injects or repairs. Its read-only discipline shares one classifier
+    core with recover Layer 2 (agent.nodes._readonly_screen, used by
+    the verifier_screener edge node), so mutating calls are refused
+    with unverified guidance while the capability probe stays exempt on
+    both sides. Behaviour lives in TestVerifierScreenerNode below."""
+
+    def test_verifier_loop_wires_the_shared_screen(self):
+        """The inject verifier screens via the verifier_screener graph-edge
+        node (phase1/tool_screener paradigm): capability verdict + read-only
+        discipline between verifier_loop and verifier_tools, with the
+        verify-flavoured guidance (parity with recover Layer 2)."""
+        from pathlib import Path
+
+        src = (
+            Path(__file__).resolve().parents[3]
+            / "src/chaos_agent/agent/graph.py"
+        ).read_text(encoding="utf-8")
+        assert "verifier_screener" in src
+        assert "make_phase_screener" in src
+        assert "`unverified`" in src
+        # The loop routes tool_calls into the screener, not the ToolNode.
+        assert '"continue": "verifier_screener"' in src
+
+
+class TestVerifierScreenerNode:
+    """Behaviour of the verifier_screener graph-edge node: fabricated
+    ToolMessage pairing on refusal, screener_route retry, debug probe
+    exemption — same protocol as phase1_screener / tool_screener."""
+
+    @staticmethod
+    def _make():
+        from chaos_agent.agent.nodes._phase_screener import make_phase_screener
+        return make_phase_screener(
+            capability_phase="verify",
+            readonly=True,
+            phase_duty=(
+                "The verification phase judges whether the injected fault "
+                "landed, using read-only observations only — it never "
+                "injects, repairs, or alters cluster state. Injection "
+                "actions belong to the execute phase, which has already run."
+            ),
+            verdict_guidance=(
+                "If your observations show the fault did not land (or only "
+                "partially landed), submit your verdict as `unverified` and "
+                "describe exactly what is missing. Do not re-attempt the "
+                "refused call in any form."
+            ),
+        )
+
+    @staticmethod
+    def _state(tool_calls):
+        return {"messages": [AIMessage(content="", tool_calls=tool_calls)]}
+
+    @pytest.mark.asyncio
+    async def test_readonly_call_passes(self):
+        node, route = self._make()
+        state = self._state([{
+            "name": "kubectl", "id": "c1", "type": "tool_call",
+            "args": {"command": ["get", "pods", "-n", "default"]},
+        }])
+        update = await node(state)
+        assert update["screener_route"] == "pass"
+        assert "messages" not in update
+        assert route({**state, **update}) == "pass"
+
+    @pytest.mark.asyncio
+    async def test_mutating_call_refused_with_paired_feedback(self):
+        node, route = self._make()
+        state = self._state([{
+            "name": "kubectl", "id": "c1", "type": "tool_call",
+            "args": {"command": ["delete", "pod", "pod-a", "-n", "default"]},
+        }])
+        update = await node(state)
+        assert update["screener_route"] == "retry"
+        assert route({**state, **update}) == "retry"
+        fabricated = update["messages"]
+        assert len(fabricated) == 1
+        msg = fabricated[0]
+        assert msg.tool_call_id == "c1"
+        assert getattr(msg, "status", None) == "error"
+        assert "readonly_phase_violation" in msg.content
+        assert "unverified" in msg.content
+
+    @pytest.mark.asyncio
+    async def test_capability_probe_debug_exempt(self):
+        node, _ = self._make()
+        state = self._state([{
+            "name": "kubectl_read", "id": "c1", "type": "tool_call",
+            "args": {"subcommand": "debug", "command": ["node/node-a"]},
+        }])
+        update = await node(state)
+        assert update["screener_route"] == "pass"
+
+    @pytest.mark.asyncio
+    async def test_mixed_batch_refused_wholesale_with_skipped_sibling(self):
+        node, _ = self._make()
+        state = self._state([
+            {
+                "name": "kubectl", "id": "c1", "type": "tool_call",
+                "args": {"command": ["get", "pods", "-n", "default"]},
+            },
+            {
+                "name": "kubectl", "id": "c2", "type": "tool_call",
+                "args": {"command": ["delete", "pod", "pod-a", "-n", "default"]},
+            },
+        ])
+        update = await node(state)
+        assert update["screener_route"] == "retry"
+        fabricated = update["messages"]
+        # One ToolMessage per tool_call keeps the pairing invariant.
+        assert {m.tool_call_id for m in fabricated} == {"c1", "c2"}
+        skipped = next(m for m in fabricated if m.tool_call_id == "c1")
+        refused = next(m for m in fabricated if m.tool_call_id == "c2")
+        assert "skipped" in skipped.content
+        assert "readonly_phase_violation" in refused.content
+
+    @pytest.mark.asyncio
+    async def test_no_tool_calls_passes(self):
+        node, _ = self._make()
+        update = await node({"messages": [AIMessage(content="verdict text")]})
+        assert update["screener_route"] == "pass"

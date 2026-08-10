@@ -163,12 +163,24 @@ class TransportChannel(Protocol):
         """
         ...
 
-    def wrap_command(self, cmd: list[str], target: TransportTarget, timeout: float | None = None) -> list[str]:
+    # Whether the channel can deliver ``stdin_data`` natively (a real pipe to
+    # the subprocess). wiz-based channels CANNOT — ``wiz task exec`` has no
+    # stdin — so the executor folds the payload into the command instead
+    # (``wrap_command(..., stdin_data=...)``) and passes an empty stdin to
+    # run_command. Class attribute, not a method: pure capability metadata.
+    supports_stdin: bool
+
+    def wrap_command(self, cmd: list[str], target: TransportTarget, timeout: float | None = None, stdin_data: str = "") -> list[str]:
         """Wrap a raw semantic command into transport format.
 
         ``timeout`` is the caller's per-command timeout (seconds); gateway
         channels use it to size ``wiz --wait-timeout`` so long commands are
         not cut at wiz's 10s default.
+
+        ``stdin_data`` is only consulted by channels with
+        ``supports_stdin = False``: they embed the payload into the wrapped
+        command (base64 pipeline). Native-stdin channels ignore it — the
+        executor pipes it to the subprocess instead.
         """
         ...
 

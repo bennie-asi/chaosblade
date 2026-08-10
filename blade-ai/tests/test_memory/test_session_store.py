@@ -157,6 +157,21 @@ class TestFinalize:
         data = json.loads((task_dir / "task-decl.json").read_text())
         assert "model_name" in data
 
+    def test_finalize_persists_parent_task_id(self, store, task_dir):
+        """Problem F: recover finalize must link the record to its inject task."""
+        store.create_session("task-recover-link", operation="recover")
+        store.finalize_session(
+            "task-recover-link", status="completed", parent_task_id="task-inject",
+        )
+        data = json.loads((task_dir / "task-recover-link.json").read_text())
+        assert data["parent_task_id"] == "task-inject"
+
+    def test_finalize_without_parent_task_id_leaves_record_unlinked(self, store, task_dir):
+        store.create_session("task-no-link", operation="inject")
+        store.finalize_session("task-no-link", status="completed")
+        data = json.loads((task_dir / "task-no-link.json").read_text())
+        assert not data.get("parent_task_id")
+
 
 class TestAuxLlmCallAudit:
     """Off-graph LLM calls (baseline derive, postmortem) are archived, not lost.

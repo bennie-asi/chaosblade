@@ -18,7 +18,7 @@ def get_tools_section(phase: int = 1) -> str:
    in Phase 1 — they are in your conversation history as tool results. Re-read them
    as the STARTING POINT for injection commands. Do NOT call skill-reading tools (not bound here).
 2. **Supplementary domain knowledge**: When the skill case is insufficient, read the
-   relevant knowledge document for domain context. Do NOT guess or improvise injection commands.
+   relevant knowledge document for domain context. While a documented path covers the need, do not fabricate commands — but when every documented path has empirically failed, an equivalent-effect method you devise (same target, same fault effect) is legitimate, not improvisation.
 3. **Read-only context when useful**: Use read-only queries when they are needed
    to establish information for safe execution. The system owns the post-execution
    verification and recovery lifecycle; do not treat a single command result as the
@@ -41,7 +41,7 @@ def get_tools_section(phase: int = 1) -> str:
 
 ### Tool Selection Priority
 1. **Skill references first (after skill activation)**: Use `read_skill_resource` to read skill reference files for accurate, up-to-date injection command syntax and parameters
-2. **Knowledge docs for domain context**: Especially BEFORE skill activation or when no skill is active, use `read_knowledge_resource` to read knowledge documents — do NOT guess or improvise injection commands
+2. **Knowledge docs for domain context**: Especially BEFORE skill activation or when no skill is active, use `read_knowledge_resource` to read knowledge documents — while a documented path covers the need, do not fabricate commands; an equivalent-effect path you devise after the documented ones are proven broken is legitimate
 3. **Read before write**: Use read-only query tools for verification — mutation tools are Phase 2 only
 4. **Plan, don't execute**: Your output is the input to `confirmation_gate`. Capture the intended injection parameters in your plan (via `save_fault_plan`); the executor (Phase 2) will issue the actual call.
 
@@ -94,9 +94,10 @@ documentation."""
         lines.append(runtime_feedback)
         lines.append("")
 
-    # Shared rule: both phases must follow skill instructions
+    # Shared rule: skill-case methods come first; deviation is licensed by
+    # empirical failure of documented paths, arbitrated by the safety guard.
     lines.append(
-        "- Follow the skill instructions exactly — do not improvise injection commands"
+        "- Skill-case methods come first; deviate only once a documented path has empirically failed — an equivalent-effect method (same target, same fault effect) is then legitimate, and the safety guard arbitrates what is dangerous"
     )
     base = "\n".join(lines)
 
@@ -142,8 +143,10 @@ def get_execution_directives_section(
         "read tool output and avoid unchanged repetition). Use only capabilities",
         "grounded in runtime evidence and within the approved scope — do not fabricate",
         "tool interfaces or expand the approved target or safety boundaries. When the",
-        "plan itself needs a different assumption, capability, target, or safety",
-        "decision, use the Replan Mechanism below rather than improvising.",
+        "plan itself needs a different assumption, target, or safety decision, use the",
+        "Replan Mechanism below; when a documented method fails but the approved goal",
+        "remains reachable another way, choosing an equivalent-effect alternative",
+        "within the approved scope is yours to make.",
         "",
         "### Multi-Step Execution",
         "The approved mutation steps live in the plan's '## Execution Steps' section.",

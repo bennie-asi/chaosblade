@@ -29,6 +29,7 @@ class OperationOutcome:
     failure_reason: str
     failure_detail: dict[str, Any] | None
     postmortem: Any | None
+    issue_report: Any | None
     finished_at: str
 
 
@@ -143,6 +144,7 @@ def read_operation_outcome(state: Mapping[str, Any]) -> OperationOutcome:
         failure_reason=read_failure_reason(state),
         failure_detail=_copy_dict(failure_detail),
         postmortem=_copy_optional(state.get("postmortem")),
+        issue_report=_copy_optional(state.get("issue_report")),
         finished_at=str(state.get("finished_at") or ""),
     )
 

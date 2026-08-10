@@ -48,8 +48,9 @@ class GuardVerdict(str, Enum):
     # Tool would act on a resource different from approved — block,
     # trigger replan + re-confirm.
     REJECT_DRIFT = "reject_drift"
-    # Tool is explicitly banned (kubectl apply -f, _execute_skill_script
-    # without opt-in, kubectl config write). Block, no replan attempt.
+    # Tool is explicitly banned (kubectl apply/create -f <file|URL> whose
+    # manifest the guard cannot see, _execute_skill_script without opt-in,
+    # kubectl config write). Block, no replan attempt.
     REJECT_BANNED = "reject_banned"
     # Tool is unknown to the classifier (new MCP tool, unrecognised
     # kubectl subcommand). Default-deny posture — block + log so the
@@ -163,6 +164,16 @@ class ApprovedTarget:
     # scoped (namespace=""), but secondary pod operations need a namespace.
     # Preserved from FaultSpec.namespace before cluster-scope clearing.
     secondary_namespace: str = ""
+    # PVC claim names referenced by the approved pod(s), discovered at freeze
+    # time (cluster query of ``spec.volumes[*].persistentVolumeClaim.claimName``).
+    # Anchors the DRILL OCCUPANCY VEHICLE exception: a resource-occupancy drill
+    # (e.g. RWO cloud-disk multi-attach conflict) must create a behaviourless
+    # sleep pod that claims the SAME PVC the target uses, so the occupant's
+    # claim set is validated against these frozen names — an occupant claiming
+    # any other PVC is resource-selection drift. Empty when the approval has no
+    # resolvable pod identity or the pods reference no PVCs (the occupant
+    # exception then has nothing to anchor on and stays refused).
+    pvc_claims: tuple[str, ...] = ()
     # Carrier-agnostic host identity. Populated when ``scope == "host"``
     # (bare-metal / VM faults). Empty for Kubernetes targets, which keep
     # using namespace/names/labels. See ``as_target()``.
@@ -282,6 +293,34 @@ class EffectiveTarget:
     # compliant path exists, so this is a form issue"), so never fill it just to
     # avoid an empty field.
     reject_suggestion: str = ""
+    # Mechanism-level policy ban: the call's INJECTION MECHANISM is forbidden
+    # by policy regardless of how the call is reshaped. Distinct from BOTH
+    # neighbours:
+    #   - NOT a form issue — no compliant reshape of THIS call passes, so the
+    #     "adjust and retry" guidance would send the model spiralling through
+    #     doomed variants (the task-190c94e8 holder-pod retry loop).
+    #   - NOT a universal hard floor — other mechanisms/kinds ARE allowed, so
+    #     "stop entirely" is also wrong.
+    # The honest move is to CHANGE MECHANISM, i.e. ``request_replan``. Canonical
+    # example: creating a workload kind (Pod/Deployment/Job/...) via manifest
+    # apply — the guard refuses to spawn new workloads because their blast
+    # radius cannot be scoped. The screener renders replan guidance instead of
+    # "adjust and retry" when this flag is set.
+    mechanism_banned: bool = False
+    # Drill occupancy vehicle: a ``kubectl apply/create`` manifest that passed
+    # the OCCUPANT CONTRACT — a behaviourless (sleep-only) pod whose sole
+    # purpose is to hold a scarce resource (an RWO PVC attach slot) so a
+    # re-created target pod collides on it and stalls. Set by the classifier;
+    # the screener then validates ``occupant_claims`` against the frozen
+    # ``approved.pvc_claims`` and registers the pod as a task vehicle so its
+    # later delete is exempt from drift and recover cleans it up. Identity
+    # drift comparison never applies — the occupant's name is new by
+    # construction and can only mismatch the approved target.
+    is_vehicle_manifest: bool = False
+    # PVC claim names the occupant manifest references
+    # (``spec.volumes[*].persistentVolumeClaim.claimName``). Meaningful only
+    # when ``is_vehicle_manifest`` is True.
+    occupant_claims: tuple[str, ...] = ()
 
     def as_target(self):
         """Return the carrier-agnostic :class:`TargetProtocol` view."""

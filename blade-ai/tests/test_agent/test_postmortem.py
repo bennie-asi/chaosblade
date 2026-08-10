@@ -42,14 +42,34 @@ class TestShouldGenerate:
             state = {"confirmed_intent": intent, "blade_uid": "uid-x"}
             assert should_generate_postmortem(state, s) is False, intent
 
-    def test_on_when_blade_uid_present(self):
+    def test_blade_uid_alone_no_longer_gates(self):
+        """task-349ccf5d: the gate must NOT key on blade_uid. The uid can
+        be wiped by a replan path while the experiment DID happen; with
+        no verification and no failure_detail there is nothing to report
+        on, so this shape stays off regardless of the uid."""
         s = _Settings()
         state = {"confirmed_intent": "inject", "blade_uid": "uid-x"}
-        assert should_generate_postmortem(state, s) is True
+        assert should_generate_postmortem(state, s) is False
 
-    def test_on_for_whitelisted_failure_categories(self):
+    def test_on_when_verification_completed(self):
         s = _Settings()
-        for cat in ("verification_failed", "execution_failed", "replan_exhausted"):
+        for level in ("verified", "unverified", "partial"):
+            state = {
+                "confirmed_intent": "inject",
+                "verification": {"level": level},
+            }
+            assert should_generate_postmortem(state, s) is True, level
+
+    def test_on_for_failure_categories_outside_skip_list(self):
+        """Blacklist semantics: every failure category reports EXCEPT the
+        pre-execution gate refusals. planning_rejected is the task-349ccf5d
+        regression — the old whitelist missed it."""
+        s = _Settings()
+        for cat in (
+            "verification_failed", "execution_failed", "replan_exhausted",
+            "planning_rejected", "planning_timeout", "execution_timeout",
+            "recovery_failed", "internal_error", "wall_clock_timeout",
+        ):
             state = {
                 "confirmed_intent": "inject",
                 "blade_uid": "",
@@ -57,15 +77,22 @@ class TestShouldGenerate:
             }
             assert should_generate_postmortem(state, s) is True, cat
 
-    def test_off_for_non_whitelisted_failure(self):
+    def test_off_for_pre_execution_rejections(self):
+        """USER_REJECTED / SAFETY_REJECTED refused BEFORE any execution —
+        no verifier data, no side-effects → a report would be fluff."""
         s = _Settings()
-        for cat in ("safety_rejected", "user_rejected", "planning_timeout"):
+        for cat in ("safety_rejected", "user_rejected"):
             state = {
                 "confirmed_intent": "inject",
                 "blade_uid": "",
                 "failure_detail": {"category": cat},
             }
             assert should_generate_postmortem(state, s) is False, cat
+
+    def test_off_when_no_failure_category_and_no_verification(self):
+        s = _Settings()
+        state = {"confirmed_intent": "inject", "blade_uid": "", "failure_detail": {}}
+        assert should_generate_postmortem(state, s) is False
 
 
 # ─── build_postmortem_context ──────────────────────────────────────
@@ -274,9 +301,18 @@ class TestStore:
         assert "**Duration**: 47s" in text
 
     def test_invalid_task_id_rejected(self, tmp_path):
-        for bad in ("", "../etc/passwd", "task-", "TASK-ABC", "task abc"):
+        for bad in ("", "../etc/passwd", "task-", "TASK-ABC", "task abc",
+                    "inject-", "recover-"):
             with pytest.raises(ValueError):
                 save_postmortem(bad, "body", root=tmp_path)
+
+    def test_pipeline_prefixes_accepted(self, tmp_path):
+        # task_identity mints inject-/recover- ids; the path-safety regex
+        # must accept every whitelisted prefix, not only the legacy one.
+        for tid in ("inject-abc12345", "recover-def67890"):
+            path = save_postmortem(tid, "body", root=tmp_path)
+            assert path == tmp_path / f"{tid}.md"
+            assert read_postmortem(tid, root=tmp_path) is not None
 
     def test_postmortem_exists(self, tmp_path):
         assert postmortem_exists("task-abc12345", root=tmp_path) is False

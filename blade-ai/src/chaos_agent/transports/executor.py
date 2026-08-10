@@ -204,12 +204,26 @@ async def execute_via_transport(
             )
 
     # 3. Wrap command + execute (skip_guard=True — already checked in step 1)
-    wrapped = channel.wrap_command(cmd, target, timeout=timeout) if channel is not None else cmd
+    # stdin routing: native channels pipe it to the subprocess; wiz channels
+    # have no stdin pipe, so the payload is folded INTO the wrapped command
+    # (base64 pipeline, see channels.embed_stdin_in_command) and nothing is
+    # handed to run_command — task-349ccf5d: the blanket "kubewiz does not
+    # support stdin" rejection made manifest apply impossible on that
+    # channel, deadlocking every drill that must create an occupier pod.
+    pipe_stdin = stdin_data
+    if channel is not None:
+        if stdin_data and not getattr(channel, "supports_stdin", True):
+            wrapped = channel.wrap_command(cmd, target, timeout=timeout, stdin_data=stdin_data)
+            pipe_stdin = ""
+        else:
+            wrapped = channel.wrap_command(cmd, target, timeout=timeout)
+    else:
+        wrapped = cmd
     result = await run_command(
         wrapped,
         timeout=timeout,
         task_id=task_id,
-        stdin_data=stdin_data,
+        stdin_data=pipe_stdin,
         skip_guard=True,
         env_override=env_override,
         source=source,

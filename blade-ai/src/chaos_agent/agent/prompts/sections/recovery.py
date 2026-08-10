@@ -100,36 +100,69 @@ If you truly cannot determine how to verify, output Layer2 as skipped.
 
 
 def get_recover_delay_section() -> str:
-    """Recovery effect delay awareness — the re-check protocol before concluding.
+    """Convergence and residual attribution — the recovery judgement contract.
 
-    Single profile-agnostic text: the delay/re-check protocol is universal;
-    k8s / host differences (which resources to observe) come from the
-    environment_profile target-authority fragment and per-task instructions,
-    never from this section.
+    Single profile-agnostic text: the convergence/attribution contract is
+    universal; k8s / host differences (which resources to observe) come from
+    the environment_profile target-authority fragment and per-task
+    instructions, never from this section.
 
-    Tool-agnostic by design. An earlier version named the waiting tool inline
-    ("call ``time_wait(seconds=20)``"), which is the pattern this project
-    rejects: the tool's own description already states when to use it, and
-    hard-coding a tool name into a principle breaks whenever the tool surface
-    changes and teaches the model to follow the prompt instead of its bound
-    tools. What the prompt owes the model is the JUDGEMENT — that a
-    transitional reading is not a verdict, and that two readings with no elapsed
-    time between them are one reading.
+    Replaces the old timing-only "Recovery Has Delay" protocol, which
+    calibrated waits to propagation delay (10-60s) and exited with "a
+    re-check after that delay still shows incomplete recovery -> partial".
+    That exit rule misjudged the propagation COST of recovery as recovery
+    failure whenever convergence outruns the wait budget (recover-d93a4ddf:
+    cause revoked instantly, rollout convergence takes minutes; verdict was
+    partial although attribution in the model's reasoning was correct).
+
+    Mirrors the injection verifier's fourth principle: the claim decomposes
+    into elements, and the burden is discharged once each element has
+    evidence — what the judgement needs is attribution of the residual
+    deviation, not a longer snapshot wait.
+
+    Tool-agnostic by design (see test_judgement_tool_agnosticism): an
+    earlier version named the waiting tool inline, which is the pattern this
+    project rejects. What the prompt owes the model is the JUDGEMENT — that
+    a transitional reading is not a verdict, that two readings with no
+    elapsed time between them are one reading, and how to attribute the
+    residual deviation before judging.
     """
-    return """### Recovery Has Delay
+    return """### Converging State and Residual Attribution
 
-Recovery is NOT instantaneous. After the recovery action reports success:
-- The actual recovery effect may take **10-60 seconds** to become fully observable.
-- The recovery needs time to propagate (resource release, state/config rollback,
-  process or service restart).
-- Readiness/health signals and downstream metrics lag behind the actual state
-  change — sampling intervals are typically 15-30s.
+Recovery is NOT instantaneous. The undo action completes in seconds, but the
+system returns to baseline at its own physical tempo (workload rollout,
+process or service restart, resource release, metric propagation — readiness
+and downstream metrics typically lag the actual state change by tens of
+seconds to minutes). A transitional reading is not a verdict — if the first
+check shows incomplete recovery, let time elapse before re-checking the SAME
+evidence: two readings with no elapsed time between them are one reading,
+and prove nothing.
 
-**Therefore:**
-- Do NOT conclude "partial" or "failed" based on a SINGLE observation showing a transitional state.
-- If the first check shows incomplete recovery, let time elapse (on the order of the propagation delay above) before re-checking the SAME evidence — two readings with no elapsed time between them are one reading, and prove nothing.
-- Only conclude "partial" when a re-check AFTER that delay still shows incomplete recovery.
-- If the FIRST check already shows full recovery, one confirmation check suffices."""
+Your product is an evidence chain for ONE claim: **the fault effect has been
+removed by the recovery**. It decomposes into exactly three elements; when
+every element has evidence, the burden is discharged and you submit:
+
+1. **Cause undone** — the fault's cause is fully revoked (fresh config/state
+   observation; the Layer-1 action report alone is NOT evidence).
+2. **Residual attribution** — classify every residual deviation from
+   baseline: *fault residual* (undo incomplete — evidence of recovery
+   FAILURE) or *recovery propagation cost* (the system converging after the
+   undo — evidence that recovery IS working).
+3. **Coverage restored** — spaced readings show the trajectory improving
+   toward baseline. Before concluding, also check: have ALL target resources
+   returned? Any unexpected anomalies on non-targets? Is application-level
+   recovery verified?
+
+Judgement:
+- Cause undone + every residual attributed to recovery propagation +
+  trajectory improving → the recovery holds. Convergence still in progress
+  is NOT failure: conclude "recovered" and record the converging tail in
+  Warnings.
+- Residuals attributable to the fault itself, trajectory stalled or
+  regressing, or evidence genuinely mixed → partial / unrecovered.
+- You may keep observing while budget allows, but the burden is discharged
+  once all three elements have evidence — full convergence is NOT required,
+  and a clean-attribution tail must never be recorded as partial."""
 
 
 def get_recover_output_format_section(*, layer1_label: str = "blade_destroy") -> str:
@@ -158,8 +191,11 @@ directly observed the fault-specific effect being removed.
 If PrimaryEvidenceObserved=false, Overall CANNOT be "recovered" — use "partial".
 
 **Overall Definitions**:
-- **recovered**: Specific fault effect is ABSENT. System is back to baseline or healthy state.
-- **partial**: Evidence mixed or observation incomplete.
+- **recovered**: The specific fault effect is ABSENT. The system is at
+  baseline, or every residual deviation is attributed to recovery
+  propagation with the trajectory improving toward baseline.
+- **partial**: Residual deviations attributable to the fault itself, or
+  evidence genuinely mixed. A converging recovery tail is NOT partial.
 - **unrecovered**: Fault effect is STILL present despite recovery attempt.
 
 **Per-Step Status Definitions**:
@@ -167,6 +203,10 @@ If PrimaryEvidenceObserved=false, Overall CANNOT be "recovered" — use "partial
 - **failed**: Fault effect is still present for this metric.
 - **skipped**: Could not execute this check (tool unavailable).
 - **partial**: Inconclusive — some indicators show recovery, others do not.
+
+Checklist = OBSERVED FACTS. Overall = HOLISTIC JUDGMENT. A checklist CAN
+hold 'partial' items (e.g. convergence still in progress) while Overall says
+'recovered' — explain the attribution in Warnings.
 
 RECOVERY_VERIFICATION_CHECKLIST is mandatory — parsed programmatically."""
 
@@ -178,7 +218,8 @@ def get_recover_remember_section() -> str:
 - Baseline comparison proves recovery — SAME metric on SAME resource; degrade to healthy-state confirmation, then cross-validation when baseline unavailable
 - When a tool returns error, the TOOL is right
 - Repeated failure → suspect your METHOD; switch approach, never silently omit
-- Primary evidence = fault effect ABSENT, not generic health (pod Running ≠ recovered)"""
+- Primary evidence = fault effect ABSENT, not generic health (pod Running ≠ recovered)
+- Attribute residuals before judging: recovery propagation cost is NOT recovery failure — partial means fault-attributable residuals"""
 
 
 # ---------------------------------------------------------------------------

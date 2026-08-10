@@ -43,7 +43,11 @@ from chaos_agent.agent.nodes.verify._verifier_submit import SUBMIT_RECOVER_VERIF
 from chaos_agent.agent.spec.skill_identity import read_active_skill_name
 from chaos_agent.agent.state import AgentState
 from chaos_agent.agent.state_mgmt.state_helpers import fail_state
-from chaos_agent.agent.result.verdict import FailureCategory
+from chaos_agent.agent.result.verdict import (
+    FailureCategory,
+    ResidualAttribution,
+    WarningCode,
+)
 from chaos_agent.config.settings import settings
 from chaos_agent.observability.status_tracker import get_tracker, StatusCategory
 from chaos_agent.utils.time import now_iso
@@ -82,11 +86,37 @@ def _recover_verification_from_submit_args(args: dict, skill_name: str = "") -> 
             "total_count": len(checklist),
             "total_executed": len(checklist),
         }
-    # Level sync: if Layer 2 not passed, recovery cannot be fully "recovered".
+    # Attribution first — the Layer-2 attribution contract (see
+    # get_recover_delay_section) decides whether a step-level 'partial'
+    # aggregate may coexist with a holistic 'recovered' judgement.
+    attribution = args.get("residual_attribution")
+    if attribution in {a.value for a in ResidualAttribution}:
+        result["residual_attribution"] = attribution
+
+    # Level sync: if Layer 2 did not pass, recovery cannot be fully
+    # "recovered" — EXCEPT a clean-attribution converging tail: partial
+    # step-level facts (convergence still in progress) may coexist with a
+    # holistic recovered judgement, per the Checklist=OBSERVED FACTS /
+    # Overall=HOLISTIC JUDGMENT separation in the output contract.
+    clean_tail = attribution == ResidualAttribution.RECOVERY_PROCESS.value
     if l2_status == "failed" and result["level"] == "recovered":
         result["level"] = "unrecovered"
-    elif l2_status == "partial" and result["level"] == "recovered":
+    elif l2_status == "partial" and result["level"] == "recovered" and not clean_tail:
         result["level"] = "partial"
+
+    # Attribution consistency guard: recovery propagation cost is NOT
+    # recovery failure, but fault-attributed (or mixed) residuals contradict
+    # a "recovered" verdict — downgrade and flag.
+    if result["level"] == "recovered" and attribution in (
+        ResidualAttribution.FAULT_RESIDUAL.value,
+        ResidualAttribution.MIXED.value,
+    ):
+        result["level"] = "partial"
+        result["warnings"].append(
+            f"{WarningCode.RESIDUAL_ATTRIBUTION_CONTRADICTION.value}: verdict "
+            "said recovered but residuals were attributed to the fault — "
+            "downgraded to partial"
+        )
     return result
 
 

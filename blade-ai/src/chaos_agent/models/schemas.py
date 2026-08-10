@@ -57,6 +57,10 @@ class ResponseCode(IntEnum):
     # Operation / recovery (4xxx)
     RECOVERY_FAILED = 4001
     INJECTION_FAILED = 4002
+    # Blade execution timed out — an operational failure, not an
+    # internal one. The absent blade_uid is a *consequence* of the
+    # timeout, so consumers get the cause here rather than 5000.
+    EXECUTION_TIMEOUT = 4003
 
     # Internal / runtime (5xxx)
     NO_BLADE_UID = 5000
@@ -155,7 +159,7 @@ def build_inject_envelope(
             elif "user_rejected" in fr_lower:
                 code = ResponseCode.USER_REJECTED
             elif "execution_timeout" in fr_lower:
-                code = ResponseCode.NO_BLADE_UID
+                code = ResponseCode.EXECUTION_TIMEOUT
         message = failure_reason[:200] if failure_reason else "Injection failed"
         return JSONEnvelope.fail(code=code, message=message, data=inject_data)
     return JSONEnvelope.ok(data=inject_data)

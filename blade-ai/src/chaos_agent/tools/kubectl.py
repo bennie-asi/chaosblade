@@ -33,7 +33,6 @@ from chaos_agent.tools.guard import CommandResult
 from chaos_agent.transports import (
     PROFILE_K8S,
     TransportTarget,
-    TransportRegistry,
     display_via_transport,
     execute_via_transport,
 )
@@ -704,7 +703,9 @@ async def kubectl(
       - subcommand: get|describe|top|logs|exec|delete|patch|set|scale|
         cordon|uncordon|taint|label|annotate|drain|debug|apply;
         ``edit``/``replace`` unavailable — use ``patch``.
-      - v_args: shell-quoted args (recipes: `kubectl-recipes.md`).
+      - v_args: shell-quoted args (recipes: `kubectl-recipes.md`). Single-
+        quote any arg with spaces or double quotes (jsonpath, `-p` JSON):
+        `-o 'jsonpath={range...}'`, `-p '{"spec":...}'`.
       - stdin_data: YAML for ``apply -f -`` (not via v_args/exec heredoc).
       - kubeconfig/context/cluster: overrides; never --kubeconfig in
         v_args (auto-stripped).
@@ -739,16 +740,11 @@ async def _kubectl_impl(
     stdin_data: str = "",
 ) -> str:
     """Shared kubectl execution logic used by both kubectl and kubectl_read."""
-    # kubewiz mode does not support stdin piping
+    # Transport target drives channel selection downstream; stdin_data rides
+    # along via execute_via_transport, which folds it into the command on
+    # channels without a native stdin pipe (wiz) — no channel-specific
+    # rejection here any more (task-349ccf5d deadlock).
     _target = TransportTarget.from_state({})
-    _channel = TransportRegistry.resolve(_target)
-    if _channel.name == "kubewiz_k8s" and stdin_data:
-        return (
-            "Error: kubewiz mode does not support stdin piping. "
-            "Use imperative commands instead: "
-            "kubectl create configmap NAME --from-literal=key=value, "
-            "kubectl create secret generic NAME --from-literal=key=value"
-        )
 
     selector_removed = False
     processed_args: list[str] = []
@@ -802,8 +798,14 @@ async def _kubectl_impl(
             (_fault_match.group(1), _fault_match.group(2), _fault_match.group(3))
             if _fault_match else (None, None, None)
         )
-        from chaos_agent.utils.fault_type import ensure_min_duration
-        if "--timeout" not in v_args:
+        from chaos_agent.utils.fault_type import ensure_min_duration, normalize_timeout_flag
+        # normalize_timeout_flag canonicalizes every spelling ChaosBlade
+        # accepts (``--timeout=30``, ``--timeout 30``, duplicates, ``s``
+        # suffix) into a single ``--timeout <value>`` pair — same pattern
+        # as blade_create/blade_python_create. Without it the equals form
+        # evaded the boost and kept its too-short duration.
+        _timeout_value = normalize_timeout_flag(processed_args)
+        if _timeout_value is None:
             effective_timeout = ensure_min_duration(None, _scope, _fault_target, _action)
             processed_args.extend(["--timeout", str(effective_timeout)])
             logger.info(
@@ -812,21 +814,17 @@ async def _kubectl_impl(
             )
         else:
             try:
-                _timeout_match = re.search(r"--timeout\s+(\d+)", v_args)
-                if _timeout_match:
-                    _current_val = _timeout_match.group(1)
-                    _effective = ensure_min_duration(_current_val, _scope, _fault_target, _action)
-                    if _effective != int(_current_val):
-                        for i, token in enumerate(processed_args):
-                            if token == "--timeout" and i + 1 < len(processed_args) and processed_args[i + 1] == _current_val:
-                                processed_args[i + 1] = str(_effective)
-                                logger.info(
-                                    f"Auto-boosted --timeout from {_current_val}s to {_effective}s "
-                                    f"for {_scope}-{_fault_target}-{_action} (recommended minimum)"
-                                )
-                                break
+                _current_int = int(_timeout_value)
             except (ValueError, TypeError):
-                pass
+                _current_int = 0
+            _effective = ensure_min_duration(_timeout_value, _scope, _fault_target, _action)
+            if _effective != _current_int:
+                _timeout_idx = processed_args.index("--timeout")
+                processed_args[_timeout_idx + 1] = str(_effective)
+                logger.info(
+                    f"Auto-boosted --timeout from {_timeout_value}s to {_effective}s "
+                    f"for {_scope}-{_fault_target}-{_action} (recommended minimum)"
+                )
 
     cmd = build_kubectl_cmd(subcommand, processed_args, kubeconfig, context, cluster)
 
@@ -1169,7 +1167,8 @@ async def kubectl_read(
 
     Inputs:
       - subcommand: Literal-enforced (see signature).
-      - v_args: same shape as the full ``kubectl`` tool.
+      - v_args: same shape as ``kubectl``; single-quote args with spaces or
+        double quotes (jsonpath).
       - kubeconfig/context/cluster: optional overrides.
 
     Output: same as the full ``kubectl`` tool (stdout / "Error: ...").

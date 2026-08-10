@@ -14,6 +14,7 @@ import ast
 import inspect
 from pathlib import Path
 
+from chaos_agent.l4.events import _conn_to_state_patch
 from chaos_agent.l4.interaction import _conn_state_fields
 
 # All connection fields the graph state expects. Kept explicit here so the
@@ -105,3 +106,58 @@ def test_three_graph_input_branches_share_one_field_source():
     # And the splat is used at least three times (the three branches).
     splat_uses = src.count("**_conn_state_fields(conn)")
     assert splat_uses >= 3, f"expected 3 branches to splat the helper, found {splat_uses}"
+
+
+class TestConnToStatePatch:
+    """``update_connection`` uses the same field set as ``clarify``.
+
+    The original fix (67ab08e) covered only the three ``graph_input``
+    branches; ``_conn_to_state_patch`` kept the old four-field list, so a
+    mid-conversation channel switch silently dropped every host-channel
+    field again. These tests pin the two sources to the same field set.
+    """
+
+    def test_patch_covers_every_state_field(self):
+        """Every field _conn_state_fields emits must be patchable."""
+        conn = {
+            "kubeconfig": "cfg",
+            "kube_context": "ctx",
+            "kubewiz_cluster_uuid": "u",
+            "kubewiz_profile": "p",
+            "kube_connection_mode": "ssh",
+            "host_name": "h1",
+            "ssh_host": "10.0.0.9",
+            "ssh_user": "root",
+            "ssh_port": 2222,
+        }
+        patch = _conn_to_state_patch(conn)
+        assert set(patch.keys()) == _EXPECTED_KEYS
+        assert patch["kube_connection_mode"] == "ssh"
+        assert patch["ssh_host"] == "10.0.0.9"
+        assert patch["ssh_port"] == 2222
+
+    def test_patch_only_includes_present_keys(self):
+        """Patch semantics: absent keys stay out (no clobber with '')."""
+        patch = _conn_to_state_patch({"kubeconfig": "cfg"})
+        assert patch == {"kubeconfig": "cfg"}
+        assert "ssh_host" not in patch
+
+    def test_patch_ssh_port_stays_numeric(self):
+        assert _conn_to_state_patch({"ssh_port": 2222})["ssh_port"] == 2222
+        # falsy value present → None (never "", matching _conn_state_fields)
+        assert _conn_to_state_patch({"ssh_port": 0})["ssh_port"] is None
+
+    def test_patch_and_fields_never_drift_on_value_semantics(self):
+        """For every present key both mappings must agree on the value."""
+        conn = {
+            "kubeconfig": "cfg",
+            "kube_connection_mode": "kubewiz_host",
+            "host_name": "node-a",
+            "ssh_host": "10.0.0.1",
+            "ssh_user": "admin",
+            "ssh_port": 22,
+        }
+        patch = _conn_to_state_patch(conn)
+        fields = _conn_state_fields(conn)
+        for key, value in patch.items():
+            assert fields[key] == value, f"drift on {key!r}: patch={value!r} fields={fields[key]!r}"

@@ -182,6 +182,11 @@ class FaultSpec:
     # ---- Origin metadata (audit only) -------------------------------------
     source: str = ""                             # "cli_structured" | "cli_nl" | "http_structured" | "http_nl" | "tui" | "direct"
     user_description: str = ""
+    # Specific skill use case the user chose during intent dialogue (e.g. a
+    # catalogue entry name). Empty when no case was chosen — the planning
+    # phase then selects one itself. An anchor hint for planning, not an
+    # executable selector; environment evidence may still overrule it.
+    use_case_name: str = ""
 
     # ---- Approved-intent metadata -----------------------------------------
     # This metadata describes the user-approved contract but never duplicates
@@ -425,6 +430,7 @@ class FaultSpec:
             duration_seconds=duration,
             source=source,
             user_description=user_desc,
+            use_case_name=inherited_text("use_case_name", existing.use_case_name if existing else ""),
             revision=coerce_to_int(args.get("revision"), default=(existing.revision if existing else 0)),
             objective=inherited_text("objective", existing.objective if existing else ""),
             boundaries=(
@@ -502,6 +508,7 @@ class FaultSpec:
             "params_flags": list(self.params_flags),
             "duration_seconds": self.duration_seconds,
             "user_description": self.user_description,
+            "use_case_name": self.use_case_name,
             "revision": self.revision,
             "objective": self.objective,
             "boundaries": list(self.boundaries),
@@ -521,6 +528,7 @@ class FaultSpec:
             "params": dict(self.params),
             "params_flags": list(self.params_flags),
             "duration_seconds": self.duration_seconds,
+            "use_case_name": self.use_case_name,
             "objective": self.objective,
             "boundaries": list(self.boundaries),
             "constraints": list(self.constraints),
@@ -547,6 +555,7 @@ class FaultSpec:
             "duration_seconds": self.duration_seconds,
             "source": self.source,
             "user_description": self.user_description,
+            "use_case_name": self.use_case_name,
             "revision": self.revision,
             "objective": self.objective,
             "boundaries": list(self.boundaries),
@@ -575,6 +584,7 @@ class FaultSpec:
                 duration_seconds=coerce_to_int(d.get("duration_seconds"), default=0),
                 source=coerce_to_str(d.get("source"), default=""),
                 user_description=coerce_to_str(d.get("user_description"), default=""),
+                use_case_name=coerce_to_str(d.get("use_case_name"), default=""),
                 revision=coerce_to_int(d.get("revision"), default=0),
                 objective=coerce_to_str(d.get("objective"), default=""),
                 boundaries=tuple(str(item) for item in coerce_to_list(d.get("boundaries"))),

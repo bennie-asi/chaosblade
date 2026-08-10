@@ -223,7 +223,7 @@ class TestBatchFlow:
             # point where nothing is in progress) while the single path said
             # "injected" (a success claim with no evidence).
             assert r["task_state"] == "failed"
-            assert r["task_id"].startswith("task-")
+            assert r["task_id"].startswith("inject-")
 
     @pytest.mark.asyncio
     async def test_reject_middle_fault(self, graph):

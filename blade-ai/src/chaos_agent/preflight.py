@@ -1184,6 +1184,21 @@ def needs_operator_install(results: list[CheckResult]) -> bool:
 
 # ── Orchestration ───────────────────────────────────────────────────
 
+def exit_for_envelope(result: Any) -> None:
+    """Map a failed JSON envelope to a non-zero process exit code.
+
+    The envelope reports success/failure in ``code``, but shell and CI
+    consumers decide on ``$?`` — an injection that failed while the process
+    exited 0 silently skips every ``|| rollback`` branch. Any non-zero
+    envelope code therefore exits the process with 1. The exit code is
+    fixed at 1 because envelope codes are protocol identifiers (many above
+    255) and are not usable as POSIX exit statuses. Results without a
+    ``code`` field pass through untouched.
+    """
+    if isinstance(result, dict) and result.get("code") not in (0, None):
+        raise typer.Exit(code=1)
+
+
 def run(checks: list[Callable[[], CheckResult]]) -> list[CheckResult]:
     """Run a list of check functions and return all results."""
     results: list[CheckResult] = []

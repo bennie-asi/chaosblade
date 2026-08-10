@@ -194,11 +194,11 @@ class TestPlanningPhaseCarriesTheSameRule:
         """The third condition was strengthened: "no viable path after
         exhausting alternatives" let the model self-certify exhaustion without
         evidence; the current wording requires probed evidence for EVERY
-        documented path before a reject is legal."""
+        documented AND devised path before a reject is legal."""
         planning = self._planning()
         assert "target absent after verification" in planning
         assert "no matching use-case in the catalogue" in planning
-        assert "every documented injection path unviable" in planning
+        assert "documented and devised injection path unviable" in planning
 
     def test_it_does_not_reuse_the_conversational_wording(self):
         """Planning has no user to report to; its exit is finish_planning."""

@@ -243,7 +243,7 @@ def _freeze_from_state(state: AgentState) -> dict | None:
     visible in the screener's WARNING log rather than silently
     constructing an empty approval).
 
-    Reuses ``owner_names`` and ``resolved_names`` from the
+    Reuses ``owner_names``, ``resolved_names`` and ``pvc_claims`` from the
     ``approved_target`` that safety_check already froze (avoiding a redundant
     cluster query).
     """
@@ -253,6 +253,8 @@ def _freeze_from_state(state: AgentState) -> dict | None:
     existing = state.get("approved_target") or {}
     owner_names = tuple(existing.get("owner_names") or ())
     resolved_names = tuple(existing.get("resolved_names") or ())
+    pvc_claims = tuple(existing.get("pvc_claims") or ())
     return freeze_approved_target_from_spec(
         spec, owner_names=owner_names, resolved_names=resolved_names,
+        pvc_claims=pvc_claims,
     )

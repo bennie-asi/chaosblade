@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shlex
@@ -111,8 +112,33 @@ def strip_execution_location(shown: str) -> str:
     return _LOCATION_SUFFIX_RE.sub("", shown)
 
 
+def embed_stdin_in_command(cmd: list[str], stdin_data: str) -> list[str]:
+    """Fold ``stdin_data`` into ``cmd`` as a base64 pipeline prefix.
+
+    ``wiz task exec --command`` offers no stdin pipe, yet the platform
+    executor DOES run the command through a shell (probed live: ``|`` and
+    ``base64 -d`` work; heredocs with embedded newlines break task
+    submission). The reliable single-line form is therefore::
+
+        echo <b64> | base64 -d | <cmd ...>
+
+    The blob is one base64 word (no shell metacharacters can survive
+    encoding), so the manifest content cannot inject extra commands.
+    Guard/audit still see the RAW semantic command with ``-f -``: the
+    embedding happens only inside ``wrap_command`` AFTER the guard step,
+    and the manifest itself was already screened upstream (screener /
+    target_guard inspect ``stdin_data`` on the tool call).
+    """
+    blob = base64.b64encode(stdin_data.encode("utf-8")).decode("ascii")
+    quoted_cmd = " ".join(shlex.quote(p) for p in cmd)
+    return ["sh", "-c", f"echo {blob} | base64 -d | {quoted_cmd}"]
+
+
 class KubeconfigChannel:
     """Direct kubectl/blade execution via --kubeconfig flag."""
+
+    # Local subprocess — run_command pipes stdin_data straight to it.
+    supports_stdin = True
 
     @property
     def name(self) -> str:
@@ -164,6 +190,10 @@ class KubeconfigChannel:
 class KubewizK8sChannel:
     """K8s cluster access via ``wiz task exec``."""
 
+    # ``wiz task exec`` has no stdin pipe; the executor folds it into the
+    # command instead (see ``embed_stdin_in_command``).
+    supports_stdin = False
+
     @property
     def name(self) -> str:
         return "kubewiz_k8s"
@@ -179,7 +209,9 @@ class KubewizK8sChannel:
     def claims(self, target: TransportTarget) -> bool:
         return bool(target.scope == PROFILE_K8S and target.kubewiz_cluster_uuid)
 
-    def wrap_command(self, cmd: list[str], target: TransportTarget, timeout: float | None = None) -> list[str]:
+    def wrap_command(self, cmd: list[str], target: TransportTarget, timeout: float | None = None, stdin_data: str = "") -> list[str]:
+        if stdin_data:
+            cmd = embed_stdin_in_command(cmd, stdin_data)
         cmd_str = " ".join(shlex.quote(p) for p in cmd)
         wait_timeout = str(_wiz_timeout_seconds(timeout))
         task_timeout = str(_wiz_task_timeout_seconds())
@@ -227,6 +259,9 @@ class KubewizK8sChannel:
 class KubewizHostChannel:
     """Host access via ``wiz task exec`` with kubewiz-host-channel."""
 
+    # Same wiz limitation as KubewizK8sChannel — no stdin pipe.
+    supports_stdin = False
+
     @property
     def name(self) -> str:
         return "kubewiz_host"
@@ -243,7 +278,9 @@ class KubewizHostChannel:
     def claims(self, target: TransportTarget) -> bool:
         return bool(target.scope == PROFILE_HOST and target.host_name)
 
-    def wrap_command(self, cmd: list[str], target: TransportTarget, timeout: float | None = None) -> list[str]:
+    def wrap_command(self, cmd: list[str], target: TransportTarget, timeout: float | None = None, stdin_data: str = "") -> list[str]:
+        if stdin_data:
+            cmd = embed_stdin_in_command(cmd, stdin_data)
         cmd_str = " ".join(shlex.quote(p) for p in cmd)
         wait_timeout = str(_wiz_timeout_seconds(timeout))
         task_timeout = str(_wiz_task_timeout_seconds())
@@ -288,6 +325,9 @@ class KubewizHostChannel:
 
 class SSHChannel:
     """Host access via SSH remote execution."""
+
+    # ssh forwards the local subprocess stdin to the remote shell.
+    supports_stdin = True
 
     @property
     def name(self) -> str:

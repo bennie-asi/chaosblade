@@ -105,7 +105,7 @@ class TestSectionFunctions:
 
     def test_guidelines_section_contains_follow_instructions(self):
         section = get_guidelines_section(phase=2)
-        assert "improvise" in section
+        assert "Skill-case methods come first" in section
         assert "Runtime Feedback Priority" in section
 
     def test_core_principles_section_content(self):
@@ -135,19 +135,25 @@ class TestSectionFunctions:
                 )
 
     def test_feasibility_probing_covers_host_level_dependencies(self):
-        """Viability probing must name the host-level substrate the fault
-        mechanism runs on (kernel modules/features, operators/controllers).
-        Regression for task-5193538b: every container-side precondition
-        passed, but the node kernel lacked netem support — the plan's
-        feasibility was built on documentation, not runtime evidence.
+        """Viability probing must obligate deriving the mechanism's full
+        dependency set and probing it wherever it lives (container, host, or
+        cluster components), anchored on the substrate principle. Regression
+        for task-5193538b: every container-side precondition passed, but the
+        node kernel lacked netem support — the plan's feasibility was built
+        on documentation, not runtime evidence. The wording is deliberately a
+        derivation principle, not an enumerated checklist: enumerated
+        directions go stale; the mechanism's dependency set is derived per
+        task and its concrete preconditions live in the skill case.
         """
         for section in (
             get_core_principles_section(),
             get_remember_section(),
-            get_workflow_section(),
         ):
-            assert "kernel modules" in section
-            assert "operators/controllers" in section
+            assert "derive the fault mechanism's dependency set" in section
+        workflow = get_workflow_section()
+        assert "derive what the fault mechanism depends on to work" in workflow
+        assert "only as viable as the substrate it" in workflow
+        assert "kernel or operator capability the mechanism needs" in workflow
 
     def test_executor_core_principles_section_content(self):
         section = get_executor_core_principles_section()
@@ -247,6 +253,27 @@ class TestIntentClarificationSectionFunctions:
         assert "batch" in section
         assert "recover" in section
 
+    def test_role_section_keeps_identity_product_facing(self):
+        """Role must NOT name the three operating roles.
+
+        Whatever is written into §1 Role gets recited back to users
+        verbatim when they ask "你是谁" — observed in sess_c9aba7fa6492,
+        where the model answered with a numbered recitation of
+        follower/prober/guide straight off the prompt. The three roles
+        are internal behaviour rules and live in §2 Truthfulness; Role
+        stays pure product positioning so self-introduction has no
+        internal instruction structure to leak.
+        """
+        for semantic_only in (False, True):
+            section = get_intent_role_section(semantic_only=semantic_only)
+            assert "Blade AI" in section
+            assert "professional" in section
+            # the operating roles must not appear in identity
+            assert "follower of the user's intent" not in section
+            assert "prober of the real environment" not in section
+            assert "guide when the two disagree" not in section
+            assert "three roles" not in section
+
     def test_priorities_section_has_3_priorities(self):
         section = get_intent_priorities_section()
         assert "Three Priorities" in section
@@ -267,6 +294,45 @@ class TestIntentClarificationSectionFunctions:
         assert "target" in section
         assert "action" in section
         assert "target identity fields" in section
+
+    def test_parameter_model_states_params_provenance_rule(self):
+        """Intent accuracy: the probed environment is the ONLY authority.
+
+        Regression guard for the sess_6645c3eaa130 incident, which proved
+        both failure modes at once: the intent node copied a skill-case
+        example value (``port: 8080``) into ``params`` AND never probed
+        the target's actual probe config — the submitted value had no
+        ground truth at all, yet downstream preserved it as the
+        user-approved contract and the planner called it "the user's
+        specified port". Hence the rule, stated once in §2 Truthfulness:
+        environment probe results are the only authority; the user's
+        words are direction, not data (a user-stated value probing
+        cannot verify must be deferred to the environment); case
+        examples are templates; an unprobed environment-bound value is
+        never submitted. §4 keeps a pointer only.
+        """
+        for semantic_only in (False, True):
+            section = get_intent_priorities_section(semantic_only=semantic_only)
+            assert "intent accuracy is non-negotiable" in section
+            assert "ONLY authority" in section
+            # user words demoted to direction — probing follows them
+            assert "direction, " in section and "not data" in section
+            # on conflict: NEVER auto-substitute and submit — guide the
+            # user with an environment-verified recommendation and let
+            # them choose (follower AND guide, not a silent executor)
+            assert "NEVER submit" in section
+            assert "recommend the environment-verified alternative" in section
+            assert "let the user choose" in section
+            # case examples demoted to templates
+            assert "templates" in section
+            # probe-before-submit obligation
+            assert "probe it first, or omit it" in section
+            # the consequence that makes the rule matter
+            assert "user-approved" in section
+        # §4 points at the rule instead of restating it
+        params_section = get_intent_parameter_model_section()
+        assert "Truthfulness rule above" in params_section
+        assert "non-negotiable" not in params_section
 
     def test_inject_flow_section(self):
         section = get_intent_inject_flow_section()

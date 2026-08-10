@@ -350,6 +350,53 @@ async def test_finalize_recover_session_preserves_cli_completed_status():
 
 
 @pytest.mark.asyncio
+async def test_finalize_recover_session_persists_parent_task_id():
+    """Problem F: the recover record must link back to its inject task."""
+    store = _SessionStore()
+    payload = {
+        "status": "success",
+        "data": {"task_id": "task-recover", "task_state": "recovered"},
+    }
+
+    await finalize_recover_session(
+        store,
+        _Graph(_recover_values()),
+        {"configurable": {"thread_id": "task-recover"}},
+        "task-recover",
+        "task-inject",
+        _inject_values(),
+        result_payload=payload,
+        result_summary_mode=RESULT_SUMMARY_RECOVER_PAYLOAD,
+    )
+
+    # State carries no parent_task_id here -> the inject_task_id argument
+    # is the fallback that reaches the store.
+    assert store.finalized["parent_task_id"] == "task-inject"
+
+
+@pytest.mark.asyncio
+async def test_finalize_recover_session_prefers_state_parent_task_id():
+    store = _SessionStore()
+    payload = {
+        "status": "success",
+        "data": {"task_id": "task-recover", "task_state": "recovered"},
+    }
+
+    await finalize_recover_session(
+        store,
+        _Graph({**_recover_values(), "parent_task_id": "task-inject-durable"}),
+        {"configurable": {"thread_id": "task-recover"}},
+        "task-recover",
+        "task-inject",
+        _inject_values(),
+        result_payload=payload,
+        result_summary_mode=RESULT_SUMMARY_RECOVER_PAYLOAD,
+    )
+
+    assert store.finalized["parent_task_id"] == "task-inject-durable"
+
+
+@pytest.mark.asyncio
 async def test_finalize_open_conversation_routes_dialogue_without_finalizing():
     store = _SessionStore()
     tui_store = _TuiStore()

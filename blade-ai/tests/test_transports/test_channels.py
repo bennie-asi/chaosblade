@@ -11,6 +11,7 @@ from chaos_agent.transports.channels import (
     KubewizHostChannel,
     KubewizK8sChannel,
     SSHChannel,
+    embed_stdin_in_command,
 )
 from chaos_agent.transports.protocol import parse_wiz_output
 
@@ -233,6 +234,66 @@ class TestKubewizK8sChannel:
         assert "kubewiz_k8s" in shown
         assert "cluster u" in shown
 
+    @patch("chaos_agent.transports.channels.settings")
+    def test_wrap_command_embeds_stdin(self, mock_settings):
+        """wiz has no stdin pipe — the payload must ride INSIDE --command.
+
+        task-349ccf5d: manifest apply was deadlocked on this channel because
+        stdin could never reach the executor; the occupier-pod drill (and
+        anything else needing ``apply -f -``) needs this embedding.
+        """
+        mock_settings.wiz_path = "wiz"
+        target = TransportTarget(kubewiz_cluster_uuid="u", kubewiz_profile="p")
+        manifest = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: probe\n"
+        wrapped = self.ch.wrap_command(
+            ["kubectl", "apply", "-f", "-"], target, stdin_data=manifest,
+        )
+        cmd_str = wrapped[wrapped.index("--command") + 1]
+        assert "base64 -d" in cmd_str
+        assert "kubectl apply -f -" in cmd_str
+        # Raw manifest text must NOT leak into the command line verbatim.
+        assert "kind: ConfigMap" not in cmd_str
+
+    def test_supports_stdin_is_false(self):
+        assert self.ch.supports_stdin is False
+
+
+# ── embed_stdin_in_command ──────────────────────────────
+
+
+class TestEmbedStdinInCommand:
+    def test_roundtrip(self):
+        """The embedded blob must decode back to the exact payload."""
+        import base64
+        import re
+        payload = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: 'odd $name'\n"
+        cmd = embed_stdin_in_command(["kubectl", "apply", "-f", "-"], payload)
+        assert cmd[:2] == ["sh", "-c"]
+        m = re.match(r"echo ([A-Za-z0-9+/=]+) \| base64 -d \| (.*)", cmd[2])
+        assert m is not None
+        assert base64.b64decode(m.group(1)).decode("utf-8") == payload
+
+    def test_shell_metacharacters_cannot_escape(self):
+        """A hostile manifest must not be able to inject extra commands.
+
+        base64 output is a single word from a safe alphabet, so ``;``,
+        backticks and ``$()`` in the payload can never reach the shell
+        unencoded.
+        """
+        payload = "x\n`; rm -rf /`\n$(curl evil)\n"
+        cmd = embed_stdin_in_command(["cat"], payload)
+        script = cmd[2]
+        assert "rm -rf" not in script
+        assert "curl" not in script
+
+    def test_inner_command_is_quoted(self):
+        cmd = embed_stdin_in_command(
+            ["kubectl", "patch", "deploy/x", "-p", '{"spec":{"replicas":1}}'],
+            "data",
+        )
+        # The JSON arg keeps its quoting inside the sh -c script.
+        assert "'{\"spec\":{\"replicas\":1}}'" in cmd[2]
+
 
 # ── KubewizHostChannel ────────────────────────────────────────
 
@@ -269,6 +330,34 @@ class TestKubewizHostChannel:
     def test_preflight_ok(self):
         target = TransportTarget(host_name="10.0.0.1", kubewiz_profile="p")
         assert self.ch.preflight(target) == []
+
+    @patch("chaos_agent.transports.channels.settings")
+    def test_wrap_command_embeds_stdin(self, mock_settings):
+        """Same wiz limitation as the k8s channel — no native stdin pipe."""
+        mock_settings.wiz_path = "wiz"
+        target = TransportTarget(host_name="10.0.0.1", kubewiz_profile="prof")
+        wrapped = self.ch.wrap_command(["cat"], target, stdin_data="payload\n")
+        cmd_str = wrapped[wrapped.index("--command") + 1]
+        assert "base64 -d" in cmd_str
+        assert "payload" not in cmd_str
+
+    def test_supports_stdin_is_false(self):
+        assert self.ch.supports_stdin is False
+
+
+class TestStdinCapabilityMatrix:
+    """The executor routes stdin by this flag — it must never drift silently.
+
+    Native channels (kubeconfig/ssh) pipe stdin to the subprocess; wiz
+    channels fold it into the command. Flipping either side without the
+    other breaks manifest apply on that channel (task-349ccf5d).
+    """
+
+    def test_matrix(self):
+        assert KubeconfigChannel.supports_stdin is True
+        assert SSHChannel.supports_stdin is True
+        assert KubewizK8sChannel.supports_stdin is False
+        assert KubewizHostChannel.supports_stdin is False
 
 
 # ── SSHChannel ────────────────────────────────────────────────

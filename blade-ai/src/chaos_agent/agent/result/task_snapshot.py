@@ -293,7 +293,13 @@ def _build_inject_context_from_session(session: dict | None) -> str:
 
 
 def _rebuild_inject_verification_summary(verification: dict | None) -> str:
-    """Rebuild inject_verification_summary from the stored verification dict."""
+    """Rebuild inject_verification_summary from the stored verification dict.
+
+    Side-effect warnings recorded at injection time are structural facts
+    (not reusable raw observations), so they carry no causal-chain-illusion
+    risk and MUST survive into the recover context — the recover verifier
+    needs them to reconcile collateral impact beyond the primary target.
+    """
     if not verification or not isinstance(verification, dict):
         return ""
     layer2 = verification.get("layer2")
@@ -302,7 +308,16 @@ def _rebuild_inject_verification_summary(verification: dict | None) -> str:
     details = layer2.get("details", "")
     if not details:
         return ""
-    return f"Layer2={layer2.get('status', 'unknown')}, Details={details}"
+    summary = f"Layer2={layer2.get('status', 'unknown')}, Details={details}"
+    warnings = [
+        str(w).strip()
+        for w in (verification.get("warnings") or [])
+        if str(w).strip()
+    ]
+    if warnings:
+        numbered = " ".join(f"({i}) {w}" for i, w in enumerate(warnings, start=1))
+        summary += f"\nRecorded side-effect warnings at injection: {numbered}"
+    return summary
 
 
 def _read_task_session(task_id: str) -> tuple[dict | None, bool]:
@@ -420,6 +435,8 @@ class TaskSnapshot:
     verification: dict | None = None
     execution_artifacts: list[dict] = field(default_factory=list)
     inject_context: str = ""
+    blast_radius_detail: str = ""
+    side_effects: dict = field(default_factory=dict)
     tui_session_id: str = ""
 
     @classmethod
@@ -474,6 +491,12 @@ class TaskSnapshot:
         )
         session_skill_name = str(result_data.get("skill_name") or "")
         session_inject_context = _build_inject_context_from_session(session)
+        # Durable-first: the inject finalize persists a pre-built inject_context
+        # into result_summary.data; message-scan reconstruction is only the
+        # fallback for records written before that field existed.
+        persisted_inject_context = str(result_data.get("inject_context") or "")
+        session_blast_radius = str(result_data.get("blast_radius_detail") or "")
+        session_side_effects = _coerce_json_dict(result_data.get("side_effects"))
         record_artifacts = _coerce_json_list(record.get("execution_artifacts"))
         session_artifacts = _coerce_json_list(result_data.get("execution_artifacts"))
 
@@ -490,7 +513,21 @@ class TaskSnapshot:
             skill_name = session_skill_name or record_skill_name
             fault_type = session_fault_type or record_fault_type
             verification = result_data.get("verification") or record.get("verification")
-            inject_context = session_inject_context or record.get("inject_context") or ""
+            # Finalize-persisted value is authoritative; otherwise the LIVE
+            # session jsonl is fresher than the record's mid-flight field
+            # (record syncs lag the running session).
+            inject_context = (
+                persisted_inject_context
+                or session_inject_context
+                or record.get("inject_context")
+                or ""
+            )
+            blast_radius_detail = (
+                session_blast_radius or str(record.get("blast_radius_detail") or "")
+            )
+            side_effects = session_side_effects or _coerce_json_dict(
+                record.get("side_effects")
+            )
             stored_fault_spec = session_fault_spec or record_fault_spec
             execution_artifacts = session_artifacts or record_artifacts
         else:
@@ -500,7 +537,18 @@ class TaskSnapshot:
             skill_name = record_skill_name or session_skill_name
             fault_type = record_fault_type or session_fault_type
             verification = record.get("verification") or result_data.get("verification")
-            inject_context = record.get("inject_context") or session_inject_context or ""
+            inject_context = (
+                persisted_inject_context
+                or record.get("inject_context")
+                or session_inject_context
+                or ""
+            )
+            blast_radius_detail = (
+                str(record.get("blast_radius_detail") or "") or session_blast_radius
+            )
+            side_effects = _coerce_json_dict(
+                record.get("side_effects")
+            ) or session_side_effects
             stored_fault_spec = record_fault_spec or session_fault_spec
             execution_artifacts = record_artifacts or session_artifacts
 
@@ -521,6 +569,8 @@ class TaskSnapshot:
                 item for item in execution_artifacts if isinstance(item, dict)
             ],
             inject_context=inject_context,
+            blast_radius_detail=blast_radius_detail,
+            side_effects=side_effects,
             tui_session_id=resolved_tui_session_id,
         )
 
@@ -664,6 +714,17 @@ async def build_recover_initial_from_task_snapshot(
         "fault_type": snapshot.fault_type or checkpoint_values.get("fault_type", ""),
         "skill_case_content": skill_case_content,
         "inject_verification_summary": inject_verification_summary,
+        # Structured inject facts the recover prompt needs to reconcile the
+        # full blast radius — not just the primary target.  Record-persisted
+        # values win; the live checkpoint fills fields older records lack.
+        "blast_radius_detail": (
+            snapshot.blast_radius_detail
+            or str(checkpoint_values.get("blast_radius_detail") or "")
+        ),
+        "side_effects": (
+            dict(snapshot.side_effects)
+            or dict(checkpoint_values.get("side_effects") or {})
+        ),
         "baseline_data": snapshot.record.get("baseline_data") or checkpoint_values.get("baseline_data"),
         "fault_spec": fault_spec,
         "target": target,

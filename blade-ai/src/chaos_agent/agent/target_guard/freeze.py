@@ -36,6 +36,7 @@ def freeze_approved_target_from_spec(
     lock_fault_type: bool = True,
     owner_names: tuple[str, ...] = (),
     resolved_names: tuple[str, ...] = (),
+    pvc_claims: tuple[str, ...] = (),
 ) -> Optional[dict]:
     """Build the ``approved_target`` snapshot from a FaultSpec.
 
@@ -67,6 +68,7 @@ def freeze_approved_target_from_spec(
         lock_fault_type=lock_fault_type,
         owner_names=owner_names,
         resolved_names=resolved_names,
+        pvc_claims=pvc_claims,
     )
 
 
@@ -80,6 +82,7 @@ def freeze_approved_target(
     lock_fault_type: bool = True,
     owner_names: tuple[str, ...] = (),
     resolved_names: tuple[str, ...] = (),
+    pvc_claims: tuple[str, ...] = (),
 ) -> Optional[dict]:
     """Build the ``approved_target`` dict to store in AgentState.
 
@@ -187,6 +190,7 @@ def freeze_approved_target(
         "lock_fault_type": bool(lock_fault_type),
         "owner_names": list(owner_names),
         "resolved_names": list(resolved_names),
+        "pvc_claims": list(pvc_claims),
         "secondary_scopes": list(secondary_scopes),
         "secondary_namespace": secondary_namespace,
         "host_name": host_name,
@@ -217,6 +221,7 @@ def approved_from_dict(d: Optional[dict]) -> Optional[ApprovedTarget]:
         lock_fault_type=bool(d.get("lock_fault_type", True)),
         owner_names=tuple(str(n) for n in (d.get("owner_names") or [])),
         resolved_names=tuple(str(n) for n in (d.get("resolved_names") or [])),
+        pvc_claims=tuple(str(n) for n in (d.get("pvc_claims") or [])),
         secondary_scopes=tuple(str(s) for s in (d.get("secondary_scopes") or [])),
         secondary_namespace=str(d.get("secondary_namespace") or ""),
         host_name=str(d.get("host_name") or ""),
@@ -344,10 +349,61 @@ async def discover_names_by_labels(
     return found
 
 
+async def discover_pod_pvc_claims(
+    namespace: str,
+    pod_names: tuple[str, ...],
+    kubeconfig: str = "",
+) -> tuple[str, ...]:
+    """Resolve the PVC claim names referenced by concrete pods.
+
+    Frozen into ``approved_target.pvc_claims`` so the drill-occupancy-vehicle
+    exception can anchor on them: an occupant pod may only claim a PVC the
+    approved target actually uses. Best-effort: returns an empty tuple on any
+    failure (the occupant exception then stays refused — fail closed).
+    """
+    if not namespace or not pod_names:
+        return ()
+
+    from chaos_agent.config.settings import settings
+    from chaos_agent.tools.kubectl import build_kubectl_cmd
+    from chaos_agent.transports import (
+        PROFILE_K8S,
+        TransportTarget,
+        execute_via_transport,
+    )
+
+    claims: set[str] = set()
+    _target = TransportTarget.from_state({})
+    for pod_name in pod_names:
+        cmd = build_kubectl_cmd("get", [
+            "pod", str(pod_name), "-n", namespace,
+            "-o",
+            "jsonpath={.spec.volumes[*].persistentVolumeClaim.claimName}",
+        ], kubeconfig=kubeconfig)
+        try:
+            result = await execute_via_transport(
+                cmd, _target, timeout=settings.timeout_kubectl,
+                expect_profile=PROFILE_K8S,
+            )
+        except Exception as e:
+            logger.debug("discover_pod_pvc_claims: %s query failed: %s", pod_name, e)
+            continue
+        if result.exit_code == 0 and result.stdout.strip():
+            claims.update(result.stdout.split())
+
+    if claims:
+        logger.info(
+            "discover_pod_pvc_claims: pods %s in ns=%s reference claims %s",
+            list(pod_names), namespace, sorted(claims),
+        )
+    return tuple(sorted(claims))
+
+
 __all__ = [
     "approved_from_dict",
     "discover_owner_names",
     "discover_names_by_labels",
+    "discover_pod_pvc_claims",
     "freeze_approved_target",
     "freeze_approved_target_from_spec",
 ]

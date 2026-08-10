@@ -77,6 +77,21 @@ class WarningCode(str, Enum):
     CROSS_CHECK_DOWNGRADED = "cross_check_downgraded"
     BASELINE_AVAILABLE_NOT_USED = "baseline_available_not_used"
     SEE_VERIFICATION_DETAILS = "see_verification_details"
+    CONVERGENCE_TAIL = "convergence_tail"
+    RESIDUAL_ATTRIBUTION_CONTRADICTION = "residual_attribution_contradiction"
+
+
+class ResidualAttribution(str, Enum):
+    """Where residual deviations from baseline are attributed to.
+
+    Recover Layer-2 judgement contract: recovery propagation cost is NOT
+    recovery failure — only fault-attributable residuals justify partial.
+    """
+
+    NONE = "none"
+    RECOVERY_PROCESS = "recovery_process"
+    FAULT_RESIDUAL = "fault_residual"
+    MIXED = "mixed"
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +217,7 @@ class RecoverVerificationResult(BaseModel):
     layer2: Layer2Result = Layer2Result()
     checklist: Optional[Checklist] = None
     warnings: list[StructuredWarning] = []
+    residual_attribution: Optional[ResidualAttribution] = None
 
     def add_warning(self, code: WarningCode, detail: str = "") -> None:
         self.warnings.append(StructuredWarning(code=code, detail=detail))

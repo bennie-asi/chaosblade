@@ -16,7 +16,11 @@ comprehensively", after effect / attribution / coverage were all already proven.
 Completeness of observation has no end; an evidence burden does.
 """
 
-from chaos_agent.agent.prompts.sections.recovery import get_recover_delay_section
+from chaos_agent.agent.prompts.sections.recovery import (
+    get_recover_delay_section,
+    get_recover_output_format_section,
+    get_recover_remember_section,
+)
 from chaos_agent.agent.prompts.sections.verification import (
     get_verifier_core_principles_section,
     get_verifier_remember_section,
@@ -104,3 +108,55 @@ class TestVerifierConvergencePrinciple:
         """
         assert "adds no proof" in get_verifier_core_principles_section()
         assert "adds no proof" not in get_verification_heuristics_compact_section()
+
+
+class TestRecoverAttributionContract:
+    """Recover Layer-2 judges by attribution, not by a snapshot wait.
+
+    The old timing-only protocol exited with "a re-check after the delay
+    still shows incomplete recovery -> partial", misjudging the propagation
+    COST of recovery as recovery failure (recover-d93a4ddf: cause revoked
+    instantly, rollout convergence takes minutes, verdict was partial
+    although attribution in the model's reasoning was correct). The contract
+    mirrors the injection verifier's fourth principle: one claim, three
+    elements, burden discharged once each element has evidence.
+    """
+
+    def test_the_single_claim_decomposes_into_three_elements(self):
+        text = get_recover_delay_section()
+        assert "evidence chain for ONE claim" in text
+        assert "Cause undone" in text
+        assert "Residual attribution" in text
+        assert "Coverage restored" in text
+
+    def test_burden_discharged_replaces_the_timing_exit_rule(self):
+        text = get_recover_delay_section()
+        assert "burden is discharged" in text
+        # The old timing-only exit rule is gone.
+        assert 'Only conclude "partial" when a re-check AFTER that delay' not in text
+
+    def test_propagation_cost_is_never_recorded_as_partial(self):
+        text = get_recover_delay_section()
+        assert "recovery propagation cost" in text
+        assert "fault residual" in text
+        assert "clean-attribution tail must never be recorded as partial" in text
+
+    def test_wait_judgement_survives_the_rewrite(self):
+        """Attribution replaces the exit rule, not the reading discipline."""
+        text = get_recover_delay_section()
+        assert "let time elapse" in text
+        assert "one reading" in text
+        assert "prove nothing" in text
+
+    def test_output_section_separates_facts_from_judgement(self):
+        """Mirror of the injection verifier: a partial checklist item (e.g.
+        convergence still in progress) must not mechanically aggregate into
+        a partial overall — that aggregation produced recover-d93a4ddf."""
+        text = get_recover_output_format_section()
+        assert "Checklist = OBSERVED FACTS" in text
+        assert "Overall = HOLISTIC JUDGMENT" in text
+        assert "converging recovery tail is NOT partial" in text
+
+    def test_remember_restates_attribution_in_the_recency_zone(self):
+        text = get_recover_remember_section()
+        assert "recovery propagation cost is NOT recovery failure" in text

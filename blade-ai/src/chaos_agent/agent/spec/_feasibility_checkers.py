@@ -514,10 +514,10 @@ class NetworkFeasibilityChecker:
                         f"— node network faults require host iptables"
                     ),
                     recommendation=(
-                        "Verify: kubectl exec <tool-pod> -n chaosblade "
-                        "-- chroot /host iptables -L -n. "
-                        "If chroot is missing, use a debug pod image with "
-                        "iptables (e.g. nicolaka/netshoot)"
+                        "Verify host iptables availability from inside the cluster via a "
+                        "tool pod (discover it across all namespaces first — its namespace "
+                        "is deployment-specific). If chroot into the host root is missing, "
+                        "use a debug pod image with iptables (e.g. nicolaka/netshoot)"
                     ),
                 )
             if has_iptables is None:
@@ -532,8 +532,9 @@ class NetworkFeasibilityChecker:
                         f"{iptables_detail}"
                     ),
                     recommendation=(
-                        "Verify manually: kubectl exec <tool-pod> -n chaosblade "
-                        "-- chroot /host iptables -L -n"
+                        "Verify manually from inside the cluster via a tool pod "
+                        "(discover it across all namespaces first — its namespace is "
+                        "deployment-specific)"
                     ),
                 )
             return None  # feasible, proceed
@@ -564,6 +565,66 @@ class NetworkFeasibilityChecker:
                 ),
                 recommendation="Wait for Pod to be Running before injecting network faults",
             )
+
+        # Blade operator-path precondition: the operator dispatches pod
+        # network experiments to the chaosblade-tool pod on the target
+        # pod's NODE. A cluster-level "some tool pod is healthy" probe is
+        # not evidence for this node — task-e9bae269 burned two terminal
+        # blade_create attempts on exactly this blind spot.
+        node_name = await _fetch_pod_node(pod_name, namespace, kubeconfig)
+        if node_name:
+            ready, missing_bins, tool_detail = await _check_blade_tool_pod_ready(
+                node_name, spec.blade_action, kubeconfig
+            )
+            if ready is False:
+                if missing_bins:
+                    message = (
+                        f"chaosblade-tool pod on node {node_name} lacks "
+                        f"{'/'.join(missing_bins)} — blade network injection "
+                        f"will end in a CRD Error"
+                    )
+                    recommendation = (
+                        "Fix the tool image or switch to the kubectl-native "
+                        "degradation path documented in the skill case "
+                        "(kubectl debug --profile=netadmin ephemeral container)"
+                    )
+                else:
+                    message = (
+                        f"No Running chaosblade-tool pod on node {node_name} "
+                        f"(target pod's node) — blade operator path cannot "
+                        f"inject pod network faults ({tool_detail})"
+                    )
+                    recommendation = (
+                        "Repair the chaosblade-tool DaemonSet on that node, "
+                        "or switch to the kubectl-native degradation path "
+                        "documented in the skill case (kubectl debug "
+                        "--profile=netadmin ephemeral container)"
+                    )
+                return FeasibilityReport(
+                    severity=FeasibilitySeverity.IMPOSSIBLE,
+                    headroom=0.0,
+                    current_value=tool_detail or f"node={node_name}",
+                    limit_value="Running chaosblade-tool pod on target node",
+                    target_value="",
+                    message=message,
+                    recommendation=recommendation,
+                )
+            if ready is None:
+                return FeasibilityReport(
+                    severity=FeasibilitySeverity.TIGHT,
+                    headroom=0.5,
+                    current_value=f"tool pod check failed: {tool_detail}",
+                    limit_value="",
+                    target_value="",
+                    message=(
+                        f"Cannot verify chaosblade-tool health on node "
+                        f"{node_name}: {tool_detail}"
+                    ),
+                    recommendation=(
+                        "Verify: kubectl get pods -A -l app=chaosblade-tool "
+                        f"--field-selector spec.nodeName={node_name}"
+                    ),
+                )
 
         interface = spec.params.get("interface", "eth0")
         iface_exists, iface_detail = await _check_interface_exists(
@@ -602,19 +663,26 @@ class NetworkFeasibilityChecker:
             pod_name, namespace, kubeconfig
         )
         if has_iptables is False:
+            # TIGHT, not IMPOSSIBLE: the blade operator path and the
+            # debug-container degradation path both bring their own
+            # binaries, so a missing in-container iptables only closes
+            # the direct-exec fallback — it does not make the injection
+            # infeasible.
             return FeasibilityReport(
-                severity=FeasibilitySeverity.IMPOSSIBLE,
-                headroom=0.0,
-                current_value="iptables not found",
+                severity=FeasibilitySeverity.TIGHT,
+                headroom=0.5,
+                current_value="iptables not found in target container",
                 limit_value="",
                 target_value="",
                 message=(
-                    f"iptables not available in Pod {pod_name} "
-                    f"— ChaosBlade network faults require iptables"
+                    f"iptables unavailable in Pod {pod_name} — the "
+                    f"direct-exec fallback path is closed (blade operator "
+                    f"and debug-container paths are unaffected)"
                 ),
                 recommendation=(
-                    "Use a container image that includes iptables, "
-                    "or consider CNI-level network policy injection"
+                    "Prefer the blade operator path, or use a kubectl debug "
+                    "ephemeral container (--profile=netadmin) that carries "
+                    "its own iptables"
                 ),
             )
         if has_iptables is None:
@@ -687,6 +755,18 @@ async def _fetch_pod_phase(
     return stdout if stdout else None
 
 
+async def _fetch_pod_node(
+    pod_name: str, namespace: str, kubeconfig: str
+) -> str | None:
+    """kubectl get pod → .spec.nodeName (the node hosting the pod)."""
+    stdout = await _run_kubectl(
+        ["get", "pod", pod_name, "-n", namespace,
+         "-o", "jsonpath={.spec.nodeName}"],
+        kubeconfig,
+    )
+    return stdout.strip() if stdout else None
+
+
 async def _check_interface_exists(
     pod_name: str, namespace: str, interface: str, kubeconfig: str
 ) -> tuple[bool | None, str]:
@@ -723,11 +803,16 @@ async def _check_iptables_available(
 ) -> tuple[bool | None, str]:
     """Check if iptables is *functionally* available in the pod container.
 
-    ChaosBlade network faults (drop/delay/loss/corrupt) work by injecting
-    iptables rules inside the target container's network namespace.
-    Simply checking `iptables --version` only verifies the binary exists but
-    does NOT confirm the container has CAP_NET_ADMIN.  We use `iptables -L -n`
-    which actually requires the capability to list rules.
+    Scope of this check: it validates the kubectl-native DIRECT-EXEC
+    fallback path (running iptables inside the target container itself).
+    It is NOT a ChaosBlade operator-path requirement — blade >= 1.6 runs
+    its own binaries from the chaosblade-tool pod via ``nsenter -n`` into
+    the pod's network namespace (that dependency is covered by
+    ``_check_blade_tool_pod_ready``). task-e9bae269 confirmed a pod
+    without iptables is still injectable via both paths.
+
+    ``iptables -L -n`` (not ``--version``) is used because listing rules
+    actually requires CAP_NET_ADMIN.
 
     Returns:
         (True, "") — confirmed available (binary exists AND has permissions)
@@ -766,20 +851,91 @@ async def _check_iptables_available(
 async def _find_tool_pod_on_node(
     node_name: str, kubeconfig: str
 ) -> tuple[str, str] | None:
-    """Find a running pod on *node_name* in the chaosblade namespace.
+    """Find a Running chaosblade-tool pod on *node_name*.
 
-    Used to locate a chaosblade-tool DaemonSet pod that can serve as a
-    probe carrier for host-level iptables checks.
+    Used both as a probe carrier for host-level iptables checks and as
+    the blade operator-path precondition for pod-scope injections: the
+    operator dispatches pod/container experiments to the chaosblade-tool
+    DaemonSet pod scheduled on the target pod's node (blade >= 1.6), so
+    a missing/unhealthy tool pod there makes the blade path fail even
+    when the operator deployment itself looks healthy (task-e9bae269:
+    ImagePullBackOff on the target node's tool pod surfaced only as a
+    terminal ``target_gone`` at injection time).
+
+    Discovery is namespace-agnostic (``-A``) because real clusters deploy
+    ChaosBlade outside the chart-default namespace (task-e9bae269 had the
+    tool pods in ``default``; the previous hard-coded ``-n chaosblade``
+    silently never matched there). The ``app=chaosblade-tool`` label
+    filter keeps the operator pod (which lacks the /host mount) from
+    being picked as a probe carrier.
     """
     stdout = await _run_kubectl(
-        ["get", "pods", "-n", "chaosblade",
+        ["get", "pods", "-A", "-l", "app=chaosblade-tool",
          "--field-selector", f"spec.nodeName={node_name},status.phase=Running",
-         "-o", "jsonpath={.items[0].metadata.name}"],
+         "-o", "jsonpath={.items[0].metadata.namespace} {.items[0].metadata.name}"],
         kubeconfig, timeout=5,
     )
     if stdout:
-        return stdout, "chaosblade"
+        parts = stdout.split(None, 1)
+        if len(parts) == 2:
+            return parts[1], parts[0]
     return None
+
+
+def _required_tool_binaries(action: str) -> tuple[str, ...]:
+    """Binaries the chaosblade-tool pod must carry for a network action.
+
+    blade >= 1.6 executes its OWN binaries inside the target pod's
+    network namespace (nsenter -n from the tool pod), so the tool image
+    — not the target container — is the dependency. A historical incident
+    showed a tool image without iptables producing a CRD in Error state.
+    """
+    if action == "drop":
+        return ("iptables",)
+    # delay / loss / corrupt / duplicate are netem-based.
+    return ("tc",)
+
+
+async def _check_blade_tool_pod_ready(
+    node_name: str, action: str, kubeconfig: str
+) -> tuple[bool | None, tuple[str, ...], str]:
+    """Verify the blade operator-path executor on the target node.
+
+    Returns:
+        (True, (), "")       — tool pod Running with the required binaries
+        (False, missing, d)  — confirmed unavailable (pod absent/unhealthy,
+                               or a required binary missing in its image)
+        (None, (), d)        — indeterminate (probe error / timeout)
+    """
+    tool_pod = await _find_tool_pod_on_node(node_name, kubeconfig)
+    if not tool_pod:
+        return False, (), f"no Running chaosblade-tool pod found on node {node_name}"
+    pod_name, namespace = tool_pod
+    required = _required_tool_binaries(action)
+    probe_cmd = "command -v " + " && command -v ".join(required)
+
+    from chaos_agent.tools.kubectl import build_kubectl_cmd
+    from chaos_agent.transports import TransportTarget, execute_via_transport
+
+    cmd = build_kubectl_cmd("exec", [pod_name, "-n", namespace,
+                                     "--", "sh", "-c", probe_cmd], kubeconfig=kubeconfig)
+    try:
+        _target = TransportTarget.from_state({})
+        result = await execute_via_transport(
+            cmd, _target, timeout=10, source="feasibility-check",
+            skip_guard=True, expect_profile=PROFILE_K8S)
+        if result.exit_code == 0:
+            return True, (), ""
+        stderr = (result.stderr or "").strip()
+        lowered = stderr.lower()
+        if any(kw in lowered for kw in (
+            "not found", "no such file", "permission denied",
+            "operation not permitted",
+        )):
+            return False, required, f"tool pod {pod_name} missing binary: {stderr}"
+        return None, (), stderr or f"exit code {result.exit_code}"
+    except Exception as exc:
+        return None, (), str(exc)
 
 
 async def _check_node_iptables_available(

@@ -41,8 +41,8 @@ def get_core_principles_section() -> str:
 - You plan inside a hard safety envelope the system enforces (read-only Phase 1, safety_check, timeout, target lock) — within it, use your judgment freely: probe boldly, reason deeply, and commit to a thoroughly-verified plan once the facts are in
 - FAULT INTENT parameters are UNVERIFIED — verify with tools before trusting them
 - When tool output contradicts FAULT INTENT or documentation, the TOOL is correct
-- Verify before finish_planning: (a) the TARGET exists; (b) the chosen injection path is ACTUALLY viable here — probe every precondition your read-only tools can answer (binaries, image/tooling capability, mounts, runtime facts, host-level dependencies the fault mechanism itself runs on — kernel modules/features, installed operators/controllers; ephemeral debug probes included) and carry the evidence into the plan so Phase 2 executes informed, not blind
-- If probed evidence invalidates a documented path, pick a documented alternative; only when EVERY documented path is proven unviable, reject with the per-path evidence
+- Verify before finish_planning: (a) the TARGET exists; (b) the chosen injection path is ACTUALLY viable here — derive the fault mechanism's dependency set (tooling, substrate capabilities, environment facts it presupposes, wherever they live) and probe every precondition your read-only tools can answer (ephemeral debug probes included), carrying the evidence into the plan so Phase 2 executes informed, not blind
+- If probed evidence invalidates a documented path, pick a documented alternative; when every documented path is unviable but you can still devise an equivalent-effect path (same target, same fault effect, probe-grounded), plan it — the safety gate arbitrates risk. Reject only when no path, documented or devised, remains, with the per-path evidence
 - A precondition no read-only tool can answer remains an assumption for Phase 2 — record it, proceed; do NOT re-probe a question already answered, and do NOT loop
 - An empty query or tool error is a clue, not a dead end: try another identifier or widen the search to locate the target"""
 
@@ -58,8 +58,8 @@ def get_remember_section() -> str:
 - You plan inside a hard safety envelope the system enforces (read-only Phase 1, safety_check, timeout, target lock) — within it, use your judgment freely: probe boldly, reason deeply, and commit to a thoroughly-verified plan once the facts are in
 - FAULT INTENT parameters are UNVERIFIED — verify with tools before trusting them
 - When tool output contradicts FAULT INTENT or documentation, the TOOL is correct
-- Verify before finish_planning: (a) the TARGET exists; (b) the chosen injection path is ACTUALLY viable here — probe every precondition your read-only tools can answer (binaries, image/tooling capability, mounts, runtime facts, host-level dependencies the fault mechanism itself runs on — kernel modules/features, installed operators/controllers; ephemeral debug probes included) and carry the evidence into the plan so Phase 2 executes informed, not blind
-- If probed evidence invalidates a documented path, pick a documented alternative; only when EVERY documented path is proven unviable, reject with the per-path evidence
+- Verify before finish_planning: (a) the TARGET exists; (b) the chosen injection path is ACTUALLY viable here — derive the fault mechanism's dependency set (tooling, substrate capabilities, environment facts it presupposes, wherever they live) and probe every precondition your read-only tools can answer (ephemeral debug probes included), carrying the evidence into the plan so Phase 2 executes informed, not blind
+- If probed evidence invalidates a documented path, pick a documented alternative; when every documented path is unviable but you can still devise an equivalent-effect path (same target, same fault effect, probe-grounded), plan it — the safety gate arbitrates risk. Reject only when no path, documented or devised, remains, with the per-path evidence
 - A precondition no read-only tool can answer remains an assumption for Phase 2 — record it, proceed; do NOT re-probe a question already answered, and do NOT loop
 - An empty query or tool error is a clue, not a dead end: try another identifier or widen the search to locate the target
 - Preserve the reviewed FaultSpec; the only way to change it is `propose_plan_change`, otherwise `finish_planning` as-is"""
@@ -88,9 +88,10 @@ def get_executor_core_principles_section() -> str:
 - The plan is approved and the safety envelope is enforced for you — act decisively through tool calls and keep going until every approved injection step is done
 - Tool interface knowledge from docs is UNVERIFIED — discover the actual interface from the tool itself
 - Treat tool output as runtime evidence, not final judgment; draw conclusions only at its supported scope, and resolve uncertainty with a safe discriminating action before abandoning a viable path
+- Effect counts only with mechanism attribution: if the observed state matches the expected symptom but the evidence shows a different cause produced it, the injection has NOT achieved its intent — stop, do not declare completion, and report the deviation with the evidence (`request_replan` is the channel for a broken assumption)
 - Choose the next safe, meaningful action adaptively — avoid unchanged repetition unless new evidence or a new hypothesis justifies it
 - When ALL injection steps are complete, STOP — do not verify or recover (verification is automatic)
-- A failed partial injection is not a completed injection: if it left a residual experiment, clean up that residue before switching methods. If the skill documents an alternative injection method that reaches the same effect on the same target, switch to it here and keep executing — do NOT call request_replan just because the method changed"""
+- A failed partial injection is not a completed injection: if it left a residual experiment, clean up that residue before switching methods. If the skill documents an alternative injection method that reaches the same effect on the same target, switch to it here and keep executing; when the skill documents none, an equivalent-effect method you devise (same target, same effect, probe read-only first) is equally legitimate — the safety guard, not the skill doc, arbitrates danger. Do NOT call request_replan just because the method changed"""
 
 
 def get_executor_remember_section() -> str:
@@ -100,13 +101,14 @@ def get_executor_remember_section() -> str:
     one replan escape rule. Must stay verbatim aligned with Core Principles
     for U-shaped attention integrity.
     """
-    return f"""# REMEMBER
+    return """# REMEMBER
 - The plan is approved and the safety envelope is enforced for you — act decisively through tool calls and keep going until every approved injection step is done
 - Tool interface knowledge from docs is UNVERIFIED — discover the actual interface from the tool itself
 - Treat tool output as runtime evidence, not final judgment; draw conclusions only at its supported scope, and resolve uncertainty with a safe discriminating action before abandoning a viable path
+- Effect counts only with mechanism attribution: if the observed state matches the expected symptom but the evidence shows a different cause produced it, the injection has NOT achieved its intent — stop, do not declare completion, and report the deviation with the evidence (`request_replan` is the channel for a broken assumption)
 - Choose the next safe, meaningful action adaptively — avoid unchanged repetition unless new evidence or a new hypothesis justifies it
 - When ALL injection steps are complete, STOP — do not verify or recover (verification is automatic)
-- A failed partial injection is not a completed injection: if it left a residual experiment, clean up that residue before switching methods. If the skill documents an alternative injection method that reaches the same effect on the same target, switch to it here and keep executing — do NOT call request_replan just because the method changed
+- A failed partial injection is not a completed injection: if it left a residual experiment, clean up that residue before switching methods. If the skill documents an alternative injection method that reaches the same effect on the same target, switch to it here and keep executing; when the skill documents none, an equivalent-effect method you devise (same target, same effect, probe read-only first) is equally legitimate — the safety guard, not the skill doc, arbitrates danger. Do NOT call request_replan just because the method changed
 - If the approved plan's assumptions, feasibility, capabilities, or safety conditions need to change, call the `request_replan` tool with the evidence and decision — issue an actual tool call, never describe it in prose or paste its arguments as text"""
 
 
@@ -154,20 +156,30 @@ tool actually does, and keep the approved target and safety boundaries intact.
    - If the verified target identity differs from the reviewed FaultSpec, call
      `propose_plan_change` with a complete replacement FaultSpec and the current
      revision. The user must approve it before planning continues.
-   - (b) METHOD viability: probe every precondition your read-only tools can
-     answer — binaries/tooling present in the target container or on the host
-     (ephemeral debug probes included), image capability, mount/volume facts,
-     cgroup/runtime layout, and the host-level dependencies the fault mechanism
-     itself runs on (kernel modules/features the target node provides, installed
-     operators/controllers). A mechanism is only as viable as the substrate it
+   - (b) METHOD viability: derive what the fault mechanism depends on to work
+     — tooling, substrate capabilities, and any environment fact it
+     presupposes — then probe every precondition your read-only tools can
+     answer (ephemeral debug probes included), wherever the dependency lives:
+     inside the target container, on the host, or in cluster components.
+     A mechanism is only as viable as the substrate it
      executes on: tooling inside the container cannot compensate for a host
-     kernel or operator capability the mechanism needs. When the skill case
+     kernel or operator capability the mechanism needs. Beyond viability,
+     reason each mutation's consequence chain: its real effect is the direct
+     effect PLUS the environment's reaction to it. Confirm from probed
+     evidence that no reaction removes the mechanism's substrate or amplifies
+     the blast radius beyond the approved scope; a reaction you cannot rule
+     out is a planning fact — avoid it via an alternate path, surface it in
+     the plan for the user's approval decision, or reject with the evidence.
+     Never bet silently that it will not fire. When the skill case
      documents multiple injection paths, probe each path's preconditions and
      commit to the FIRST path proven viable; note the probed evidence in your
      plan/summary — it is part of the plan, not a scratch observation.
    - Evidence DISPROVING a documented path is just as valuable: switch to a
-     documented alternative. Only when EVERY documented path is proven unviable
-     is the request technically impossible — reject with the per-path evidence.
+     documented alternative. When every documented path is unviable but an
+     equivalent-effect path can still be devised (same target, same fault effect,
+     probe-grounded), plan it — the safety gate arbitrates risk. Only when NO
+     path, documented or devised, remains is the request technically impossible
+     — reject with the per-path evidence.
    - Convergence discipline: each probe must answer a specific planning
      question; once answered, act on the answer and move on. Do NOT re-run an
      answered probe, and do NOT loop on a question no read-only tool can answer
@@ -194,7 +206,7 @@ tool actually does, and keep the approved target and safety boundaries intact.
    `finish_planning(rejected=True, ...)` when the request cannot be done — target
    absent after verification, no matching use-case in the catalogue, the tool's own
    help enumerates its capabilities and the one the request needs is not among them,
-   or probed evidence proves EVERY documented injection path unviable (state the
+   or probed evidence proves EVERY documented AND devised injection path unviable (state the
    per-path evidence) — with 2-4 actionable alternatives
    against the same target (fault type + brief description + risk level). An
    enumerated capability list is a complete answer: re-reading it, or reading it at a
@@ -353,7 +365,7 @@ def get_replan_section(replan_context: dict | None = None, replan_history: list 
 
 def get_replan_directive_for_execution() -> str:
     """Replan directive for Phase 2 using an explicit typed wire contract."""
-    return f"""### Replan Mechanism
+    return """### Replan Mechanism
 Keep executing while ANY alternative approach can still advance the approved
 goal within the approved boundary — a single failed tool call is not grounds to
 replan. Request a replan (return to Phase 1) ONLY when the plan itself needs to be

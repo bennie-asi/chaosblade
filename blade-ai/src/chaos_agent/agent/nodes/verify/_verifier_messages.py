@@ -531,38 +531,33 @@ def _build_first_iteration_context(
         )
     # Tool pod context: provide accurate information about tool pod capabilities
     if blade_scope == "node" and tool_pod_name:
-        # Tool pods discovered during injection live in the chaosblade namespace
-        # by convention; the legacy default applies here. Host-level checks
-        # that need /host filesystem access can also use
-        # kubectl_read(subcommand="debug") to spawn an ephemeral debug pod.
-        _tp_ns = "chaosblade"
+        # The tool pod namespace is deployment-specific (task-e9bae269: the
+        # pods lived in `default`, not `chaosblade`). It is never recorded in
+        # state, so never assert one — instruct the LLM to resolve it first.
+        # Tool-agnostic per the abstraction boundary: concrete command forms
+        # (CRD status queries, exec patterns) live in knowledge docs.
         context += (
             f"\n## Available Tool Pod\n"
             f"A tool pod is available for cluster-level operations:\n"
             f"- Pod name: `{tool_pod_name}`\n"
-            f"- Namespace: `{_tp_ns}`\n"
-            f"- Access: kubectl(subcommand='exec', v_args='{tool_pod_name} -n {_tp_ns} -- <command>', kubeconfig='{kubeconfig or '<path>'}')\n"
-            f"- Capabilities: ChaosBlade commands (blade status/destroy), kubectl API checks (describe/top/get), "
+            f"- Namespace: unknown — identify it across all namespaces before exec "
+            f"(the namespace is deployment-specific; never assume it)\n"
+            f"- Capabilities: injection-tool commands (status/destroy), cluster API checks (describe/top/get), "
             f"and host-level checks via `/host/...` (the tool pod typically mounts the host root).\n"
             f"- For CRD-mode disk fill, the fill file IS in the container overlay — "
             f"checking it inside this pod is the PRIMARY verification method.\n"
             f"- For host filesystem verification (e.g., `/proc/loadavg`, `/var/log`), "
             f"prefix paths with `/host` (try `/host/proc/loadavg` first; if missing, "
             f"fall back to bare `/proc/loadavg`). If this tool pod is unavailable or "
-            f"lacks /host access, fall back to "
-            f"`kubectl_read(subcommand='debug', v_args='node/<node> --image=busybox -- sleep 3600')` "
-            f"and exec into the resulting debug pod.\n"
-            f"- **UID Dual Mapping**: The blade_uid ({blade_uid}) is the CRD resource name. "
-            f"Inside the tool pod, `blade status <uid>` searches the LOCAL experiment database "
-            f"and will likely return 'record not found' (because the experiment was created "
-            f"via CRD, not via the local CLI).\n"
-            f"  **CORRECT** — query CRD status via API server:\n"
-            f"    kubectl(subcommand='exec', v_args='{tool_pod_name} -n {_tp_ns} -- /opt/chaosblade/blade query k8s create {blade_uid}', kubeconfig='{kubeconfig or '<path>'}')\n"
-            f"  **CORRECT** — check CRD directly:\n"
-            f"    kubectl(subcommand='get', v_args='chaosblade {blade_uid} -o jsonpath=\"{{.status}}\"', kubeconfig='{kubeconfig or '<path>'}')\n"
-            f"  **FORBIDDEN** — NEVER use `blade status` with a CRD UID, it will return "
-            f"'record not found' and cause a false-negative Layer 2 conclusion:\n"
-            f"    kubectl(subcommand='exec', v_args='{tool_pod_name} -n {_tp_ns} -- /opt/chaosblade/blade status {blade_uid}', kubeconfig='{kubeconfig or '<path>'}')\n"
+            f"lacks /host access, fall back to a node debug pod (busybox image) "
+            f"and exec into it.\n"
+            f"- **UID Dual Mapping**: The experiment UID ({blade_uid}) is the CRD resource name. "
+            f"Inside the tool pod, the injection tool's local status subcommand searches the LOCAL "
+            f"experiment database and typically returns 'record not found' for an experiment "
+            f"created through the cluster API — NEVER use it for this check (it causes a "
+            f"false-negative Layer 2 conclusion). Query the experiment CRD through the cluster "
+            f"API instead (discover the experiment resource kind via the cluster query "
+            f"tool itself; knowledge docs provide reference forms).\n"
         )
     # Programmatic post-check: injection engine already verified the fill effect
     # during direct_execute. This is authoritative — present it BEFORE verification
@@ -896,8 +891,8 @@ def _build_first_iteration_context(
     if not method_note:
         context += (
             "**NOTE**: Some minimal container images lack common shell utilities (top, ps, netstat, etc.). "
-            "If kubectl(subcommand='exec', ...) returns empty output or \"command not found\", do NOT retry — "
-            "use kubectl(subcommand='describe', ...) instead.\n\n"
+            "If a container exec check returns empty output or \"command not found\", do NOT retry — "
+            "use a cluster API describe-style check instead.\n\n"
         )
     # ── Always-on helpers ──
     context += (

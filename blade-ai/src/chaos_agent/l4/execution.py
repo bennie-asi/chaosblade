@@ -616,22 +616,6 @@ class _L4ExecutionMixin:
             "blast_radius_score": 0.5,
         }
 
-    def _check_budget(
-        self, runtime, result: L4TaskResult, values: dict
-    ) -> L4TaskResult:
-        """Budget check (C5): downgrade on overspend."""
-        from chaos_agent.observability.tracer import _traces
-
-        trace = _traces.get(result.task_id)
-        if trace:
-            max_tokens = 50000
-            if trace.total_token_input + trace.total_token_output > max_tokens:
-                result.extras["budget_exceeded"] = "tokens"
-                result.status = (
-                    "degraded" if result.status == "passed" else result.status
-                )
-        return result
-
     async def _emergency_recover(
         self, pool: _ChaosAgentPool, task_id: str, config: dict
     ) -> None:

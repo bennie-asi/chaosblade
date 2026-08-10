@@ -779,6 +779,49 @@ class TestBannedRejectionSeparatesCauseFromWayForward:
         assert d.suggestion == ""
         assert decision_to_feedback(d).is_hard_floor is True
 
+    @pytest.mark.parametrize("kind", ["Deployment", "DaemonSet", "Job"])
+    def test_workload_kind_manifest_is_a_mechanism_ban(self, kind):
+        """Creating a workload kind is a MECHANISM ban, not a form issue.
+
+        Regression for task-190c94e8: the rejection names the accepted kinds (a
+        non-empty suggestion), which used to read as "reshapeable" and the model
+        got "adjust and retry". But no reshape of the SAME apply passes — the
+        mechanism is forbidden — so the feedback must be a hard floor and the
+        effective target must carry ``mechanism_banned`` for the screener to
+        render replan guidance.
+
+        ``Pod`` is deliberately NOT parametrised here: a single-Pod manifest
+        now takes the drill-occupancy-vehicle branch (contract-checked,
+        reshapeable) — see ``test_vehicle_manifest.py``.
+        """
+        from chaos_agent.tools.guard_gateway import decision_to_feedback
+
+        d = self._decide("kubectl", {"subcommand": "apply", "v_args": "-f -",
+                                     "stdin_data": f"kind: {kind}"})
+        assert d.verdict == GuardVerdict.REJECT_BANNED
+        assert d.effective is not None
+        assert d.effective.mechanism_banned is True
+        # Still names the accepted kinds — the ban is about THIS mechanism, not
+        # a blanket refusal of every apply.
+        assert d.suggestion
+        assert decision_to_feedback(d).is_hard_floor is True
+
+    def test_kindless_manifest_stays_a_form_issue(self):
+        """A manifest with no 'kind:' is fixable (declare one), not banned.
+
+        The classifier cannot know which kind the model intends, so "declare a
+        kind" is a genuine reshape — it must stay a form issue, not collapse
+        into the mechanism-ban path.
+        """
+        from chaos_agent.tools.guard_gateway import decision_to_feedback
+
+        d = self._decide("kubectl", {"subcommand": "apply", "v_args": "-f -",
+                                     "stdin_data": "foo: bar"})
+        assert d.verdict == GuardVerdict.REJECT_BANNED
+        assert d.effective is not None
+        assert d.effective.mechanism_banned is False
+        assert decision_to_feedback(d).is_hard_floor is False
+
     @pytest.mark.parametrize("tool,args", [
         ("kubectl", {"subcommand": "config", "v_args": "use-context other"}),
         ("kubectl", {"subcommand": "proxy", "v_args": "--port=8080"}),
@@ -793,6 +836,58 @@ class TestBannedRejectionSeparatesCauseFromWayForward:
         fb = decision_to_feedback(self._decide(tool, args))
         assert fb.is_hard_floor is False
         assert fb.compliant_form
+
+
+class TestApplyWithoutFileInputNamesTheRealCause:
+    """Regression for task-4208d61c: the cause and the fix must match.
+
+    ``kubectl apply`` has no positional-resource form. When the call dropped
+    ``-f -``, it used to fall through to the generic positional fallback and
+    suggest "add a <kind>/<name> positional" — the model followed that hint,
+    produced ``kubectl apply pv/x -f -``, and kubectl itself rejected it with
+    "Unexpected args". The REAL causes are different and must be named:
+    stdin_data present without ``-f -`` → add the flag; neither present →
+    pass the manifest via stdin_data. Verbs that DO take positionals
+    (delete/patch/scale) keep the positional hint.
+    """
+
+    APPROVED = ApprovedTarget(scope="pod", namespace="ns", names=("p",))
+
+    def _decide(self, args):
+        return target_drift_guard(
+            infer_effective_target("kubectl", args), self.APPROVED
+        )
+
+    def test_stdin_manifest_without_f_flag_names_the_missing_flag(self):
+        d = self._decide({
+            "subcommand": "apply",
+            "stdin_data": "kind: PersistentVolume",
+        })
+        assert d.verdict == GuardVerdict.REJECT_UNKNOWN
+        assert "stdin_data" in d.reason
+        assert "'-f -'" in d.suggestion
+        # The positional hint only fits verbs that accept one.
+        assert "positional" not in d.suggestion.lower()
+
+    def test_apply_without_manifest_source_names_the_missing_source(self):
+        d = self._decide({"subcommand": "apply"})
+        assert d.verdict == GuardVerdict.REJECT_UNKNOWN
+        assert "no positional-resource form" in d.reason
+        assert "stdin_data" in d.suggestion
+        assert "positional" not in d.suggestion.lower()
+
+    def test_delete_without_positional_keeps_the_positional_hint(self):
+        d = self._decide({"subcommand": "delete"})
+        assert d.verdict == GuardVerdict.REJECT_UNKNOWN
+        assert "positional" in d.suggestion.lower()
+
+    def test_apply_with_f_and_stdin_still_classifies_the_manifest(self):
+        """The compliant form must stay green after the diagnosis split."""
+        d = self._decide({
+            "subcommand": "apply", "v_args": "-f -",
+            "stdin_data": "kind: PersistentVolume",
+        })
+        assert d.verdict != GuardVerdict.REJECT_UNKNOWN
 
 
 class TestUnparseableCallNamesTheMissingArgument:

@@ -408,9 +408,17 @@ def build_truncation_notice(
             "\n- Query a single resource by name instead of listing them all"
         )
     else:
-        notice = "\n⚠️ TRUNCATED. Use field_selector or output_format='name'."
+        notice = (
+            "\n⚠️ TRUNCATED (compacted historical output — structure may be "
+            "invisible). Use field_selector or output_format='name'."
+        )
         if cache_path:
             notice += f" Cache: {cache_path}"
+        notice += (
+            " NEVER execute a destructive or structural change based on this "
+            "output: re-read the cache file or re-query the specific field "
+            "first."
+        )
 
     return notice
 

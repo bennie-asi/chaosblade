@@ -423,6 +423,12 @@ class TestNetworkFeasibilityChecker:
             "chaos_agent.agent.spec._feasibility_checkers._fetch_pod_phase",
             new_callable=AsyncMock, return_value="Running",
         ), patch(
+            "chaos_agent.agent.spec._feasibility_checkers._fetch_pod_node",
+            new_callable=AsyncMock, return_value="node-a",
+        ), patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_blade_tool_pod_ready",
+            new_callable=AsyncMock, return_value=(True, (), ""),
+        ), patch(
             "chaos_agent.agent.spec._feasibility_checkers._check_interface_exists",
             new_callable=AsyncMock, return_value=(True, ""),
         ), patch(
@@ -438,7 +444,10 @@ class TestNetworkFeasibilityChecker:
         assert report.severity == FeasibilitySeverity.OK
 
     @pytest.mark.asyncio
-    async def test_network_impossible_when_iptables_missing(self):
+    async def test_network_tight_when_in_container_iptables_missing(self):
+        """Missing in-container iptables only closes the direct-exec
+        fallback — blade/debug-container paths carry their own binaries,
+        so this is advisory (TIGHT), not a blocker (task-e9bae269)."""
         spec = _make_spec(
             blade_target="network",
             blade_action="drop",
@@ -452,17 +461,27 @@ class TestNetworkFeasibilityChecker:
             "chaos_agent.agent.spec._feasibility_checkers._fetch_pod_phase",
             new_callable=AsyncMock, return_value="Running",
         ), patch(
+            "chaos_agent.agent.spec._feasibility_checkers._fetch_pod_node",
+            new_callable=AsyncMock, return_value="node-a",
+        ), patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_blade_tool_pod_ready",
+            new_callable=AsyncMock, return_value=(True, (), ""),
+        ), patch(
             "chaos_agent.agent.spec._feasibility_checkers._check_interface_exists",
             new_callable=AsyncMock, return_value=(True, ""),
         ), patch(
             "chaos_agent.agent.spec._feasibility_checkers._check_iptables_available",
             new_callable=AsyncMock, return_value=(False, "command not found"),
+        ), patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_active_network_experiment",
+            new_callable=AsyncMock, return_value=False,
         ):
             report = await assess_feasibility(spec, "/fake/kubeconfig")
 
         assert report is not None
-        assert report.severity == FeasibilitySeverity.IMPOSSIBLE
+        assert report.severity == FeasibilitySeverity.TIGHT
         assert "iptables" in report.message
+        assert "direct-exec" in report.message
 
     @pytest.mark.asyncio
     async def test_network_warns_when_iptables_indeterminate(self):
@@ -478,6 +497,12 @@ class TestNetworkFeasibilityChecker:
         ), patch(
             "chaos_agent.agent.spec._feasibility_checkers._fetch_pod_phase",
             new_callable=AsyncMock, return_value="Running",
+        ), patch(
+            "chaos_agent.agent.spec._feasibility_checkers._fetch_pod_node",
+            new_callable=AsyncMock, return_value="node-a",
+        ), patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_blade_tool_pod_ready",
+            new_callable=AsyncMock, return_value=(True, (), ""),
         ), patch(
             "chaos_agent.agent.spec._feasibility_checkers._check_interface_exists",
             new_callable=AsyncMock, return_value=(True, ""),
@@ -510,6 +535,158 @@ class TestNetworkFeasibilityChecker:
             report = await assess_feasibility(spec, "/fake/kubeconfig")
 
         assert report is None
+
+
+class TestBladeToolPodFeasibility:
+    """Blade operator-path precondition: the chaosblade-tool pod on the
+    target pod's NODE must be Running and carry the action's binaries.
+
+    Regression for task-e9bae269: cluster-level "some tool pod is
+    healthy" probing let two terminal blade_create attempts burn before
+    the ImagePullBackOff on the target node's tool pod was diagnosed.
+    """
+
+    @staticmethod
+    def _spec():
+        return _make_spec(
+            blade_target="network",
+            blade_action="drop",
+            names=("accounting-6fbdb464c7-qn2vr",),
+            params={},
+        )
+
+    def _base_patches(self):
+        return (
+            patch(
+                "chaos_agent.agent.spec._feasibility_checkers._resolve_first_pod",
+                new_callable=AsyncMock,
+                return_value="accounting-6fbdb464c7-qn2vr",
+            ),
+            patch(
+                "chaos_agent.agent.spec._feasibility_checkers._fetch_pod_phase",
+                new_callable=AsyncMock, return_value="Running",
+            ),
+            patch(
+                "chaos_agent.agent.spec._feasibility_checkers._fetch_pod_node",
+                new_callable=AsyncMock, return_value="node-a",
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_impossible_when_tool_pod_missing_on_target_node(self):
+        resolve, phase, node = self._base_patches()
+        with resolve, phase, node, patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_blade_tool_pod_ready",
+            new_callable=AsyncMock,
+            return_value=(False, (),
+                          "no Running chaosblade-tool pod found on node node-a"),
+        ):
+            report = await assess_feasibility(self._spec(), "/fake/kubeconfig")
+
+        assert report is not None
+        assert report.severity == FeasibilitySeverity.IMPOSSIBLE
+        assert "chaosblade-tool" in report.message
+        assert "node-a" in report.message
+        # Recommendation must point at the documented degradation path.
+        assert "netadmin" in report.recommendation
+
+    @pytest.mark.asyncio
+    async def test_impossible_when_tool_pod_lacks_required_binary(self):
+        resolve, phase, node = self._base_patches()
+        with resolve, phase, node, patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_blade_tool_pod_ready",
+            new_callable=AsyncMock,
+            return_value=(False, ("iptables",),
+                          "tool pod chaosblade-tool-x missing binary: not found"),
+        ):
+            report = await assess_feasibility(self._spec(), "/fake/kubeconfig")
+
+        assert report is not None
+        assert report.severity == FeasibilitySeverity.IMPOSSIBLE
+        assert "iptables" in report.message
+
+    @pytest.mark.asyncio
+    async def test_tight_when_tool_pod_check_indeterminate(self):
+        resolve, phase, node = self._base_patches()
+        with resolve, phase, node, patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_blade_tool_pod_ready",
+            new_callable=AsyncMock,
+            return_value=(None, (), "kubectl timeout"),
+        ):
+            report = await assess_feasibility(self._spec(), "/fake/kubeconfig")
+
+        assert report is not None
+        assert report.severity == FeasibilitySeverity.TIGHT
+        assert "kubectl timeout" in report.current_value
+
+    @pytest.mark.asyncio
+    async def test_skipped_when_pod_node_unresolvable(self):
+        """Node lookup failure must not block — the remaining checks run."""
+        resolve, phase, _unused = self._base_patches()
+        with resolve, phase, patch(
+            "chaos_agent.agent.spec._feasibility_checkers._fetch_pod_node",
+            new_callable=AsyncMock, return_value=None,
+        ), patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_blade_tool_pod_ready",
+            new_callable=AsyncMock,
+        ) as tool_check, patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_interface_exists",
+            new_callable=AsyncMock, return_value=(True, ""),
+        ), patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_iptables_available",
+            new_callable=AsyncMock, return_value=(True, ""),
+        ), patch(
+            "chaos_agent.agent.spec._feasibility_checkers._check_active_network_experiment",
+            new_callable=AsyncMock, return_value=False,
+        ):
+            report = await assess_feasibility(self._spec(), "/fake/kubeconfig")
+
+        assert report is not None
+        assert report.severity == FeasibilitySeverity.OK
+        tool_check.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_find_tool_pod_parses_namespace_and_name(self):
+        """Discovery is namespace-agnostic: real clusters deploy ChaosBlade
+        outside the chart-default namespace (task-e9bae269: default)."""
+        from chaos_agent.agent.spec._feasibility_checkers import (
+            _find_tool_pod_on_node,
+        )
+
+        with patch(
+            "chaos_agent.agent.spec._feasibility_checkers._run_kubectl",
+            new_callable=AsyncMock,
+            return_value="default chaosblade-tool-26xlq",
+        ) as run:
+            result = await _find_tool_pod_on_node("node-a", "/fake/kubeconfig")
+
+        assert result == ("chaosblade-tool-26xlq", "default")
+        # Must query all namespaces with the tool label, not -n chaosblade.
+        args = run.await_args.args[0]
+        assert "-A" in args
+        assert "app=chaosblade-tool" in args
+        assert "-n" not in args
+
+    @pytest.mark.asyncio
+    async def test_find_tool_pod_returns_none_when_absent(self):
+        from chaos_agent.agent.spec._feasibility_checkers import (
+            _find_tool_pod_on_node,
+        )
+
+        with patch(
+            "chaos_agent.agent.spec._feasibility_checkers._run_kubectl",
+            new_callable=AsyncMock, return_value=None,
+        ):
+            assert await _find_tool_pod_on_node("node-a", "/fake") is None
+
+    def test_required_binaries_by_action(self):
+        from chaos_agent.agent.spec._feasibility_checkers import (
+            _required_tool_binaries,
+        )
+
+        assert _required_tool_binaries("drop") == ("iptables",)
+        for action in ("delay", "loss", "corrupt", "duplicate"):
+            assert _required_tool_binaries(action) == ("tc",)
 
 
 class TestHostFeasibilityProbes:

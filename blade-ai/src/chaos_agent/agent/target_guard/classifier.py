@@ -51,6 +51,8 @@ import shlex
 from collections.abc import Iterator
 from typing import Any
 
+import yaml
+
 from chaos_agent.agent.spec.fault_registry import is_host_scope
 
 from .types import ConfidenceLevel, EffectiveTarget
@@ -841,6 +843,44 @@ def _classify_kubectl(
                     f"these kinds: {_allowed_manifest_kinds_text()}."
                 ),
             )
+        # No -f: diagnose before the generic positional fallback, whose
+        # "add a <kind>/<name> positional" hint is only true for verbs
+        # that accept one. Two shapes have a different REAL cause:
+        stdin_data = (raw_args or {}).get("stdin_data", "") if raw_args else ""
+        if stdin_data:
+            # The caller meant to feed the manifest through stdin but
+            # dropped the flag that makes kubectl read stdin.
+            return EffectiveTarget(
+                scope=SCOPE_UNKNOWN, namespace="",
+                raw_command=raw_command, confidence=ConfidenceLevel.HIGH,
+                reject_detail=(
+                    f"kubectl {sub} carries a manifest in stdin_data but no "
+                    "'-f -' flag, so kubectl would not read stdin and the "
+                    "guard cannot see what gets applied"
+                ),
+                reject_suggestion=(
+                    "Add the missing '-f -' flag (e.g. v_args=\"-f -\") so "
+                    "kubectl reads the manifest from stdin_data; the guard "
+                    "then classifies the manifest itself."
+                ),
+            )
+        if sub in ("apply", "replace"):
+            # apply/replace have no positional-resource form at all — the
+            # generic hint would steer the model into a command kubectl
+            # itself rejects.
+            return EffectiveTarget(
+                scope=SCOPE_UNKNOWN, namespace="",
+                raw_command=raw_command, confidence=ConfidenceLevel.HIGH,
+                reject_detail=(
+                    f"kubectl {sub} has no positional-resource form; it "
+                    "needs a manifest source, and none was given"
+                ),
+                reject_suggestion=(
+                    "Pass the manifest via stdin_data with v_args=\"-f -\", "
+                    "containing only these kinds: "
+                    f"{_allowed_manifest_kinds_text()}."
+                ),
+            )
 
     # Read-only — no comparison needed.
     if sub in READONLY_KUBECTL_SUBS:
@@ -940,7 +980,10 @@ def _classify_kubectl(
         return _classify_kubectl_resource(rest, raw_command, default_kind=None)
 
     if sub == "apply":
-        # apply without -f (already handled above) — classify by resource.
+        # apply without -f AND without stdin_data (diagnosed above) — a
+        # stray positional still gets the generic resource classification
+        # so a wrong-but-parseable shape reports the parse result rather
+        # than a dead end.
         return _classify_kubectl_resource(rest, raw_command, default_kind=None)
 
     # Anything else: unknown subcommand → default-deny.
@@ -1130,32 +1173,308 @@ def _classify_kubectl_stdin_manifest(
                 f"{_allowed_manifest_kinds_text()}."
             ),
         )
-    if not all(k.lower() in ALLOWED_MANIFEST_KINDS for k in kinds):
+    lower_kinds = [k.lower() for k in kinds]
+    if all(k in ALLOWED_MANIFEST_KINDS for k in lower_kinds):
+        namespace = parse_namespace(rest, default="")
+        if not namespace:
+            namespace = _extract_namespace_from_yaml(stdin_data)
+        name = _extract_name_from_yaml(stdin_data)
+        return EffectiveTarget(
+            scope=canonicalise_kind(kinds[0]),
+            namespace=namespace,
+            names=(name,) if name else (),
+            confidence=ConfidenceLevel.HIGH,
+            raw_command=raw_command,
+        )
+    # Drill occupancy vehicle: a SINGLE Pod document may pass when it
+    # satisfies the occupant contract (behaviourless sleep pod holding a PVC).
+    # Multi-document manifests mixing a Pod with anything else stay refused —
+    # the contract must see the whole effect, and a side document hides it.
+    if lower_kinds == ["pod"]:
+        return _classify_vehicle_pod_manifest(stdin_data, rest, raw_command)
+    if "pod" in lower_kinds:
         return EffectiveTarget(
             scope=SCOPE_BANNED, namespace="",
             raw_command=raw_command, confidence=ConfidenceLevel.HIGH,
             reject_detail=(
-                "the manifest contains a non-whitelisted resource kind "
-                f"({', '.join(kinds)})"
+                "the manifest mixes a Pod with other documents "
+                f"({', '.join(kinds)}); an occupant pod must be applied alone"
             ),
             reject_suggestion=(
-                f"Accepted kinds: {_allowed_manifest_kinds_text()}. Workload "
-                "kinds (Deployment / DaemonSet / Pod / Job / …) are refused "
-                "because they start containers whose blast radius the guard "
-                "cannot scope — inject into a workload that already exists "
-                "instead of creating one."
+                "Apply the occupant pod as the ONLY document in stdin_data; "
+                "apply any whitelisted resources "
+                f"({_allowed_manifest_kinds_text()}) in separate calls."
             ),
         )
+    return EffectiveTarget(
+        scope=SCOPE_BANNED, namespace="",
+        raw_command=raw_command, confidence=ConfidenceLevel.HIGH,
+        # A workload kind is a MECHANISM ban, not a reshape-and-retry: no
+        # compliant form of this apply passes, so "adjust and retry" would
+        # only loop the model through doomed variants. The screener turns
+        # this into replan guidance.
+        mechanism_banned=True,
+        reject_detail=(
+            "the manifest contains a non-whitelisted resource kind "
+            f"({', '.join(kinds)})"
+        ),
+        reject_suggestion=(
+            f"Accepted kinds: {_allowed_manifest_kinds_text()}. Workload "
+            "kinds (Deployment / DaemonSet / Pod / Job / …) are refused "
+            "because they start containers whose blast radius the guard "
+            "cannot scope — inject into a workload that already exists "
+            "instead of creating one."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Drill occupancy vehicle contract (manifest channel)
+#
+# A resource-occupancy drill reproduces faults whose mechanism is "the target
+# cannot acquire a scarce resource": the canonical case is an RWO cloud disk
+# already attached elsewhere — a re-created target pod stalls in
+# ContainerCreating on the multi-attach conflict. The only way to stage that
+# is a transient pod that CLAIMS the same PVC, so the blanket workload-create
+# ban carves out exactly that shape, and nothing else. The contract makes the
+# exception verifiable from the manifest alone:
+#
+#   C1 behaviourless — every container command is a pure keep-alive sleep and
+#      there are no initContainers: the occupant holds the resource and does
+#      nothing with it;
+#   C2 no privilege surface — no hostNetwork/hostPID/hostIPC, no privileged
+#      or capabilities;
+#   C3 volumes — ONLY persistentVolumeClaim volumes, at least one (the
+#      occupancy target); nothing else mounts;
+#   C4 bounded lifetime — ``activeDeadlineSeconds`` in (0, 3600]: the pod
+#      self-destructs even if the task dies before recovery runs.
+#
+# Deliberately NO drill-marker label constraint: the drill must be
+# indistinguishable from a real incident, and a recognisable marker label on
+# the occupant gives the game away to anyone inspecting the cluster. Vehicle
+# identity is tracked TASK-side (execution_artifacts registration + the
+# screener's exemption/cleanup), never via a cluster-visible label.
+#
+# A contract violation is a FORM issue (mechanism_banned=False): a compliant
+# occupant DOES exist, and the rejection lists exactly which constraints to
+# fix. That is what keeps the model reshaping toward the contract instead of
+# looping through doomed variants (task-190c94e8).
+# ---------------------------------------------------------------------------
+
+_MAX_OCCUPANT_DEADLINE_SECONDS = 3600
+_SHELL_SLEEP_RE = re.compile(r"^(?:exec\s+)?sleep(?:\s+[1-9][0-9]*)?$")
+
+
+def _is_sleep_only_command(command: Any) -> bool:
+    """Whether a manifest container ``command`` is a pure keep-alive sleep.
+
+    Modelled on ``tools.kubectl._is_keepalive_sleep`` (re-declared here
+    rather than imported — the guard layer does not depend on tools), but
+    STRICTER: a bare ``sleep`` with no duration and ``sh -c`` wrapping a
+    bare ``sleep`` are refused here, because an occupant must bound its own
+    runtime in addition to ``activeDeadlineSeconds``. Accepted: ``sleep N``
+    (N a positive integer), an absolute-path sleep binary with the same
+    argument shape, and a shell wrapping NOTHING BUT ``sleep N``. Anything
+    composite is behaviour and fails the contract.
+    """
+    if not isinstance(command, (list, tuple)) or not command:
+        return False
+    cmd = [str(c) for c in command]
+    base = cmd[0].rsplit("/", 1)[-1]
+    if base == "sleep":
+        if len(cmd) == 1:
+            return True
+        return len(cmd) == 2 and re.fullmatch(r"[1-9][0-9]*", cmd[1]) is not None
+    if base in ("sh", "bash") and "-c" in cmd:
+        idx = cmd.index("-c")
+        script = cmd[idx + 1].strip() if idx + 1 < len(cmd) else ""
+        return bool(_SHELL_SLEEP_RE.fullmatch(script))
+    return False
+
+
+def _occupant_contract_violations(doc: dict) -> list[str]:
+    """Validate one parsed Pod document against the occupant contract.
+
+    Returns the list of violated constraints (empty = compliant). Every
+    entry names the constraint and the fix, so the rejection text can be
+    surfaced verbatim as the actionable suggestion.
+    """
+    violations: list[str] = []
+    meta = doc.get("metadata") or {}
+    spec = doc.get("spec") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if not isinstance(spec, dict) or not spec:
+        return ["the pod has no spec — declare spec.containers with a sleep command"]
+
+    # Explicit identity: the vehicle is tracked TASK-side by this exact name
+    # (registration, drift exemption, cleanup all key on it). A missing name or
+    # generateName would leave the created pod untrackable — and uncleanable.
+    if not str(meta.get("name") or ""):
+        violations.append(
+            "metadata.name must be declared explicitly (generateName is not "
+            "allowed — the occupant's identity must be fixed up front)"
+        )
+
+    # C4 bounded lifetime
+    deadline = spec.get("activeDeadlineSeconds")
+    if (
+        not isinstance(deadline, int) or isinstance(deadline, bool)
+        or not 0 < deadline <= _MAX_OCCUPANT_DEADLINE_SECONDS
+    ):
+        violations.append(
+            f"spec.activeDeadlineSeconds must be an integer in "
+            f"(0, {_MAX_OCCUPANT_DEADLINE_SECONDS}] so the occupant "
+            "self-destructs even if recovery never runs"
+        )
+
+    # C1 behaviourless
+    if spec.get("initContainers"):
+        violations.append("initContainers are not allowed on an occupant pod")
+    containers = spec.get("containers")
+    if not isinstance(containers, list) or not containers:
+        violations.append("spec.containers must declare at least one container")
+        containers = []
+    for i, c in enumerate(containers):
+        cname = str(c.get("name") or f"#{i}") if isinstance(c, dict) else f"#{i}"
+        if not isinstance(c, dict):
+            violations.append(f"container {cname} is not a mapping")
+            continue
+        if not _is_sleep_only_command(c.get("command")):
+            violations.append(
+                f"container '{cname}' command must be a pure keep-alive sleep, "
+                'e.g. command: ["sleep", "3600"]'
+            )
+        if c.get("args"):
+            violations.append(f"container '{cname}' must not declare args")
+        # C2 privilege surface (container level)
+        sec = c.get("securityContext") or {}
+        if isinstance(sec, dict) and (sec.get("privileged") or sec.get("capabilities")):
+            violations.append(
+                f"container '{cname}' securityContext must not set "
+                "privileged or capabilities"
+            )
+
+    # C2 privilege surface (pod level)
+    for flag in ("hostNetwork", "hostPID", "hostIPC"):
+        if spec.get(flag):
+            violations.append(f"spec.{flag} must not be set on an occupant pod")
+
+    # C3 volumes — PVC only, at least one
+    volumes = spec.get("volumes")
+    pvc_count = 0
+    for v in volumes if isinstance(volumes, list) else []:
+        vname = str(v.get("name") or "?") if isinstance(v, dict) else "?"
+        if not isinstance(v, dict):
+            violations.append(f"volume '{vname}' must be a persistentVolumeClaim volume — occupants mount nothing else")
+            continue
+        pvc = v.get("persistentVolumeClaim")
+        if isinstance(pvc, dict) and str(pvc.get("claimName") or ""):
+            pvc_count += 1
+        elif isinstance(pvc, dict):
+            violations.append(
+                f"volume '{vname}' persistentVolumeClaim must declare claimName "
+                "(an unnamed claim cannot be anchored against the approval)"
+            )
+        else:
+            violations.append(
+                f"volume '{vname}' must be a persistentVolumeClaim volume — "
+                "occupants mount nothing else"
+            )
+    if not pvc_count:
+        violations.append(
+            "the occupant must claim at least one persistentVolumeClaim volume "
+            "(the occupancy target)"
+        )
+    return violations
+
+
+def _extract_occupant_claims(spec: dict) -> tuple[str, ...]:
+    """PVC claim names referenced by an occupant pod spec."""
+    claims: set[str] = set()
+    volumes = spec.get("volumes")
+    for v in volumes if isinstance(volumes, list) else []:
+        if not isinstance(v, dict):
+            continue
+        pvc = v.get("persistentVolumeClaim")
+        if isinstance(pvc, dict) and pvc.get("claimName"):
+            claims.add(str(pvc["claimName"]))
+    return tuple(sorted(claims))
+
+
+def _classify_vehicle_pod_manifest(
+    stdin_data: str,
+    rest: list[str],
+    raw_command: str,
+) -> EffectiveTarget:
+    """Classify a single-Pod apply against the occupant contract.
+
+    Compliant manifests classify as a normal scope=pod creation PLUS
+    ``is_vehicle_manifest`` / ``occupant_claims`` — the screener validates
+    the claims against the frozen approval and registers the occupant as a
+    task vehicle. Contract violations are a reshapeable form issue.
+    """
+    try:
+        docs = [d for d in yaml.safe_load_all(stdin_data) if d]
+    except yaml.YAMLError as exc:
+        return EffectiveTarget(
+            scope=SCOPE_BANNED, namespace="",
+            raw_command=raw_command, confidence=ConfidenceLevel.HIGH,
+            reject_detail=f"the occupant manifest does not parse as YAML: {exc}",
+            reject_suggestion="Fix the YAML syntax and re-apply the occupant pod.",
+        )
+    # Single-document policy: the contract must see the WHOLE effect. A side
+    # document — even one with no ``kind:`` that the kinds regex cannot see —
+    # hides part of the apply from this check.
+    if len(docs) != 1:
+        return EffectiveTarget(
+            scope=SCOPE_BANNED, namespace="",
+            raw_command=raw_command, confidence=ConfidenceLevel.HIGH,
+            reject_detail=(
+                f"the occupant manifest carries {len(docs)} documents; an "
+                "occupant pod must be applied alone"
+            ),
+            reject_suggestion="Apply the occupant pod as the ONLY document in stdin_data.",
+        )
+    doc = docs[0] if docs else {}
+    if not isinstance(doc, dict):
+        doc = {}
+    violations = _occupant_contract_violations(doc)
+    if violations:
+        return EffectiveTarget(
+            scope=SCOPE_BANNED, namespace="",
+            raw_command=raw_command, confidence=ConfidenceLevel.HIGH,
+            reject_detail=(
+                "the occupant pod violates the drill vehicle contract: "
+                + "; ".join(violations)
+            ),
+            reject_suggestion=(
+                "A behaviourless occupant pod IS permitted — fix the listed "
+                "constraints and re-apply the SAME manifest: sleep-only "
+                "command, no initContainers, no host* / privileged / "
+                "capabilities, only persistentVolumeClaim volumes, and "
+                "activeDeadlineSeconds <= 3600."
+            ),
+        )
+    meta = doc.get("metadata") or {}
+    spec = doc.get("spec") or {}
+    name = str(meta.get("name") or "")
     namespace = parse_namespace(rest, default="")
     if not namespace:
-        namespace = _extract_namespace_from_yaml(stdin_data)
-    name = _extract_name_from_yaml(stdin_data)
+        namespace = str(meta.get("namespace") or "")
+    labels: dict[str, str] = {}
+    raw_labels = meta.get("labels")
+    if isinstance(raw_labels, dict):
+        labels = {str(k): str(v) for k, v in raw_labels.items()}
     return EffectiveTarget(
-        scope=canonicalise_kind(kinds[0]),
+        scope="pod",
         namespace=namespace,
         names=(name,) if name else (),
+        labels=labels,
         confidence=ConfidenceLevel.HIGH,
         raw_command=raw_command,
+        is_vehicle_manifest=True,
+        occupant_claims=_extract_occupant_claims(spec),
     )
 
 

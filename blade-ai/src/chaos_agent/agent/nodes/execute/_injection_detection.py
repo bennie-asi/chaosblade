@@ -4,8 +4,10 @@ Provides precise detection of kubectl-exec-based ChaosBlade injection by
 cross-referencing ToolMessage responses with the original AIMessage tool_calls,
 verifying subcommand='exec' and blade command in v_args.
 
-Also detects kubectl-native injection methods (scale, patch, cordon, taint, set)
-used as alternatives when blade_create fails on the host.
+Also detects kubectl-native injection methods used as alternatives when
+blade_create fails on the host — both object-write verbs (scale, patch,
+cordon, taint, set) and command-mode exec/debug injections whose inner
+command mutates (e.g. the python/stress-ng memory fallback).
 """
 
 import json
@@ -138,22 +140,72 @@ def _was_kubectl_blade_injection_successful(messages: list) -> bool:
     return _scan_kubectl_blade_success(messages)
 
 
+def was_kubectl_exec_delivery(
+    state: dict, messages: list | None = None,
+) -> bool:
+    """Whether the LIVE experiment was created via ``kubectl exec``.
+
+    Two evidence sources, unioned — the same pattern as the blade_destroy
+    provenance fix (SC1):
+
+    1. ``state["injection_method"] == "kubectl_exec"`` — the framework's
+       DURABLE record. It is committed in the same iteration the
+       ``blade_uid`` appears (channel A/B), is ``durable=True`` in the
+       state lifecycle and is inherited by the recover graph, so it
+       survives anything that happens to the message list.
+    2. The message scan (:func:`scan_kubectl_blade_success`) — kept as a
+       fallback for state-less paths (sessions restored without the
+       method recorded). ``messages`` overrides ``state["messages"]``
+       for callers that receive the history separately (the provider
+       ``recover()`` contract passes it through kwargs).
+
+    The scan alone is NOT durable: recovery runs LATE in the task, and
+    compaction removes the injection evidence pair (the kubectl-exec
+    AIMessage + its ChaosBlade-success ToolMessage are among the oldest
+    messages) BY DESIGN. Losing it mis-routes a CRD-created experiment
+    into the deterministic HOST ``blade_destroy`` — which cannot reach it
+    ("record not found") — and withholds the kubectl-exec recovery
+    instructions from the LLM flow. The verify side already routes on the
+    durable record (``ChaosbladeProvider.layer1_verify``); recovery must
+    agree with it.
+    """
+    if state.get("injection_method") == "kubectl_exec":
+        return True
+    msgs = messages if messages is not None else (state.get("messages") or [])
+    return _scan_kubectl_blade_success(msgs)
+
+
 def _was_kubectl_injection_attempted(messages: list) -> bool:
     """Check if kubectl write operations were used for fault injection.
 
     Thin wrapper over
     :func:`chaos_agent.agent.providers._detection.scan_kubectl_injection_after_blade`,
-    passing the provider-owned subcommand vocabulary
-    :data:`_KUBECTL_INJECT_SUBCOMMANDS`. Kept as a module-level name for
-    existing callers.
+    passing the provider-owned vocabulary: :data:`_KUBECTL_INJECT_SUBCOMMANDS`
+    for object-write verbs, plus ``inject_command_subcommands`` + the shared
+    read/mutate classifier for exec/debug command-mode injections (a
+    ``kubectl exec`` fallback like the python memory stressor IS a
+    kubectl-native injection — without it a failed blade_create followed by a
+    successful exec fallback mis-routes recover Layer 1 into "blade_create was
+    called but no UID available"). Kept as a module-level name for existing
+    callers.
     """
-    return _scan_kubectl_injection_after_blade(messages, _KUBECTL_INJECT_SUBCOMMANDS)
+    from chaos_agent.agent.providers.k8s_native import _exec_inner_command_mutates
+
+    return _scan_kubectl_injection_after_blade(
+        messages,
+        _KUBECTL_INJECT_SUBCOMMANDS,
+        command_subcommands=_K8sNativeProvider.inject_command_subcommands,
+        is_mutating_command=_exec_inner_command_mutates,
+    )
 
 
-def _was_blade_create_attempted(messages: list) -> bool:
+def _was_blade_create_attempted(
+    messages: list, injection_method: str | None = None,
+) -> bool:
     """Check if ChaosBlade injection was attempted but ultimately failed.
 
     Returns False (not "attempted-and-failed") if:
+      - a committed ``injection_method`` durable record exists (see below)
       - kubectl exec successfully injected a blade experiment (bypassing blade_create)
       - kubectl-native injection was used as an alternative after blade_create failed
     Returns True only if blade_create was called AND no successful injection
@@ -162,7 +214,22 @@ def _was_blade_create_attempted(messages: list) -> bool:
     This distinguishes two scenarios when blade_uid is empty:
       - True:  ChaosBlade injection was attempted but failed → Layer 1 returns "failed"
       - False: Non-ChaosBlade fault, OR kubectl-based injection succeeded → Layer 1 returns "skipped"
+
+    Durable record first: ``injection_method`` is committed when the
+    injection is ISSUED/succeeds (Direction B) and survives compaction — the
+    same rationale as :func:`was_kubectl_exec_delivery`. ANY committed
+    attribution is positive proof that some injection succeeded, so the
+    "blade attempted but nothing injected" branch cannot apply, regardless
+    of what the (possibly compacted) message history still shows. Without
+    this, a replan/compaction that removes the kubectl-native fallback
+    evidence while leaving a failed ``blade_create`` ToolMessage mis-routes
+    a live, recoverable fault into the terminal "no UID" failure. The
+    message scan below stays as the fallback for state-less restored
+    sessions that have no durable record.
     """
+    if injection_method:
+        return False
+
     # If kubectl-based blade injection succeeded, injection was NOT "attempted and failed"
     if _was_kubectl_blade_injection_successful(messages):
         return False

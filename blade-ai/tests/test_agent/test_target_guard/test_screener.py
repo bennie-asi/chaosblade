@@ -1512,6 +1512,59 @@ class TestNodeDriftHint:
         assert "Approved nodes:" not in msg
 
 
+class TestMechanismBanReplanGuidance:
+    """A mechanism-banned rejection must point to replan, not 'adjust & retry'.
+
+    Regression for task-190c94e8: the plan's injection mechanism was creating a
+    holder Pod via ``kubectl apply``. The guard bans workload kinds, but the
+    rejection carried a non-empty suggestion (the accepted-kind list), which the
+    feedback layer read as a reshapeable form issue and appended "adjust the
+    tool_call as above and retry". The model then spiralled through doomed
+    variants (positional args, PV patch) instead of switching mechanism. A
+    mechanism ban has NO compliant reshape of the same call — the honest guidance
+    is to request_replan.
+    """
+
+    def _banned_decision(self, mechanism_banned: bool, suggestion: str):
+        eff = EffectiveTarget(
+            scope="__banned__", namespace="",
+            confidence=ConfidenceLevel.HIGH,
+            raw_command="kubectl apply -f -",
+            mechanism_banned=mechanism_banned,
+            reject_detail="the manifest contains a non-whitelisted resource kind (Pod)",
+            reject_suggestion=suggestion,
+        )
+        return {
+            "verdict": GuardVerdict.REJECT_BANNED.value,
+            "reason": eff.reject_detail,
+            "suggestion": suggestion,
+            "is_hard_floor": mechanism_banned,
+            "effective": eff,
+        }
+
+    def test_mechanism_ban_says_replan_not_retry(self):
+        msg = _format_rejection_for_llm(
+            self._banned_decision(True, "Accepted kinds: configmap, secret."),
+            False, None,
+        )
+        assert "request_replan" in msg
+        assert "banned by policy" in msg
+        # The misleading reshape guidance must be suppressed.
+        assert "adjust the tool_call" not in msg
+        assert "not a dead-end" not in msg
+
+    def test_form_issue_still_says_adjust_and_retry(self):
+        # A genuine form issue (no mechanism ban) keeps the retry guidance so the
+        # model's exploration space is not collapsed by mistake.
+        msg = _format_rejection_for_llm(
+            self._banned_decision(False, "Use an approved debug pod instead."),
+            False, None,
+        )
+        assert "not a dead-end" in msg
+        assert "adjust the tool_call" in msg
+        assert "request_replan" not in msg
+
+
 class TestCarrierRejectReasonIsTruthful:
     """Every carrier gate must report ITSELF, never another gate's cause.
 

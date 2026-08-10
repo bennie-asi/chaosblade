@@ -656,6 +656,14 @@ class AgentState(MessagesState):
     # inherit it — the retired experiment is exactly what they recover.
     retired_blade_uids: Optional[list[str]] = None
     injection_method: Optional[str] = None   # "host_blade" | "kubectl_exec" | "kubectl_native" | "host_native" | "python_agent"
+    # Combo injection marker (durable, both orders): a kubectl-native mutating
+    # injection was issued ALONGSIDE an experiment-carrying method — either
+    # native-first (UPGRADE records it) or blade-first (issue-time recording).
+    # Recovery routes such tasks to the LLM-driven Layer-1 flow: deterministic
+    # recovery can ONLY destroy the blade experiment and would leak the native
+    # mutation, while the LLM route is the superset executor (it covers the
+    # blade part deterministically first, then undoes the native component).
+    combo_native_issued: Optional[bool] = None
     # Attribution epoch boundary: message count recorded at each replan seam
     # (``reset_attribution_state``). The RESUME injection re-detection scan
     # reads only messages after this index, so pre-seam attempts of the
@@ -691,6 +699,11 @@ class AgentState(MessagesState):
     ssh_key_path: Optional[str] = None
     ssh_port: Optional[int] = None
     inject_context: Optional[str] = None     # Inject-phase context for recover LLM
+    # Recover-only: collateral side effects recorded by the inject task
+    # (from its persisted result data). Layer 1 must undo/reconcile them;
+    # Layer 2 must verify each one. Distinct from verification-internal
+    # side effects, which are stripped before persistence.
+    side_effects: Optional[dict] = None
     baseline_data: Optional[dict] = None     # Pre-injection baseline (from baseline_capture node)
     target_metadata: Optional[dict] = None   # {pod_memory_limit_mb, active_same_action_experiments, ...}
     evidence_snapshot: Optional[dict] = None  # P0: quick evidence after blade_create (ls + df)
@@ -709,6 +722,11 @@ class AgentState(MessagesState):
     recover_verification: Optional[dict] = None
     inject_layer1_cache: Optional[dict] = None   # Persisted across ReAct iterations
     recover_layer1_cache: Optional[dict] = None
+    # Combo recovery: the deterministic blade-destroy verdict, captured before
+    # the LLM-driven Layer-1 flow undoes the native component. Merged into the
+    # final Layer-1 verdict when the LLM concludes (either part failing fails
+    # the composite — a partially undone fault is still active).
+    combo_blade_part: Optional[dict] = None
     metric_observations: Optional[list[dict]] = None  # Structured observation timeline (all nodes)
     inject_verification_summary: Optional[str] = None  # Layer 2 observations for recover baseline
     reverify_count: int = 0              # Re-verification attempt count
@@ -761,6 +779,7 @@ class AgentState(MessagesState):
     failure_reason: Optional[str] = None
     failure_detail: Optional[dict] = None    # FailureDetail dict (category + context + llm_analysis)
     postmortem: Optional[dict] = None        # {"path": str, "markdown": str, "summary": str}
+    issue_report: Optional[dict] = None      # {"status": str, "issue_url"?, "error"?, "message"?, "archive_path"?}
     created_at: Optional[str] = None         # ISO 8601
     finished_at: Optional[str] = None        # ISO 8601
     injection_start_time: Optional[str] = None   # ISO 8601, set when blade_create succeeds

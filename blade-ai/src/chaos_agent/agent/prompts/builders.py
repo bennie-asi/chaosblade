@@ -238,6 +238,11 @@ def build_inject_system_prompt(
                 "evidence may correct implementation details, but it must not silently "
                 "change the outcome. A material change must go through the plan-change "
                 "confirmation path.\n\n"
+                "If `use_case_name` is set, it is the skill use case the user chose "
+                "during the intent dialogue: read that case first and anchor planning "
+                "on it. Runtime evidence may still prove it unviable in this "
+                "environment — then surface the finding and request a replan instead "
+                "of silently switching to another case.\n\n"
                 + str(spec.to_intent_dict())
                 + declaration,
                 "contract",

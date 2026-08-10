@@ -1492,3 +1492,87 @@ class TestReviewFindings:
     def test_sleep_keepalive_variants_stay_interactive(self, args, expected):
         from chaos_agent.tools.kubectl import _debug_has_oneshot_command
         assert _debug_has_oneshot_command(args) is expected
+
+
+class TestExecBladeCreateTimeoutGuard:
+    """Duration guard for ``kubectl exec ... blade create``.
+
+    The blade_create tool path normalizes ``--timeout`` via
+    ``normalize_timeout_flag`` (space AND equals form) before applying the
+    minimum-duration policy. The exec-carried blade create must enforce the
+    same guarantee: ChaosBlade legitimately accepts ``--timeout=30``
+    (equals form), and a guard that only recognises the space form lets a
+    too-short duration evade the boost — the fault auto-recovers before
+    Layer1/Layer2 verification finishes.
+    """
+
+    async def _invoke_and_capture(self, monkeypatch, v_args):
+        captured = {}
+
+        async def fake_run(cmd, *args, **kwargs):
+            captured["cmd"] = list(cmd)
+            return CommandResult(0, '{"code":200,"result":"uid-1"}', "", 1.0)
+
+        kubectl_mod = sys.modules["chaos_agent.tools.kubectl"]
+        monkeypatch.setattr(kubectl_mod, "execute_via_transport", fake_run)
+        await kubectl.ainvoke({
+            "subcommand": "exec",
+            "v_args": v_args,
+            "kubeconfig": "", "context": "", "cluster": "",
+        })
+        return captured["cmd"]
+
+    @staticmethod
+    def _timeout_pair(cmd):
+        """Return the value following ``--timeout`` in cmd, or None."""
+        for i, token in enumerate(cmd):
+            if token == "--timeout" and i + 1 < len(cmd):
+                return cmd[i + 1]
+        return None
+
+    @pytest.mark.asyncio
+    async def test_missing_timeout_auto_injected(self, monkeypatch):
+        cmd = await self._invoke_and_capture(
+            monkeypatch,
+            "tool-pod -n chaosblade -- blade create k8s pod-cpu fullload --cpu-percent 80",
+        )
+        assert self._timeout_pair(cmd) == "600"
+
+    @pytest.mark.asyncio
+    async def test_space_form_below_min_boosted(self, monkeypatch):
+        cmd = await self._invoke_and_capture(
+            monkeypatch,
+            "tool-pod -n chaosblade -- blade create k8s pod-cpu fullload --timeout 30",
+        )
+        assert self._timeout_pair(cmd) == "600"
+
+    @pytest.mark.asyncio
+    async def test_equals_form_below_min_boosted(self, monkeypatch):
+        # Bug case: ChaosBlade-legal equals form used to evade the boost
+        # regex (space-form only) and kept the 30s duration.
+        cmd = await self._invoke_and_capture(
+            monkeypatch,
+            "tool-pod -n chaosblade -- blade create k8s pod-cpu fullload --timeout=30",
+        )
+        assert "--timeout=30" not in cmd
+        assert self._timeout_pair(cmd) == "600"
+
+    @pytest.mark.asyncio
+    async def test_equals_form_above_min_preserved(self, monkeypatch):
+        cmd = await self._invoke_and_capture(
+            monkeypatch,
+            "tool-pod -n chaosblade -- blade create k8s pod-cpu fullload --timeout=900",
+        )
+        assert self._timeout_pair(cmd) == "900"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_timeout_last_wins(self, monkeypatch):
+        # Mirrors blade_create semantics: keep the last explicit value,
+        # canonicalize to a single space-form pair.
+        cmd = await self._invoke_and_capture(
+            monkeypatch,
+            "tool-pod -n chaosblade -- blade create k8s pod-cpu fullload "
+            "--timeout=30 --timeout 900",
+        )
+        assert cmd.count("--timeout") == 1
+        assert self._timeout_pair(cmd) == "900"

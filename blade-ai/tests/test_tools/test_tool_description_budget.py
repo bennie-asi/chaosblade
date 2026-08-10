@@ -76,12 +76,12 @@ def _schema_tokens(tool) -> int:
 # the only enumeration of valid values, none of which may be dropped
 # (slimming-plan hard constraint: "A 类一条不删").
 _CAPS: dict[str, tuple[object, int]] = {
-    "kubectl": (kubectl, 610),                      # class-A floor (~593 qwen)
-    "kubectl_read": (kubectl_read, 570),            # class-A floor (~552 qwen)
+    "kubectl": (kubectl, 650),                      # class-A floor (~593 qwen); +shell-quoting MUST (task-190c94e8)
+    "kubectl_read": (kubectl_read, 580),            # class-A floor (~552 qwen); +shell-quoting MUST (task-190c94e8)
     "blade_python_create": (blade_python_create, 605),  # class-A floor (~592)
     "blade_python_prepare": (blade_python_prepare, 500),
     "blade_python_revoke": (blade_python_revoke, 375),
-    "submit_fault_intent": (submit_fault_intent, 595),  # class-A floor (~586) + dynamic INTENT_* enums
+    "submit_fault_intent": (submit_fault_intent, 705),  # class-A floor (~586) + dynamic INTENT_* enums; +use_case_name incident fix (sess_47ee34902167); +intent-accuracy provenance contract (probe trail / template-not-data)
     "submit_batch_intent": (submit_batch_intent, 380),
     "submit_verification": (submit_verification, 495),
     "submit_recover_verification": (submit_recover_verification, 400),

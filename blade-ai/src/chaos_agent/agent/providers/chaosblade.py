@@ -158,6 +158,7 @@ class ChaosbladeProvider:
         return await _run_host_blade_layer1(
             blade_uid, kubeconfig, task_id=task_id,
             messages=state.get("messages", []),
+            injection_method=state.get("injection_method"),
         )
 
     def verify_prompt_note(
@@ -193,15 +194,16 @@ class ChaosbladeProvider:
         )
         if injection_pod_name:
             note += (
-                f"\nTool pod `{injection_pod_name}` in `chaosblade` is available for:\n"
-                f"  - ChaosBlade commands (blade status, blade destroy)\n"
-                f"  - kubectl API checks (describe node, top node, get events)\n"
+                f"\nTool pod `{injection_pod_name}` is available (its namespace is "
+                f"deployment-specific — locate it across all namespaces if needed):\n"
+                f"  - Injection-tool commands (status, destroy)\n"
+                f"  - Cluster API checks (describe node, top node, get events)\n"
                 f"LIMITATION: This pod does NOT mount /host. `df -h` inside it shows "
                 f"the overlay filesystem, not the host disk.\n"
             )
         note += (
             "\n### BusyBox Compatibility (MANDATORY)\n"
-            "You are running verification commands inside a BusyBox container (via kubectl exec on a tool pod). "
+            "You are running verification commands inside a BusyBox container (executed in a tool pod). "
             "Common Linux flags/commands may NOT be available — check the BusyBox Quick Reference above BEFORE "
             "issuing any command. Do NOT guess flags. If a command returns \"unrecognized option\" or "
             "\"bad usage\", do NOT retry similar commands — switch to the BusyBox alternative immediately.\n"
@@ -226,15 +228,15 @@ class ChaosbladeProvider:
                 "recovery is being handled through the LLM-driven recovery flow.\n\n"
             )
             layer2_instruction = (
-                "This is a ChaosBlade fault that was injected via kubectl exec. "
-                "Verify the fault effect has been removed using kubectl tools.\n"
+                "This fault was injected through the in-cluster tool-pod channel. "
+                "Verify the fault effect has been removed using the bound cluster query tools.\n"
             )
             return layer1_context, layer2_instruction
 
         if not is_deterministic:
             layer1_context = (
                 f"## Layer 1 Result (Recovery Execution)\n"
-                f"This is a ChaosBlade fault (injected via kubectl exec). "
+                f"This fault was injected through the in-cluster tool-pod channel. "
                 f"Recovery actions executed: {layer1.status}\n"
                 f"Details: {layer1.details}\n\n"
             )
@@ -242,25 +244,26 @@ class ChaosbladeProvider:
                 "PHASE TRANSITION: Layer 1 (recovery execution) is COMPLETE. "
                 "You are now in Layer 2 (VERIFICATION). "
                 "DO NOT execute more recovery actions — only VERIFY the fault effect is removed. "
-                "Use kubectl only to CHECK status, not to modify resources. "
+                "Use the bound cluster query tools only to CHECK status, not to modify resources. "
                 "Output RECOVERY_VERIFICATION_RESULT format, NOT RECOVERY_EXECUTION_RESULT.\n"
             )
             return layer1_context, layer2_instruction
 
         layer1_context = (
             f"## Layer 1 Result (already completed)\n"
-            f"blade_destroy for UID {blade_uid}: {layer1.status}\n"
+            f"Deterministic recovery for UID {blade_uid}: {layer1.status}\n"
             f"Details: {layer1.details}\n"
             f"Raw output: {layer1.raw_output[:500]}\n\n"
         )
         layer2_instruction = (
-            "PHASE TRANSITION: Layer 1 PASSED (blade_destroy reported success and blade_status confirms Destroyed). "
+            "PHASE TRANSITION: Layer 1 PASSED (the recovery action reported success and the "
+            "experiment status check confirms Destroyed). "
             "You are now in Layer 2 (VERIFICATION). "
             "Verify the fault effect has ACTUALLY been removed from the target's runtime state. "
             + (
                 "Use the host diagnostic tool to check the host's runtime state directly. "
                 if is_host_scope
-                else "Use kubectl tools to check the target resource. "
+                else "Use the bound cluster query tools to check the target resource. "
             )
             + "Output RECOVERY_VERIFICATION_RESULT format, NOT RECOVERY_EXECUTION_RESULT.\n"
         )
@@ -270,7 +273,10 @@ class ChaosbladeProvider:
         """Deterministic ChaosBlade recovery verdict (no LLM).
 
         Two sub-variants keyed on whether the experiment was created via
-        ``kubectl exec`` (message-scanned here, not passed in):
+        ``kubectl exec`` — decided by :func:`was_kubectl_exec_delivery`,
+        which unions the DURABLE ``state["injection_method"]`` record with
+        the message scan: recovery runs late in the task, when compaction
+        may already have removed the injection evidence the raw scan needs.
 
         - ``kubectl_exec`` delivery — a host ``blade destroy`` cannot reach a
           CRD-created experiment; without an LLM to run ``kubectl exec`` we
@@ -279,17 +285,22 @@ class ChaosbladeProvider:
         - local ``blade_destroy`` — run the canonical Layer-1 recovery
           (blade_destroy + blade_status) and map its verdict.
         """
+        from chaos_agent.agent.nodes.execute._injection_detection import (
+            was_kubectl_exec_delivery,
+        )
         from chaos_agent.agent.nodes.recover._recover_layer1 import (
             _recover_layer1_to_dict,
             _run_recover_layer1,
         )
-        from chaos_agent.agent.providers._detection import scan_kubectl_blade_success
         from chaos_agent.agent.result.verdict import FailureCategory, Layer1Result
 
         blade_uid = kwargs.get("blade_uid", "") or ""
         kubeconfig = kwargs.get("kubeconfig", "") or ""
         messages = kwargs.get("messages", []) or []
-        is_kubectl_exec = scan_kubectl_blade_success(messages)
+        is_kubectl_exec = was_kubectl_exec_delivery(state, messages)
+        # Combo flag read before the kubectl_exec early-return so both
+        # branches can surface the native-component leak warning.
+        _combo = bool(state.get("combo_native_issued"))
 
         layer2 = {"status": "skipped", "details": "No LLM available for specific verification"}
 
@@ -303,7 +314,17 @@ class ChaosbladeProvider:
                 f"ChaosBlade experiment (uid={blade_uid}) created via kubectl exec cannot be "
                 f"destroyed from host (blade_destroy). Use LLM-based recovery "
                 f"(blade-ai recover with LLM) to destroy via kubectl exec: "
-                f"kubectl exec <pod> -n chaosblade -- blade destroy {blade_uid}",
+                f"kubectl exec <tool-pod> -n <tool-pod-namespace> -- blade destroy {blade_uid} "
+                "(discover the tool pod across all namespaces first: "
+                "kubectl get pods -A -l app=otel-c-tool)"
+                + (
+                    ". Combo injection: a kubectl-native component was injected "
+                    "alongside the experiment — after destroying the experiment, "
+                    "the native mutation must ALSO be undone (revert the original "
+                    "kubectl mutation)."
+                    if _combo
+                    else ""
+                ),
             )
             return RecoverResult(
                 recovered=False, level="unrecovered",
@@ -315,16 +336,30 @@ class ChaosbladeProvider:
                 ),
             )
 
-        layer1 = await _run_recover_layer1(blade_uid, kubeconfig, messages=messages)
-        recovered = layer1.is_passed()
-        warnings = (
-            (
-                "Layer 2 (fault-specific) recovery verification was skipped. "
-                "Only blade_destroy + blade_status verification was performed.",
-            )
-            if recovered
-            else ()
+        layer1 = await _run_recover_layer1(
+            blade_uid, kubeconfig, messages=messages,
+            injection_method=state.get("injection_method"),
         )
+        # COMBO injection: a kubectl-native component was injected alongside
+        # the blade experiment. The no-LLM path can ONLY destroy the blade
+        # experiment — the native component cannot be undone here, so even a
+        # successful blade destroy leaves the fault partially active.
+        recovered = layer1.is_passed() and not _combo
+        _warnings: list[str] = []
+        if layer1.is_passed() and not _combo:
+            _warnings.append(
+                "Layer 2 (fault-specific) recovery verification was skipped. "
+                "Only blade_destroy + blade_status verification was performed."
+            )
+        if _combo:
+            _warnings.append(
+                f"Combo injection: besides the blade experiment (uid={blade_uid}), a "
+                f"kubectl-native component was injected. The deterministic (no-LLM) "
+                f"recovery path can ONLY destroy the blade experiment — the native "
+                f"component was NOT undone. Use LLM-based recovery (blade-ai recover "
+                f"with LLM) to reverse the native mutations."
+            )
+        warnings = tuple(_warnings)
         return RecoverResult(
             recovered=recovered,
             level="recovered" if recovered else "unrecovered",

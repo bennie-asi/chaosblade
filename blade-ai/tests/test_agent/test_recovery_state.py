@@ -51,6 +51,8 @@ def test_build_recover_initial_from_checkpoint_copies_durable_facts_and_resets_r
     assert initial["injection_method"] == "kubectl_exec"
     assert initial["execution_artifacts"] == inject_values["execution_artifacts"]
     assert initial["kubectl_exec_pod_name"] == "tool-pod-a"
+    # No side effects recorded -> empty dict, never missing key.
+    assert initial["side_effects"] == {}
 
     assert initial["verification"] is None
     assert initial["recover_verification"] is None
@@ -60,6 +62,29 @@ def test_build_recover_initial_from_checkpoint_copies_durable_facts_and_resets_r
     assert initial["failure_detail"] is None
     assert initial["recover_phase"] == "layer1_recovery"
     assert initial["layer1_iteration_count"] == 0
+
+
+def test_build_recover_initial_from_checkpoint_carries_side_effects():
+    """Inject-time side effects must reach recover Layer 1/2 (problem ③)."""
+    initial = build_recover_initial_from_checkpoint(
+        {
+            "skill_name": "pod-network-loss",
+            "target": {
+                "namespace": "default",
+                "names": ["pod-a"],
+                "labels": {},
+                "resource_type": "pod",
+            },
+            "params": {"percent": "100"},
+            "blast_radius_detail": "2 replicas impacted",
+            "side_effects": {"endpoint_removals": ["svc-a"]},
+        },
+        "task-inject",
+        inject_context="ctx",
+    )
+
+    assert initial["side_effects"] == {"endpoint_removals": ["svc-a"]}
+    assert initial["blast_radius_detail"] == "2 replicas impacted"
 
 
 def test_build_recover_initial_from_checkpoint_rebuilds_fault_spec_from_legacy_target():
@@ -89,6 +114,7 @@ def test_build_recover_initial_from_checkpoint_rebuilds_fault_spec_from_legacy_t
         "duration_seconds": 0,
         "source": "recover_checkpoint",
         "user_description": "",
+        "use_case_name": "",
         "revision": 0,
         "objective": "",
         "boundaries": [],

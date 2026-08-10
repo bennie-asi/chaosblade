@@ -581,6 +581,7 @@ async def run_layer1_for_state(
 async def _run_host_blade_layer1(
     blade_uid: str, kubeconfig: str, *, task_id: str = "",
     messages: list | None = None,
+    injection_method: str | None = None,
 ) -> Layer1Result:
     """Execute host-blade Layer 1 verification: blade_status + blade_query_k8s.
 
@@ -594,7 +595,7 @@ async def _run_host_blade_layer1(
     can see each check individually.
     """
     if not blade_uid:
-        if messages and _was_blade_create_attempted(messages):
+        if messages and _was_blade_create_attempted(messages, injection_method):
             # blade_create was called but extract_blade_uid rejected the UID
             # (e.g., 54000+success=false). blade's error report may be wrong
             # (ChaosBlade may use fallback mechanisms like tc instead of

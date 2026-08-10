@@ -48,6 +48,10 @@ def build_recover_initial_from_checkpoint(
         "fault_type": inject_values.get("fault_type", "") or "",
         "skill_case_content": inject_values.get("skill_case_content", "") or "",
         "blast_radius_detail": inject_values.get("blast_radius_detail", "") or "",
+        # Side effects recorded at injection time (collateral impact beyond
+        # the primary target). Carried into recover so Layer 1 can undo /
+        # reconcile them and Layer 2 must verify each one.
+        "side_effects": dict(inject_values.get("side_effects") or {}),
         "blade_parsed_flags": inject_values.get("blade_parsed_flags") or {},
         "inject_verification_summary": (
             inject_values.get("inject_verification_summary", "") or ""

@@ -506,7 +506,12 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
             False, f"'{binary}' wraps no command, so read-only status cannot be determined"
         )
 
-    if binary in _ESCAPE_PRIMITIVES or binary.startswith("/host"):
+    # Escape primitives reach the host. A ``/host/...`` absolute path needs NO
+    # special handling here: ``binary`` above is the BASENAME, so
+    # ``/host/usr/bin/cat`` classifies as ``cat`` (a legitimate debug-pod probe
+    # path) while ``/host/usr/bin/iptables -A`` still lands in the iptables
+    # guard below, and an unknown ``/host`` binary fails closed at the end.
+    if binary in _ESCAPE_PRIMITIVES:
         return False, f"'{binary}' reaches the host / escapes the container, not a read-only probe"
 
     # Netfilter tooling — read-only only in list/version forms.

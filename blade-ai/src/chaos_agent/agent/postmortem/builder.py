@@ -17,14 +17,20 @@ from chaos_agent.agent.spec.fault_spec import fault_type_from_state, read_fault_
 from chaos_agent.agent.result.operation_outcome import read_inject_verification, read_operation_outcome
 from chaos_agent.agent.result.verdict import FailureCategory
 
-# Failure categories worth a postmortem. The rest (USER_REJECTED,
-# SAFETY_REJECTED, PLANNING_TIMEOUT) ran no actual experiment — no
-# verifier data, no side-effects, no blade_uid — so an LLM-generated
-# report would be padded fluff. Skip them cleanly.
-_POSTMORTEM_FAILURE_WHITELIST: frozenset[str] = frozenset({
-    FailureCategory.VERIFICATION_FAILED.value,
-    FailureCategory.EXECUTION_FAILED.value,
-    FailureCategory.REPLAN_EXHAUSTED.value,
+# Failure categories with NO experiment activity at all: the user or a
+# safety gate refused BEFORE any execution — no verifier data, no
+# side-effects — so an LLM-generated report would be padded fluff.
+# Skip them cleanly.
+#
+# Blacklist, NOT a whitelist (task-349ccf5d): every other failure
+# category DID run real steps and may have left side-effects —
+# task-349ccf5d ended ``planning_rejected`` yet had created a real
+# blade experiment mid-loop. A whitelist silently reproduced that gap
+# for any category nobody thought to list; a blacklist defaults new
+# categories to REPORTING.
+_POSTMORTEM_SKIP_CATEGORIES: frozenset[str] = frozenset({
+    FailureCategory.USER_REJECTED.value,
+    FailureCategory.SAFETY_REJECTED.value,
 })
 
 
@@ -35,10 +41,13 @@ def should_generate_postmortem(state: dict, settings) -> bool:
       1. settings.postmortem_enabled is True
       2. Task is an inject (not chat / recover-bridge)
       3. ANY of:
-         a) blade_uid is set (ChaosBlade injection happened)
-         b) verification completed (non-blade injection that reached
-            verifier — e.g. kubectl patch/delete scenarios)
-         c) failure category is in the postmortem whitelist
+         a) verification completed (injection reached the verifier)
+         b) task failed with a category outside the skip list
+
+    Deliberately NOT keyed on ``blade_uid`` (task-349ccf5d): the uid
+    can be wiped by a replan path while the experiment DID happen —
+    gating on it suppresses the report exactly when the failure was
+    systemic enough to lose its own record.
 
     A return value of ``False`` lets the caller cleanly skip postmortem
     generation without raising / logging — postmortem is opportunistic.
@@ -49,9 +58,6 @@ def should_generate_postmortem(state: dict, settings) -> bool:
     if state.get("confirmed_intent") not in ("inject",):
         return False
 
-    if state.get("blade_uid"):
-        return True
-
     verification = read_inject_verification(state)
     if isinstance(verification, dict) and verification.get("level") in (
         "verified", "unverified", "partial",
@@ -61,7 +67,9 @@ def should_generate_postmortem(state: dict, settings) -> bool:
     outcome = read_operation_outcome(state)
     failure_detail = outcome.failure_detail or {}
     category = failure_detail.get("category") if isinstance(failure_detail, dict) else None
-    return category in _POSTMORTEM_FAILURE_WHITELIST
+    if not category:
+        return False
+    return category not in _POSTMORTEM_SKIP_CATEGORIES
 
 
 def build_postmortem_context(state: dict, *, max_messages: int = 30) -> dict[str, Any]:

@@ -204,7 +204,9 @@ def interrupt_to_card(payload: object, thread_id: str) -> PendingCard:
     """
     if not isinstance(payload, dict):
         logger.warning("interrupt_to_card: non-dict payload type=%s", type(payload).__name__)
-        return _adapt_unknown(payload if isinstance(payload, dict) else {}, thread_id)
+        # Forward the raw value: _adapt_unknown wraps it as
+        # {"value": payload} so callers still see what was interrupted on.
+        return _adapt_unknown(payload, thread_id)
 
     ptype = payload.get("type")
     if ptype == "intent_confirm":

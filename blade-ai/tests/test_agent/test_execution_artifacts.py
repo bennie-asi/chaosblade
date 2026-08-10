@@ -12,6 +12,7 @@ from chaos_agent.agent.execution_artifacts import (
     collect_execution_artifacts,
     find_active_debug_pod,
     parse_debug_pod_metadata,
+    parse_drill_vehicle_markers,
 )
 
 
@@ -196,6 +197,7 @@ async def test_cleanup_debug_artifacts_is_idempotent():
         "/tmp/kubeconfig",
         "task-1",
         namespace="kubewiz",
+        kind="pod",
     )
     assert names == ["node-debugger-n1-abc12"]
     assert cleaned[0]["status"] == "cleaned"
@@ -327,3 +329,105 @@ async def test_cleanup_unconfirmed_delete_is_fire_and_forget():
     assert delete.await_count == 1  # single attempt, no retry
     assert updated[0]["status"] == "cleaned"
     assert names == ["node-debugger-n1-abc12"]
+
+
+# ---------------------------------------------------------------------------
+# Drill-vehicle registration lines (script channel)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_drill_vehicle_markers():
+    content = (
+        '{"status": "success", "replicas": 42}\n'
+        '[drill-vehicle: {"kind": "deployment", "name": "chaos-ip-exhaust", '
+        '"namespace": "cms-demo"}]\n'
+    )
+    assert parse_drill_vehicle_markers(content) == [
+        {"kind": "deployment", "name": "chaos-ip-exhaust", "namespace": "cms-demo"},
+    ]
+
+
+def test_parse_drill_vehicle_markers_ignores_invalid_lines():
+    # No name → unusable for cleanup → dropped; malformed JSON → dropped.
+    assert parse_drill_vehicle_markers(
+        '[drill-vehicle: {"kind": "pod", "namespace": "ns"}]'
+    ) == []
+    assert parse_drill_vehicle_markers("[drill-vehicle: {not json}]") == []
+    assert parse_drill_vehicle_markers("no marker here") == []
+
+
+def _skill_script_messages(marker: str):
+    return [
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "execute_skill_script",
+                "args": {
+                    "skill_name": "k8s-chaos-skills",
+                    "script_name": "inject_cni_exhaust.py",
+                    "params": "--namespace cms-demo --node n1 --kubeconfig /k",
+                },
+                "id": "tc-script",
+            }],
+        ),
+        ToolMessage(
+            content=marker,
+            name="execute_skill_script",
+            tool_call_id="tc-script",
+        ),
+    ]
+
+
+def test_collect_registers_script_vehicle_from_marker():
+    marker = (
+        '{"status": "success"}\n'
+        '[drill-vehicle: {"kind": "deployment", "name": "chaos-ip-exhaust", '
+        '"namespace": "cms-demo"}]'
+    )
+    artifacts = collect_execution_artifacts(
+        _skill_script_messages(marker),
+        task_id="task-1", operation_family="resource_occupancy",
+    )
+    assert len(artifacts) == 1
+    artifact = artifacts[0]
+    assert artifact["artifact_id"] == "occupant_deployment:cms-demo/chaos-ip-exhaust"
+    assert artifact["type"] == "occupant_deployment"
+    assert artifact["status"] == "active"
+    assert artifact["cleanup"]["v_args"] == (
+        "deployment chaos-ip-exhaust -n cms-demo --ignore-not-found"
+    )
+
+
+def test_collect_ignores_script_output_without_marker():
+    artifacts = collect_execution_artifacts(
+        _skill_script_messages('{"status": "failed", "message": "boom"}'),
+        task_id="task-1",
+    )
+    assert artifacts == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deletes_occupant_deployment_with_deployment_kind():
+    # The occupant deployment registered via marker line is cleaned by the
+    # SAME sweep as debug pods, but its delete must target the deployment
+    # kind, not pod.
+    marker = (
+        '[drill-vehicle: {"kind": "deployment", "name": "chaos-ip-exhaust", '
+        '"namespace": "cms-demo"}]'
+    )
+    artifacts = collect_execution_artifacts(
+        _skill_script_messages(marker), task_id="task-1",
+    )
+    delete = AsyncMock(return_value="confirmed")
+    with patch(
+        "chaos_agent.agent.nodes.execute._debug_pod.delete_debug_pod",
+        new=delete,
+    ):
+        updated, names = await cleanup_debug_pod_artifacts(
+            artifacts, kubeconfig="/tmp/kubeconfig", task_id="task-1",
+        )
+
+    assert delete.await_count == 1
+    assert delete.await_args.kwargs.get("kind") == "deployment"
+    assert updated[0]["status"] == "cleaned"
+    assert names == ["chaos-ip-exhaust"]

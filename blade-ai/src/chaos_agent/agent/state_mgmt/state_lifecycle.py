@@ -121,6 +121,9 @@ _STATE_FIELD_POLICY_LIST: tuple[StateFieldPolicy, ...] = (
     # recover graph — the recovered experiment may well be one of them.
     _p("retired_blade_uids", "execution", durable=True, batch=None, recover=False),
     _p("injection_method", "execution", durable=True, batch=None),
+    # Combo injection marker — must survive compaction AND be inherited by the
+    # recover graph (it drives combo recovery routing there).
+    _p("combo_native_issued", "execution", durable=True, batch=None),
     # Attribution epoch boundary — an index into ``messages`` (durable=True,
     # never reset: it must stay aligned with the message list it indexes).
     _p("attribution_epoch_index", "execution", durable=True, batch=None),
@@ -146,6 +149,9 @@ _STATE_FIELD_POLICY_LIST: tuple[StateFieldPolicy, ...] = (
     _p("ssh_key_path", "execution", durable=True),
     _p("ssh_port", "execution", durable=True),
     _p("inject_context", "execution", durable=True, batch=None),
+    # Recover-only durable fact: inject-time side effects carried into the
+    # recover graph so Layer 1/2 can reconcile collateral impact.
+    _p("side_effects", "execution", durable=True, batch=None),
     _p("baseline_data", "execution", durable=True, batch=None),
     _p("target_metadata", "execution", durable=True, batch=None),
     _p("evidence_snapshot", "execution", batch=None),
@@ -164,6 +170,9 @@ _STATE_FIELD_POLICY_LIST: tuple[StateFieldPolicy, ...] = (
     _p("recover_verification", "verification", batch=None, recover=None),
     _p("inject_layer1_cache", "verification", batch=None, recover=None),
     _p("recover_layer1_cache", "verification", batch=None, recover=None),
+    # Combo recovery blade-part verdict — produced and consumed inside the
+    # recover graph (never inherited, never durable).
+    _p("combo_blade_part", "verification", batch=None, recover=None),
     _p("metric_observations", "verification", batch=None, recover=None),
     _p("inject_verification_summary", "verification", durable=True, batch=None),
     _p("reverify_count", "verification", batch=0, recover=0),
@@ -204,6 +213,7 @@ _STATE_FIELD_POLICY_LIST: tuple[StateFieldPolicy, ...] = (
     _p("failure_reason", "outcome", batch=None, recover=None),
     _p("failure_detail", "outcome", batch=None, recover=None),
     _p("postmortem", "outcome", batch=None, recover=None),
+    _p("issue_report", "outcome", batch=None, recover=None),
     _p("created_at", "outcome", durable=True),
     _p("finished_at", "outcome", durable=True, batch=None, recover=None),
     _p("injection_start_time", "outcome", durable=True, batch=None),

@@ -106,15 +106,34 @@ def scan_host_native_injection(messages: list, tool_names: frozenset[str]) -> bo
 
 
 def scan_kubectl_injection_after_blade(
-    messages: list, subcommands: set[str] | frozenset[str]
+    messages: list,
+    subcommands: set[str] | frozenset[str],
+    *,
+    command_subcommands: set[str] | frozenset[str] = frozenset(),
+    is_mutating_command: Callable[[str], bool] | None = None,
 ) -> bool:
-    """True if a successful kubectl write op in ``subcommands`` followed a
-    ``blade_create`` attempt.
+    """True if a kubectl-native injection followed a ``blade_create`` attempt.
 
-    Detects the kubectl-native alternative injection: a mutating kubectl call
-    (scale/patch/cordon/...) that succeeded AFTER the last blade_create, so
-    kubectl calls before blade_create (normal verification) and failed calls
-    don't count.
+    Detects the kubectl-native alternative injection AFTER the last
+    blade_create, so kubectl calls before blade_create (normal verification)
+    don't count. Two attempt shapes are recognised:
+
+    - **Object-write** — a ``subcommand`` in ``subcommands``
+      (scale/patch/cordon/...) that SUCCEEDED. The verb itself IS the
+      mutation and its result is trustworthy, so failed calls don't count.
+    - **Command-mode** — a ``subcommand`` in ``command_subcommands``
+      (``exec``/``debug``) whose inner command mutates (judgement delegated
+      to ``is_mutating_command``, fed the raw ``v_args``). Keyed on the
+      ATTEMPT (AIMessage tool_call), NOT the result: an exec-delivered fault
+      can sever its own feedback channel, so its ToolMessage comes back as
+      ``Error:`` — the forensic paradox (see
+      :func:`scan_kubectl_mutation_attempted`) — and an error result must not
+      disprove the injection. Without a callback, command-mode calls never
+      count (a bare ``exec`` is not assumed mutating). An exec carrying a
+      ``blade ... create`` command is EXCLUDED — that is a ChaosBlade
+      delivery channel (the ``kubectl_exec`` method), not a kubectl-native
+      injection, and its attribution belongs to
+      :func:`scan_kubectl_blade_success`.
     """
     lookup = build_tool_call_args_lookup(messages)
 
@@ -123,20 +142,44 @@ def scan_kubectl_injection_after_blade(
         if isinstance(msg, ToolMessage) and getattr(msg, "name", "") == "blade_create":
             last_blade_create_idx = i
 
+    scan_command_mode = bool(command_subcommands) and is_mutating_command is not None
+
     for i, msg in enumerate(messages):
-        if not isinstance(msg, ToolMessage):
-            continue
-        if getattr(msg, "name", "") != "kubectl":
-            continue
         if i <= last_blade_create_idx:
             continue
-        tc_id = getattr(msg, "tool_call_id", "")
-        if tc_id and tc_id in lookup:
-            args = lookup[tc_id]
-            subcommand = args.get("subcommand", "")
-            if subcommand in subcommands:
-                content = msg.content or ""
-                if not content.startswith("Error:"):
+        if isinstance(msg, ToolMessage):
+            if getattr(msg, "name", "") != "kubectl":
+                continue
+            tc_id = getattr(msg, "tool_call_id", "")
+            if tc_id and tc_id in lookup:
+                args = lookup[tc_id]
+                subcommand = args.get("subcommand", "")
+                if subcommand in subcommands:
+                    content = msg.content or ""
+                    if not content.startswith("Error:"):
+                        return True
+        elif scan_command_mode and isinstance(msg, AIMessage):
+            for tc in getattr(msg, "tool_calls", None) or []:
+                if isinstance(tc, dict):
+                    name = tc.get("name", "")
+                    args = tc.get("args", {})
+                else:
+                    name = getattr(tc, "name", "")
+                    args = getattr(tc, "args", {})
+                if name != "kubectl" or not isinstance(args, dict):
+                    continue
+                if args.get("subcommand", "") not in command_subcommands:
+                    continue
+                v_args = args.get("v_args", "")
+                if not isinstance(v_args, str):
+                    continue
+                # ChaosBlade delivered through exec is the kubectl_exec
+                # method, not a kubectl-native injection — leave it to
+                # scan_kubectl_blade_success (a FAILED blade-via-exec must
+                # still read as "blade attempted and failed").
+                if "blade" in v_args and "create" in v_args:
+                    continue
+                if is_mutating_command(v_args):
                     return True
     return False
 

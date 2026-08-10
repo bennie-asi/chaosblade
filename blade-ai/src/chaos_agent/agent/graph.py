@@ -7,7 +7,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
 from chaos_agent.agent.dispatch import with_phase_events
-from chaos_agent.agent.nodes._capability_screen import with_capability_screen
+from chaos_agent.agent.nodes._phase_screener import make_phase_screener
 from chaos_agent.tools._strict_args import UNKNOWN_ARG_REFUSAL_MARKER
 from chaos_agent.agent.nodes.recover._recover_finalize import make_finalize_recover_verification
 from chaos_agent.agent.nodes.verify._verifier_finalize import make_finalize_verification
@@ -23,6 +23,7 @@ from chaos_agent.agent.nodes.planning.extract_planning_metadata import extract_p
 from chaos_agent.agent.nodes.planning.intent_clarification import make_intent_clarification
 from chaos_agent.agent.nodes.planning.intent_confirm import intent_confirm
 from chaos_agent.agent.nodes.store.memory_nodes import load_memory, save_memory
+from chaos_agent.agent.nodes.store.terminal_reports import terminal_reports_node
 from chaos_agent.agent.nodes.planning.phase1_screener import (
     phase1_screener,
     route_after_phase1_screener,
@@ -228,11 +229,29 @@ def build_recover_graph(
     graph.add_node("recover_verifier_loop", with_phase_events("recover_verifier_loop", "recovery", recover_verifier_node))
     graph.add_node("finalize_recover_verification", with_phase_events("finalize_recover_verification", "recovery", finalize_recover_node))
     if verifier_tools:
-        # Same gap as the inject verifier — recovery observes with the same
-        # read-only tool surface and needs the same runtime screen.
-        graph.add_node("recover_verifier_tools", with_capability_screen(
-            ToolNode(verifier_tools, handle_tool_errors=True), "recover_verify",
-        ))
+        # Unified screener edge node — capability verdict + read-only
+        # discipline between the loop and its ToolNode, mirroring
+        # phase1_screener / tool_screener. Read-only gating applies to
+        # Layer 2 only: Layer 1 repairs (recover_phase=layer1_recovery),
+        # Layer 2 only verifies (recover_phase=layer2_verification).
+        _recover_screener, _route_after_recover_screener = make_phase_screener(
+            capability_phase="recover_verify",
+            readonly=lambda s: s.get("recover_phase", "layer1_recovery") == "layer2_verification",
+            phase_duty=(
+                "Layer 2 verifies recovery outcome with read-only observations "
+                "only — it never repairs. Recovery actions belong to Layer 1, "
+                "which has already run."
+            ),
+            verdict_guidance=(
+                "If your observations show residual fault effects, submit your "
+                "verdict as `unrecovered` and describe in details exactly which "
+                "recovery action is needed. If the residual matches a recorded "
+                "side effect, report it as a warning. Do not re-attempt the "
+                "refused call in any form."
+            ),
+        )
+        graph.add_node("recover_verifier_screener", _recover_screener)
+        graph.add_node("recover_verifier_tools", ToolNode(verifier_tools, handle_tool_errors=True))
 
     graph.set_entry_point("recover_verifier_loop")
 
@@ -246,9 +265,17 @@ def build_recover_graph(
             "recover_verifier_loop",
             should_continue_recover_verifier,
             {
-                "continue": "recover_verifier_tools",
+                "continue": "recover_verifier_screener",
                 "finalize": "finalize_recover_verification",
                 "done": END,
+            },
+        )
+        graph.add_conditional_edges(
+            "recover_verifier_screener",
+            _route_after_recover_screener,
+            {
+                "pass": "recover_verifier_tools",
+                "retry": "recover_verifier_loop",
             },
         )
         graph.add_conditional_edges(
@@ -398,7 +425,7 @@ def build_pipeline_graph(
       - plan_builder: TUI /plan dry-run
 
     Shared pipeline: safety_check → confirmation_gate → baseline_capture
-    → execute_loop → verifier_loop → save_memory → END
+    → execute_loop → verifier_loop → terminal_reports → save_memory → END
     """
     from chaos_agent.agent.nodes.store.memory_nodes import pipeline_init
     from chaos_agent.agent.router import route_pipeline_start
@@ -423,13 +450,18 @@ def build_pipeline_graph(
         # so its ToolNode needs the matching runtime screen — the /plan path has
         # no phase1_screener/tool_screener equivalent, and ``clarification_tools``
         # includes provider discovery tools (``host_read`` is HostShell's PLAN
-        # tool), i.e. exactly the shape of task-46317228.
-        graph.add_node("plan_builder_tools", with_capability_screen(
-            ToolNode(
-                clarification_tools,
-                handle_tool_errors=_phase1_handle_tool_error,
-            ),
-            "plan",
+        # tool), i.e. exactly the shape of task-46317228. Unified screener
+        # edge node; ``stop_retry_hint`` because should_continue_plan_builder
+        # has no iteration bound.
+        _plan_builder_screener, _route_after_plan_builder_screener = make_phase_screener(
+            capability_phase="plan",
+            readonly=False,
+            stop_retry_hint=True,
+        )
+        graph.add_node("plan_builder_screener", _plan_builder_screener)
+        graph.add_node("plan_builder_tools", ToolNode(
+            clarification_tools,
+            handle_tool_errors=_phase1_handle_tool_error,
         ))
 
     # Batch execution (loop-back)
@@ -465,15 +497,37 @@ def build_pipeline_graph(
     graph.add_node("verifier_loop", with_phase_events("verifier_loop", "verify", verifier_node))
     graph.add_node("finalize_verification", with_phase_events("finalize_verification", "verify", finalize_verification_node))
     if verifier_tools:
-        # Runtime capability screen: the read-only phases had no equivalent of
-        # phase1_screener / tool_screener, so a cross-profile read (task-46317228:
-        # host_read during verification on a k8s session) reached the ToolNode.
-        graph.add_node("verifier_tools", with_capability_screen(
-            ToolNode(verifier_tools, handle_tool_errors=True), "verify",
-        ))
+        # Unified screener edge node — capability verdict + read-only
+        # discipline between the loop and its ToolNode, mirroring
+        # phase1_screener / tool_screener (fabricated ToolMessage
+        # pairing, screener_route retry).
+        _verifier_screener, _route_after_verifier_screener = make_phase_screener(
+            capability_phase="verify",
+            readonly=True,
+            phase_duty=(
+                "The verification phase judges whether the injected fault "
+                "landed, using read-only observations only — it never "
+                "injects, repairs, or alters cluster state. Injection "
+                "actions belong to the execute phase, which has already run."
+            ),
+            verdict_guidance=(
+                "If your observations show the fault did not land (or only "
+                "partially landed), submit your verdict as `unverified` and "
+                "describe exactly what is missing. Do not re-attempt the "
+                "refused call in any form."
+            ),
+        )
+        graph.add_node("verifier_screener", _verifier_screener)
+        graph.add_node("verifier_tools", ToolNode(verifier_tools, handle_tool_errors=True))
     graph.add_node("se_detect", with_phase_events("se_detect", "verify", se_detect_node))
 
     # End
+    # terminal_reports produces the postmortem / issue-report artifacts on
+    # EVERY experiment terminal path (se_detect, direct_execute
+    # pre-injection-end, reject) ahead of persistence; wrapped with
+    # phase="postmortem" so the TUI stepper ignores it (unknown phase) while
+    # L4 still surfaces it via _PHASE_STEP_MAP ("postmortem" step).
+    graph.add_node("terminal_reports", with_phase_events("terminal_reports", "postmortem", terminal_reports_node))
     graph.add_node("save_memory", save_memory)
     graph.add_node("reject", reject)
 
@@ -496,7 +550,12 @@ def build_pipeline_graph(
         graph.add_conditional_edges(
             "plan_builder",
             should_continue_plan_builder,
-            {"continue": "plan_builder_tools", END: END},
+            {"continue": "plan_builder_screener", END: END},
+        )
+        graph.add_conditional_edges(
+            "plan_builder_screener",
+            _route_after_plan_builder_screener,
+            {"pass": "plan_builder_tools", "retry": "plan_builder"},
         )
         graph.add_edge("plan_builder_tools", "plan_builder")
     else:
@@ -583,7 +642,10 @@ def build_pipeline_graph(
     graph.add_conditional_edges(
         "direct_execute",
         route_after_direct_execute,
-        {"verifier": "verifier_loop", "end": "save_memory"},
+        # "end" exists ONLY for pre-injection safety rejection (nothing was
+        # ever issued). Execution errors still go through verification —
+        # error is a signal, not a verdict (task-ff057e7f policy).
+        {"verifier": "verifier_loop", "end": "terminal_reports"},
     )
 
     # --- Verification ---
@@ -591,7 +653,12 @@ def build_pipeline_graph(
         graph.add_conditional_edges(
             "verifier_loop",
             should_continue_verifier,
-            {"continue": "verifier_tools", "finalize": "finalize_verification", "done": "se_detect"},
+            {"continue": "verifier_screener", "finalize": "finalize_verification", "done": "se_detect"},
+        )
+        graph.add_conditional_edges(
+            "verifier_screener",
+            _route_after_verifier_screener,
+            {"pass": "verifier_tools", "retry": "verifier_loop"},
         )
         graph.add_conditional_edges(
             "verifier_tools",
@@ -615,7 +682,10 @@ def build_pipeline_graph(
     )
 
     # --- Post-verification ---
-    graph.add_edge("se_detect", "save_memory")
+    # Every experiment terminal path funnels through terminal_reports
+    # (postmortem + issue-report artifacts) before persistence.
+    graph.add_edge("se_detect", "terminal_reports")
+    graph.add_edge("terminal_reports", "save_memory")
 
     # save_memory → batch_next (batch in progress) or END
     graph.add_conditional_edges(
@@ -629,10 +699,11 @@ def build_pipeline_graph(
         {"batch_setup": "batch_setup", END: END},
     )
 
-    # reject → batch_next (batch: collect failed result) or END
-    graph.add_conditional_edges(
-        "reject", route_after_save_memory,
-        {"batch_next": "batch_next", END: END},
-    )
+    # reject → terminal_reports → save_memory → batch_next (batch: collect
+    # failed result) or END. Rejections go through the SAME terminal funnel
+    # as executed failures (task-349ccf5d): the postmortem gate skips
+    # pre-execution categories (user/safety_rejected) without an LLM call,
+    # while planning_rejected / planning_timeout DO produce a report.
+    graph.add_edge("reject", "terminal_reports")
 
     return graph

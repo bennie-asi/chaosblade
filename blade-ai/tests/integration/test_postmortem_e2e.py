@@ -1,7 +1,7 @@
 """End-to-end integration test for postmortem subsystem.
 
-Spec: run save_memory with a mock LLM and a realistic post-experiment
-state. Verify:
+Spec: run the terminal funnel (terminal_reports → save_memory) with a
+mock LLM and a realistic post-experiment state. Verify:
   1. should_generate_postmortem fires for a successful inject
   2. LLM is invoked exactly once
   3. Markdown lands on disk at the expected path
@@ -11,8 +11,9 @@ state. Verify:
 
 Does NOT spin up a real LLM / graph / FastAPI server — those layers
 are exercised by their own unit tests. This test is the contract glue:
-prove the dataflow across builder → generator → store → save_memory →
-result envelope → CLI doesn't break silently.
+prove the dataflow across builder → generator → store →
+terminal_reports → save_memory → result envelope → CLI doesn't break
+silently.
 """
 from __future__ import annotations
 
@@ -177,24 +178,28 @@ class TestPostmortemE2E:
         assert len(summary) <= 204  # 200 + "..."
 
     @pytest.mark.asyncio
-    async def test_save_memory_attaches_postmortem_when_enabled(
+    async def test_terminal_pipeline_attaches_postmortem_when_enabled(
         self, real_post_inject_state, tmp_path, monkeypatch,
     ):
-        """Verify the save_memory node actually wires postmortem into
-        the returned updates dict when conditions are met."""
+        """Two-stage terminal funnel: terminal_reports PRODUCES the
+        postmortem payload, save_memory passes it through into the
+        returned updates dict when conditions are met."""
         from chaos_agent.config import settings as s_mod
         monkeypatch.setattr(s_mod.settings, "postmortem_enabled", True)
         monkeypatch.setattr(s_mod.settings, "postmortem_timeout_seconds", 10)
         monkeypatch.setattr(s_mod.settings, "postmortem_max_messages", 30)
         monkeypatch.setattr(s_mod.settings, "memory_dir", tmp_path / "memory")
 
-        from chaos_agent.agent.nodes.store import memory_nodes
+        from chaos_agent.agent.nodes.store import memory_nodes, terminal_reports
         monkeypatch.setattr(memory_nodes, "sync_to_store", AsyncMock())
         monkeypatch.setattr(
             memory_nodes, "sync_node_status_to_session", lambda *a, **k: None,
         )
+        monkeypatch.setattr(
+            terminal_reports, "sync_node_status_to_session", lambda *a, **k: None,
+        )
 
-        # Stub the LLM factory so save_memory doesn't try to dial a
+        # Stub the LLM factory so terminal_reports doesn't try to dial a
         # real provider. Returns a mock that yields _FAKE_LLM_OUTPUT.
         mock_llm = AsyncMock()
         mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content=_FAKE_LLM_OUTPUT))
@@ -204,15 +209,21 @@ class TestPostmortemE2E:
             "chaos_agent.agent.postmortem.store.POSTMORTEM_DIR",
             tmp_path / "postmortems",
         ):
-            updates = await memory_nodes.save_memory(real_post_inject_state)
+            report_updates = await terminal_reports.terminal_reports_node(
+                real_post_inject_state,
+            )
+            merged = {**real_post_inject_state, **report_updates}
+            updates = await memory_nodes.save_memory(merged)
 
-        # postmortem attached to updates
-        assert "postmortem" in updates
-        pm = updates["postmortem"]
+        # terminal_reports produced the payload
+        pm = report_updates["postmortem"]
         assert isinstance(pm, dict)
         assert pm["path"].endswith("task-e2e12345.md")
         assert "## Summary" in pm["markdown"]
         assert pm["summary"]  # non-empty
+
+        # save_memory passes it through into the persisted updates
+        assert updates["postmortem"] == pm
 
         # File written to the patched directory
         written = Path(pm["path"])
@@ -220,10 +231,10 @@ class TestPostmortemE2E:
         assert "# Postmortem: " in written.read_text(encoding="utf-8")
 
     @pytest.mark.asyncio
-    async def test_save_memory_graceful_on_llm_timeout(
+    async def test_terminal_pipeline_graceful_on_llm_timeout(
         self, real_post_inject_state, tmp_path, monkeypatch,
     ):
-        """LLM timeout → no postmortem in updates, save_memory still returns."""
+        """LLM timeout → no postmortem in updates, funnel still completes."""
         import asyncio as _asyncio
 
         from chaos_agent.config import settings as s_mod
@@ -231,10 +242,13 @@ class TestPostmortemE2E:
         monkeypatch.setattr(s_mod.settings, "postmortem_timeout_seconds", 1)
         monkeypatch.setattr(s_mod.settings, "memory_dir", tmp_path / "memory")
 
-        from chaos_agent.agent.nodes.store import memory_nodes
+        from chaos_agent.agent.nodes.store import memory_nodes, terminal_reports
         monkeypatch.setattr(memory_nodes, "sync_to_store", AsyncMock())
         monkeypatch.setattr(
             memory_nodes, "sync_node_status_to_session", lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            terminal_reports, "sync_node_status_to_session", lambda *a, **k: None,
         )
 
         async def slow_ainvoke(_messages):
@@ -246,26 +260,34 @@ class TestPostmortemE2E:
         with patch(
             "chaos_agent.agent.factory.make_llm", return_value=mock_llm,
         ):
-            updates = await memory_nodes.save_memory(real_post_inject_state)
+            report_updates = await terminal_reports.terminal_reports_node(
+                real_post_inject_state,
+            )
+            merged = {**real_post_inject_state, **report_updates}
+            updates = await memory_nodes.save_memory(merged)
 
-        assert updates.get("postmortem") is None  # graceful degradation  # R11: always-write None (was: not-in)
+        assert report_updates.get("postmortem") is None  # graceful degradation
+        assert updates.get("postmortem") is None  # R11: always-write None
         assert "finished_at" in updates  # save_memory still completed
 
     @pytest.mark.asyncio
-    async def test_save_memory_skips_llm_for_user_rejected(
+    async def test_terminal_pipeline_skips_llm_for_user_rejected(
         self, tmp_path, monkeypatch,
     ):
-        """USER_REJECTED is outside the whitelist — should NOT spend an
+        """USER_REJECTED is on the skip list — should NOT spend an
         LLM call. Regression guard against the gate quietly failing and
         burning budget on no-data states."""
         from chaos_agent.config import settings as s_mod
         monkeypatch.setattr(s_mod.settings, "postmortem_enabled", True)
         monkeypatch.setattr(s_mod.settings, "memory_dir", tmp_path / "memory")
 
-        from chaos_agent.agent.nodes.store import memory_nodes
+        from chaos_agent.agent.nodes.store import memory_nodes, terminal_reports
         monkeypatch.setattr(memory_nodes, "sync_to_store", AsyncMock())
         monkeypatch.setattr(
             memory_nodes, "sync_node_status_to_session", lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            terminal_reports, "sync_node_status_to_session", lambda *a, **k: None,
         )
 
         rejected_state = {
@@ -284,28 +306,38 @@ class TestPostmortemE2E:
         with patch(
             "chaos_agent.agent.factory.make_llm", return_value=mock_llm,
         ):
-            updates = await memory_nodes.save_memory(rejected_state)
+            report_updates = await terminal_reports.terminal_reports_node(
+                rejected_state,
+            )
+            merged = {**rejected_state, **report_updates}
+            updates = await memory_nodes.save_memory(merged)
 
         # Gate filtered it out → LLM not invoked at all
         assert mock_llm.ainvoke.call_count == 0
-        assert updates.get("postmortem") is None  # R11: always-write None (was: not-in)
+        assert report_updates.get("postmortem") is None
+        # Pre-execution rejection → no issue upload either
+        assert report_updates.get("issue_report") is None
+        assert updates.get("postmortem") is None  # R11: always-write None
         # save_memory still completed cleanly
         assert "finished_at" in updates
 
     @pytest.mark.asyncio
-    async def test_save_memory_skips_llm_for_safety_rejected(
+    async def test_terminal_pipeline_skips_llm_for_safety_rejected(
         self, tmp_path, monkeypatch,
     ):
         """SAFETY_REJECTED variant of the gate — also blocked at the
-        ``should_generate_postmortem`` whitelist."""
+        ``should_generate_postmortem`` skip list."""
         from chaos_agent.config import settings as s_mod
         monkeypatch.setattr(s_mod.settings, "postmortem_enabled", True)
         monkeypatch.setattr(s_mod.settings, "memory_dir", tmp_path / "memory")
 
-        from chaos_agent.agent.nodes.store import memory_nodes
+        from chaos_agent.agent.nodes.store import memory_nodes, terminal_reports
         monkeypatch.setattr(memory_nodes, "sync_to_store", AsyncMock())
         monkeypatch.setattr(
             memory_nodes, "sync_node_status_to_session", lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            terminal_reports, "sync_node_status_to_session", lambda *a, **k: None,
         )
 
         state = {
@@ -324,32 +356,38 @@ class TestPostmortemE2E:
         with patch(
             "chaos_agent.agent.factory.make_llm", return_value=mock_llm,
         ):
-            updates = await memory_nodes.save_memory(state)
+            report_updates = await terminal_reports.terminal_reports_node(state)
+            merged = {**state, **report_updates}
+            updates = await memory_nodes.save_memory(merged)
 
         assert mock_llm.ainvoke.call_count == 0
-        assert updates.get("postmortem") is None  # R11: always-write None (was: not-in)
+        assert report_updates.get("issue_report") is None  # pre-exec reject filter
+        assert updates.get("postmortem") is None  # R11: always-write None
 
     @pytest.mark.asyncio
-    async def test_save_memory_clears_stale_postmortem_on_reject(
+    async def test_terminal_pipeline_clears_stale_postmortem_on_reject(
         self, tmp_path, monkeypatch,
     ):
-        """R11 — when should_generate=False, save_memory MUST explicitly
-        write postmortem=None so a stale value from the previous inject
-        in the same LangGraph thread can't bleed through.
+        """R11 — terminal_reports MUST explicitly return postmortem=None
+        so a stale value from the previous inject in the same LangGraph
+        thread can't bleed through.
 
         Regression scenario:
           1. Inject #1 succeeds, state.postmortem = {"path": "...", ...}
           2. Inject #2 is SAFETY_REJECTED, should_generate returns False
-          3. If save_memory didn't overwrite, state.postmortem would
+          3. If terminal_reports didn't overwrite, state.postmortem would
              carry over and the user would see #1's report on #2's card."""
         from chaos_agent.config import settings as s_mod
         monkeypatch.setattr(s_mod.settings, "postmortem_enabled", True)
         monkeypatch.setattr(s_mod.settings, "memory_dir", tmp_path / "memory")
 
-        from chaos_agent.agent.nodes.store import memory_nodes
+        from chaos_agent.agent.nodes.store import memory_nodes, terminal_reports
         monkeypatch.setattr(memory_nodes, "sync_to_store", AsyncMock())
         monkeypatch.setattr(
             memory_nodes, "sync_node_status_to_session", lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            terminal_reports, "sync_node_status_to_session", lambda *a, **k: None,
         )
 
         # State carries a stale postmortem from a prior run.
@@ -372,17 +410,21 @@ class TestPostmortemE2E:
         with patch(
             "chaos_agent.agent.factory.make_llm", return_value=mock_llm,
         ):
-            updates = await memory_nodes.save_memory(state)
+            report_updates = await terminal_reports.terminal_reports_node(state)
+            merged = {**state, **report_updates}
+            updates = await memory_nodes.save_memory(merged)
 
-        # postmortem MUST be in updates AND set to None (not just absent —
+        # postmortem MUST be written AND set to None (not just absent —
         # absence would let LangGraph state-merge preserve the stale value).
+        assert "postmortem" in report_updates
+        assert report_updates["postmortem"] is None
         assert "postmortem" in updates
         assert updates["postmortem"] is None
         # LLM wasn't called (gate filter)
         assert mock_llm.ainvoke.call_count == 0
 
     @pytest.mark.asyncio
-    async def test_save_memory_passes_tracing_callbacks_to_pm_llm(
+    async def test_terminal_reports_passes_tracing_callbacks_to_pm_llm(
         self, real_post_inject_state, tmp_path, monkeypatch,
     ):
         """R10 — postmortem LLM call must use the SAME tracing / OTel
@@ -393,21 +435,21 @@ class TestPostmortemE2E:
         monkeypatch.setattr(s_mod.settings, "postmortem_enabled", True)
         monkeypatch.setattr(s_mod.settings, "memory_dir", tmp_path / "memory")
 
-        from chaos_agent.agent.nodes.store import memory_nodes
-        monkeypatch.setattr(memory_nodes, "sync_to_store", AsyncMock())
+        from chaos_agent.agent.nodes.store import terminal_reports
         monkeypatch.setattr(
-            memory_nodes, "sync_node_status_to_session", lambda *a, **k: None,
+            terminal_reports, "sync_node_status_to_session", lambda *a, **k: None,
         )
 
         # Plant fake tracing + OTel callbacks on the status_tracker module
-        # (where factory.py registers them); save_memory should pick them up.
+        # (where factory.py registers them); terminal_reports should pick
+        # them up.
         from chaos_agent.observability import status_tracker as _st_mod
         sentinel_trace = object()
         sentinel_otel = object()
         monkeypatch.setattr(_st_mod, "_tracing_callback", sentinel_trace, raising=False)
         monkeypatch.setattr(_st_mod, "_otel_callback", sentinel_otel, raising=False)
 
-        # Spy on make_llm so we can inspect what callbacks save_memory
+        # Spy on make_llm so we can inspect what callbacks terminal_reports
         # passes when constructing pm_llm.
         captured_kwargs: dict = {}
         from chaos_agent.agent import factory as _factory
@@ -420,10 +462,10 @@ class TestPostmortemE2E:
 
         monkeypatch.setattr(_factory, "make_llm", spy_make_llm)
 
-        await memory_nodes.save_memory(real_post_inject_state)
+        await terminal_reports.terminal_reports_node(real_post_inject_state)
 
         assert "callbacks" in captured_kwargs, (
-            "save_memory did not pass callbacks to make_llm() — "
+            "terminal_reports did not pass callbacks to make_llm() — "
             "postmortem's LLM call will bypass tracing/OTel."
         )
         cbs = captured_kwargs["callbacks"]
@@ -431,7 +473,7 @@ class TestPostmortemE2E:
         assert sentinel_otel in cbs, "OTel callback missing"
 
     @pytest.mark.asyncio
-    async def test_save_memory_skips_llm_for_llm_refusal(
+    async def test_terminal_pipeline_skips_llm_for_llm_refusal(
         self, real_post_inject_state, tmp_path, monkeypatch,
     ):
         """LLM returns a refusal (no ## Summary heading) → generator
@@ -441,10 +483,13 @@ class TestPostmortemE2E:
         monkeypatch.setattr(s_mod.settings, "postmortem_enabled", True)
         monkeypatch.setattr(s_mod.settings, "memory_dir", tmp_path / "memory")
 
-        from chaos_agent.agent.nodes.store import memory_nodes
+        from chaos_agent.agent.nodes.store import memory_nodes, terminal_reports
         monkeypatch.setattr(memory_nodes, "sync_to_store", AsyncMock())
         monkeypatch.setattr(
             memory_nodes, "sync_node_status_to_session", lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            terminal_reports, "sync_node_status_to_session", lambda *a, **k: None,
         )
 
         # LLM returns "I'm sorry..." — passes non-empty but fails
@@ -456,10 +501,15 @@ class TestPostmortemE2E:
         with patch(
             "chaos_agent.agent.factory.make_llm", return_value=mock_llm,
         ):
-            updates = await memory_nodes.save_memory(real_post_inject_state)
+            report_updates = await terminal_reports.terminal_reports_node(
+                real_post_inject_state,
+            )
+            merged = {**real_post_inject_state, **report_updates}
+            updates = await memory_nodes.save_memory(merged)
 
         assert mock_llm.ainvoke.call_count == 1  # LLM WAS invoked
-        assert updates.get("postmortem") is None  # but output was rejected  # R11: always-write None (was: not-in)
+        assert report_updates.get("postmortem") is None  # but output was rejected
+        assert updates.get("postmortem") is None  # R11: always-write None
 
 
 # ─── _build_result_payload / inject_stream envelope shape ────────────
@@ -707,17 +757,19 @@ class TestResultPayloadShape:
 
 
 class TestLangGraphStateMerge:
-    """T6 — Fix #3: verify save_memory's postmortem field reaches the
-    final state that downstream readers (``graph.aget_state``) see."""
+    """T6 — Fix #3: verify the postmortem field produced by
+    terminal_reports reaches the final state that downstream readers
+    (``graph.aget_state``) see after save_memory persists it."""
 
     @pytest.mark.asyncio
     async def test_postmortem_propagates_to_graph_final_state(
         self, real_post_inject_state, tmp_path, monkeypatch,
     ):
-        """Mini LangGraph with save_memory only → invoke → aget_state →
-        verify postmortem field is in final_state.values. Catches the
-        edge case where save_memory's return updates don't survive the
-        LangGraph state-merge into the checkpoint."""
+        """Mini LangGraph mirroring the real funnel (terminal_reports →
+        save_memory) → invoke → aget_state → verify postmortem field is
+        in final_state.values. Catches the edge case where the report
+        updates don't survive the LangGraph state-merge into the
+        checkpoint."""
         from langgraph.checkpoint.memory import MemorySaver
         from langgraph.graph import END, StateGraph
 
@@ -728,19 +780,24 @@ class TestLangGraphStateMerge:
         monkeypatch.setattr(s_mod.settings, "postmortem_timeout_seconds", 10)
         monkeypatch.setattr(s_mod.settings, "memory_dir", tmp_path / "memory")
 
-        from chaos_agent.agent.nodes.store import memory_nodes
+        from chaos_agent.agent.nodes.store import memory_nodes, terminal_reports
         monkeypatch.setattr(memory_nodes, "sync_to_store", AsyncMock())
         monkeypatch.setattr(
             memory_nodes, "sync_node_status_to_session", lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            terminal_reports, "sync_node_status_to_session", lambda *a, **k: None,
         )
 
         mock_llm = AsyncMock()
         mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content=_FAKE_LLM_OUTPUT))
 
-        # Build minimal graph: START → save_memory → END
+        # Build minimal graph: START → terminal_reports → save_memory → END
         g = StateGraph(AgentState)
+        g.add_node("terminal_reports", terminal_reports.terminal_reports_node)
         g.add_node("save_memory", memory_nodes.save_memory)
-        g.set_entry_point("save_memory")
+        g.set_entry_point("terminal_reports")
+        g.add_edge("terminal_reports", "save_memory")
         g.add_edge("save_memory", END)
 
         checkpointer = MemorySaver()
@@ -757,7 +814,8 @@ class TestLangGraphStateMerge:
             final = await compiled.aget_state(config)
 
         # The critical assertion: postmortem field survives the
-        # save_memory → LangGraph merge → checkpoint → aget_state round-trip
+        # terminal_reports → save_memory → LangGraph merge → checkpoint →
+        # aget_state round-trip
         assert final.values.get("postmortem") is not None
         assert "path" in final.values["postmortem"]
         assert "markdown" in final.values["postmortem"]

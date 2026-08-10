@@ -16,13 +16,15 @@ INTENT_SCREENER_RETRY = "retry"
 # NOTE: a ``plan_builder_screener`` used to live here, sharing a parameterised
 # ``_screen_provider_tool_calls`` helper with this one. It was never wired into
 # ``build_pipeline_graph``, so ``plan_builder_tools`` ran unscreened while a
-# passing unit test suggested otherwise. That gap is now closed by
-# ``nodes._capability_screen.with_capability_screen(..., "plan")``, which wraps
-# the ToolNode itself and can therefore filter PER CALL instead of discarding the
-# whole batch. With the second caller gone the helper was inlined here: its
-# ``phase`` / ``discovery`` parameters had a combination (neither set) that
-# silently refused every call, and speculative generality is what produced the
-# unwired duplicate in the first place.
+# passing unit test suggested otherwise. That gap is now closed by the
+# ``plan_builder_screener`` graph-edge node built with
+# ``nodes._phase_screener.make_phase_screener(capability_phase="plan",
+# stop_retry_hint=True)`` in ``graph.py`` — the unified phase1/tool_screener
+# paradigm (whole-batch refusal with fabricated ToolMessage pairing). With the
+# second caller gone the helper was inlined here: its ``phase`` / ``discovery``
+# parameters had a combination (neither set) that silently refused every call,
+# and speculative generality is what produced the unwired duplicate in the
+# first place.
 
 
 def intent_screener(state: dict) -> dict:

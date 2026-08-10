@@ -11,8 +11,40 @@ from chaos_agent.agent.nodes.verify._verifier_finalize import (
     _build_verify_replan_context,
     _cleanup_residuals,
     _retired_uids_from_residuals,
+    _verify_replan_eligible,
 )
 from chaos_agent.agent.result.verdict import Layer1Result
+
+
+class TestVerifyReplanEligible:
+    """The verify-replan verdict gate, incl. the direct-mode exclusion.
+
+    Direct runs carry the user-specified injection verbatim and skip
+    Phase 1, so re-planning would substitute a different injection for
+    the one ordered — the verdict must finalize as-is instead.
+    """
+
+    @staticmethod
+    def _verification(level="unverified", l2="failed"):
+        return {"level": level, "layer2": {"status": l2}}
+
+    def test_unverified_l2_failed_is_eligible(self):
+        assert _verify_replan_eligible({}, self._verification()) is True
+
+    def test_direct_mode_is_excluded(self):
+        assert _verify_replan_eligible(
+            {"direct": True}, self._verification()
+        ) is False
+
+    def test_verified_level_is_not_eligible(self):
+        assert _verify_replan_eligible(
+            {}, self._verification(level="verified", l2="passed")
+        ) is False
+
+    def test_l2_not_failed_is_not_eligible(self):
+        assert _verify_replan_eligible(
+            {}, self._verification(l2="partial")
+        ) is False
 
 
 class TestOverallToLevel:

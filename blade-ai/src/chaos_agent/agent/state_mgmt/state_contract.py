@@ -151,7 +151,7 @@ def _with_overrides(
             high_risk=True,
         )
 
-    for field in ("result", "error", "failure_reason", "failure_detail", "postmortem"):
+    for field in ("result", "error", "failure_reason", "failure_detail", "postmortem", "issue_report"):
         contracts[field] = replace(
             contracts[field],
             source_of_truth="operation_outcome",

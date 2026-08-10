@@ -55,6 +55,12 @@ def _isolate_task_store(tmp_path, monkeypatch):
     # Tests that specifically exercise the missing-key path set "" themselves,
     # which overrides this because their monkeypatch runs after the fixture.
     monkeypatch.setattr(_settings_mod.settings, "llm_api_key", "sk-test-dummy", raising=False)
+    # Same hermetic rule for the GitHub issue-report token: a developer who
+    # has a REAL token in ~/.blade-ai/config.json would otherwise see tests
+    # publish real issues upstream (a live run created 4 duplicate
+    # issues in chaosblade-io/chaosblade before this guard landed). The
+    # gate treats an empty token as "issue reporting off".
+    monkeypatch.setattr(_settings_mod.settings, "github_token", "", raising=False)
 
     yield
 

@@ -39,6 +39,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from chaos_agent.persistence.task_identity import TASK_ID_PREFIXES
 from chaos_agent.utils.time import now_iso
 
 logger = logging.getLogger(__name__)
@@ -72,21 +73,26 @@ import-time backward compatibility (tests / external callers)."""
 # rwx only. Locks shared-host scenarios down.
 _FILE_MODE = 0o600
 _DIR_MODE = 0o700
-_TASK_ID_RE = re.compile(r"^task-[a-z0-9][a-z0-9-]*$")
+# Prefix alternatives derived from the task_identity whitelist (single
+# source of truth) so newly minted prefixes (inject-/recover-/...) are
+# accepted automatically; the strict charset tail stays a path-safety gate.
+_PREFIX_ALT = "|".join(re.escape(p.rstrip("-")) for p in TASK_ID_PREFIXES)
+_TASK_ID_RE = re.compile(rf"^({_PREFIX_ALT})-[a-z0-9][a-z0-9-]*$")
 
 def _validate_task_id(task_id: str) -> None:
     """Validate generated task ids before using them in filesystem paths.
 
-    Task ids are generated internally (``task-`` + uuid-like suffix), not
-    user-supplied input. This still rejects malformed values so tests or a
-    corrupted state can never escape POSTMORTEM_DIR or create odd filenames.
+    Task ids are generated internally (a ``task_identity`` prefix +
+    uuid-like suffix), not user-supplied input. This still rejects
+    malformed values so tests or a corrupted state can never escape
+    POSTMORTEM_DIR or create odd filenames.
     """
     if not isinstance(task_id, str) or not task_id:
         raise ValueError(f"task_id must be a non-empty string, got {task_id!r}")
     if "/" in task_id or "\\" in task_id or ".." in task_id:
         raise ValueError(f"task_id contains unsafe path characters: {task_id!r}")
     if not _TASK_ID_RE.fullmatch(task_id):
-        raise ValueError(f"task_id must match task-[a-z0-9][a-z0-9-]*, got {task_id!r}")
+        raise ValueError(f"task_id must match {_TASK_ID_RE.pattern}, got {task_id!r}")
 
 
 def _path_for(task_id: str, root: Optional[Path] = None) -> Path:

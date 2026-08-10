@@ -58,34 +58,25 @@ def test_allows_k8s_probe_even_when_semantic_intent_is_host():
 
 
 def test_plan_builder_rejects_stale_host_tool_on_k8s_transport():
-    """Same contract, now enforced by the ToolNode wrapper.
+    """Same contract, now enforced by the plan_builder_screener edge node.
 
     A ``plan_builder_screener`` node used to live in ``intent_screener`` with
     this exact rule, but was never wired into ``build_pipeline_graph`` — so this
-    test passed while ``plan_builder_tools`` actually ran unscreened. It now
-    asserts the mechanism that IS wired, and additionally that the refusal does
-    not take a legitimate sibling call down with it.
+    test passed while ``plan_builder_tools`` actually ran unscreened. That gap
+    is closed by ``make_phase_screener(capability_phase="plan", ...)`` wired
+    into the pipeline graph. The screener refuses the WHOLE batch
+    (phase1/tool_screener protocol): the offending call gets a rejection and
+    the legitimate sibling a skipped notice — nothing is dispatched.
     """
     import asyncio
 
-    from langchain_core.messages import ToolMessage
-
-    from chaos_agent.agent.nodes._capability_screen import with_capability_screen
+    from chaos_agent.agent.nodes._phase_screener import make_phase_screener
     from chaos_agent.agent.providers import FaultProviderRegistry
 
     FaultProviderRegistry.register_builtins()
-    dispatched: list[list[str]] = []
-
-    class _ToolNode:
-        async def ainvoke(self, state, config=None):
-            calls = state["messages"][-1].tool_calls
-            dispatched.append([c["name"] for c in calls])
-            return {"messages": [
-                ToolMessage(content="ok", tool_call_id=c["id"], name=c["name"])
-                for c in calls
-            ]}
-
-    screened = with_capability_screen(_ToolNode(), "plan")
+    screener, route = make_phase_screener(
+        capability_phase="plan", stop_retry_hint=True,
+    )
     state = {
         "kube_connection_mode": "kubeconfig",
         "fault_spec": {"scope": "pod", "blade_target": "cpu", "blade_action": "fullload"},
@@ -96,13 +87,15 @@ def test_plan_builder_rejects_stale_host_tool_on_k8s_transport():
         ])],
     }
 
-    out = asyncio.run(screened(state))
+    out = asyncio.run(screener(state))
 
+    assert out["screener_route"] == "retry"
+    assert route({**state, **out}) == "retry"
     by_id = {m.tool_call_id: m for m in out["messages"]}
     assert by_id["probe-1"].name == "host_read"
     assert by_id["probe-1"].content.startswith("Error:")
     assert by_id["probe-1"].status == "error"
-    # The legitimate sibling still ran — the old node-level screener discarded
-    # the whole batch here.
-    assert dispatched == [["kubectl_read"]]
-    assert by_id["probe-2"].content == "ok"
+    # The legitimate sibling does NOT run — it gets the skipped notice and the
+    # whole batch goes back to the model to be re-issued cleanly.
+    assert "skipped" in by_id["probe-2"].content
+    assert by_id["probe-2"].status == "error"

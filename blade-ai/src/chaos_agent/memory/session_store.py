@@ -46,30 +46,6 @@ def get_global_session_store() -> Optional["SessionStore"]:
 NO_SESSION_MARKER = "_no_session"
 
 
-def _is_intent_dialogue_message(msg) -> bool:
-    """Return True if the message belongs to the intent clarification phase.
-
-    The IntentClarificationSummary SystemMessage is the handoff boundary.
-    Messages BEFORE it (in the state.messages list order) are intent
-    dialogue and should live in the session file, not the task file.
-    Messages AFTER it (including the summary itself) are execution content.
-
-    Detection: messages that do NOT contain "[Intent Clarification Summary]"
-    and appear before the summary in a linear scan are considered dialogue.
-    Since finalize_session receives the full remaining list, we split at
-    the first occurrence of the summary.
-    """
-    # RemoveMessage entries are not "dialogue" — they're housekeeping.
-    if isinstance(msg, RemoveMessage):
-        return False
-    # SystemMessages that start with "[Intent Clarification Summary]" are
-    # the handoff boundary itself — they belong to the execution phase.
-    content = getattr(msg, "content", "") or ""
-    if isinstance(msg, SystemMessage) and content.startswith("[Intent Clarification Summary]"):
-        return False
-    return True
-
-
 def _split_at_handoff(messages: list) -> tuple[list, list]:
     """Split a message list at the IntentClarificationSummary boundary.
 
@@ -169,17 +145,6 @@ def _message_dedup_key(msg_dict: dict) -> str:
     content_preview = str(content_raw)[:200]
     tool_call_id = msg_dict.get("tool_call_id") or ""
     return f"{msg_type}|{content_preview}|{tool_call_id}"
-
-
-def build_result_summary(verification: dict) -> str:
-    """Build a human-readable result summary from a verification dict."""
-    if not verification or not isinstance(verification, dict):
-        return ""
-    level = verification.get("level", "unknown")
-    l1 = verification.get("layer1", {}).get("status", "unknown")
-    l2 = verification.get("layer2", {}).get("status", "unknown")
-    bc = verification.get("baseline_confidence", "none")
-    return f"{level} - Layer1: {l1}, Layer2: {l2}, Baseline: {bc}"
 
 
 def build_verification_simple(verification: dict) -> dict | None:
@@ -557,6 +522,7 @@ class SessionStore:
         result_summary: str | dict = "",
         status: str = "completed",
         progress_ledger: Optional[dict] = None,
+        parent_task_id: str = "",
     ) -> None:
         """Finalize a task record: append remaining messages, set timestamps, flush atomically.
 
@@ -598,6 +564,10 @@ class SessionStore:
         session["finished_at"] = now_iso()
         session["status"] = status
         session["result_summary"] = result_summary or None
+        # Task-chain link (recover task -> inject task): persist only a real
+        # value so an inject finalize without it never wipes an earlier one.
+        if parent_task_id:
+            session["parent_task_id"] = parent_task_id
         # Snapshot the progress ledger if the caller supplied one (only overwrite
         # on a real value, so a finalize without it does not wipe an earlier one).
         if progress_ledger is not None:
@@ -769,10 +739,19 @@ class SessionStore:
         return out
 
     def list_tasks(self) -> list[str]:
-        """List all task IDs from files on disk."""
+        """List all task IDs from files on disk.
+
+        Filtered through the task_identity whitelist instead of a
+        filename glob pattern: ids are minted with per-pipeline
+        prefixes (``task-`` legacy, ``inject-``, ``recover-``) and a
+        hardcoded glob would silently drop every new prefix.
+        """
+        from chaos_agent.persistence.task_identity import is_real_task_id
+
         tasks = []
-        for f in sorted(self.task_dir.glob("task-*.json")):
-            tasks.append(f.stem)
+        for f in sorted(self.task_dir.glob("*.json")):
+            if is_real_task_id(f.stem):
+                tasks.append(f.stem)
         return tasks
 
     def _serialize_for_write(self, session: dict) -> dict:
