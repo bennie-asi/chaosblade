@@ -276,17 +276,17 @@ jobs:
           elif [ "$EXT" = "zip" ]; then
             # Git-Bash on windows-latest resolves `tar` to GNU tar,
             # which cannot read zip archives — extract via PowerShell.
-            # The Windows Node zip lays files at the archive root, so
-            # expand into /tmp/<basename>/ to match the Unix layout.
-            # (Git-Bash /tmp is NOT C:\tmp — convert with cygpath.)
+            # Like the Unix tarballs the zip carries a top-level
+            # <basename>/ dir, so expanding into /tmp yields
+            # /tmp/<basename>/node.exe. (Git-Bash /tmp is NOT C:\tmp —
+            # convert with cygpath.)
             WIN_ARCHIVE="$(cygpath -w "/tmp/node-archive.${EXT}")"
-            WIN_DEST="$(cygpath -w "/tmp/${BASENAME}")"
+            WIN_DEST="$(cygpath -w /tmp)"
             powershell -NoProfile -Command "Expand-Archive -LiteralPath '$WIN_ARCHIVE' -DestinationPath '$WIN_DEST' -Force"
           else
             tar -xzf "/tmp/node-archive.${EXT}" -C /tmp
           fi
           if [ "${{ matrix.os }}" = "windows" ]; then
-            # Windows archive lays node.exe at the top level (no bin/).
             cp "/tmp/${BASENAME}/node.exe" blade-ai/vendor/node/node.exe
           else
             cp "/tmp/${BASENAME}/bin/node" blade-ai/vendor/node/node
