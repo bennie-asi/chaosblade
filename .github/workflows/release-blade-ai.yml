@@ -268,16 +268,22 @@ jobs:
           BASENAME="node-v${VER}-${ARCH}"
           URL="https://nodejs.org/dist/v${VER}/${BASENAME}.${EXT}"
           echo "Fetching $URL"
-          curl -fSL --retry 3 --retry-delay 2 -o /tmp/node-archive "$URL"
+          curl -fSL --retry 3 --retry-delay 2 -o "/tmp/node-archive.${EXT}" "$URL"
           rm -rf blade-ai/vendor/node
           mkdir -p blade-ai/vendor/node
           if [ "$EXT" = "tar.xz" ]; then
-            tar -xJf /tmp/node-archive -C /tmp
+            tar -xJf "/tmp/node-archive.${EXT}" -C /tmp
           elif [ "$EXT" = "zip" ]; then
-            # windows-latest: bsdtar (C:\Windows\System32\tar) reads zip.
-            tar -xf /tmp/node-archive -C /tmp
+            # Git-Bash on windows-latest resolves `tar` to GNU tar,
+            # which cannot read zip archives — extract via PowerShell.
+            # The Windows Node zip lays files at the archive root, so
+            # expand into /tmp/<basename>/ to match the Unix layout.
+            # (Git-Bash /tmp is NOT C:\tmp — convert with cygpath.)
+            WIN_ARCHIVE="$(cygpath -w "/tmp/node-archive.${EXT}")"
+            WIN_DEST="$(cygpath -w "/tmp/${BASENAME}")"
+            powershell -NoProfile -Command "Expand-Archive -LiteralPath '$WIN_ARCHIVE' -DestinationPath '$WIN_DEST' -Force"
           else
-            tar -xzf /tmp/node-archive -C /tmp
+            tar -xzf "/tmp/node-archive.${EXT}" -C /tmp
           fi
           if [ "${{ matrix.os }}" = "windows" ]; then
             # Windows archive lays node.exe at the top level (no bin/).
