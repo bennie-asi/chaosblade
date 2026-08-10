@@ -1,273 +1,238 @@
-# BLADE AI
+<h1 align="center">BLADE AI</h1>
 
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![Release](https://img.shields.io/github/v/release/chaosblade-io/chaosblade?filter=blade-ai-v*&label=blade-ai)](https://github.com/chaosblade-io/chaosblade/releases?q=blade-ai-v)
+<!-- Repo-internal links and images use Markdown syntax, not HTML tags. The
+     hosting platform rewrites relative paths in Markdown to /blob/ but leaves
+     paths inside raw HTML alone — those resolve to /raw/, which serves bytes
+     instead of a rendered page, so <a href> lands on source text and <img src>
+     shows nothing. Centring is not worth an unreadable page. -->
 
-**语言:** 中文 | [English](README_en.md)
+English · [简体中文](README.zh-CN.md)
 
-> Kubernetes 混沌工程智能代理 — 说人话就能注入故障，不用背命令。
+<p align="center">
+  <strong>Run chaos experiments in plain language — safely, verifiably, and with guaranteed recovery.</strong>
+</p>
 
-BLADE AI 是 [ChaosBlade](https://github.com/chaosblade-io/chaosblade) 生态的智能代理层：底层调用 ChaosBlade 执行故障注入，上层增加意图理解、安全审查、效果验证、安全恢复和结构化报告等编排能力，让故障演练从"手写命令"变成"对话完成"。
+<p align="center">
+  A Kubernetes &amp; host chaos-engineering agent. Describe a fault in natural language;
+  BLADE AI plans it, screens it through rule-based safety gates, injects it via
+  <a href="https://github.com/chaosblade-io/chaosblade">ChaosBlade</a>, verifies the
+  effect actually took hold, and recovers deterministically — every run completing the
+  full <em>intent → safety → injection → verification → recovery</em> loop.
+</p>
 
-## 文档导航
+[![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](NOTICE) ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-brightgreen.svg) ![LangGraph](https://img.shields.io/badge/orchestration-LangGraph-orange.svg) ![88 scenarios](https://img.shields.io/badge/scenarios-88-9cf.svg)
 
-- **[介绍文档 → docs/INTRODUCTION.md](docs/INTRODUCTION.md)** — 项目定位、能力矩阵、架构设计、安全体系、技术栈
-- **[使用文档 → docs/USAGE.md](docs/USAGE.md)** — 安装、TUI 使用、CLI 命令、19 个故障场景速查、Server 模式、API、配置
-
-下文是最快路径，让你在 5 分钟内跑起来；想了解"为什么这样设计"或"全部能力"请进入上面两份文档。
+[Why BLADE AI](#why-blade-ai) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Scenarios](#fault-scenarios) · [Interfaces](#four-interfaces) · [Safety](#safety) · [Architecture](#architecture) · [Full usage](docs/USAGE.md)
 
 ---
 
-## 安装
+## Why BLADE AI
 
-发布流水线 `release-blade-ai.yml` 会在 `blade-ai-v*` 标签推送时为四个平台产出自包含的可执行包（内嵌 Python 运行时、ChaosBlade 二进制、技能文件，解压即用）：linux-amd64 / linux-arm64 / darwin-amd64 / darwin-arm64。Windows 暂不支持。
+Every agent is fundamentally the same thing: a ReAct loop (reason / act / observe) wrapped around a general-purpose LLM. Since the base is identical, the only things that differ are **tools** and **context** — so a "general agent + skills" can, in principle, do chaos engineering too. Reasoning is fixed by the model and no engineering can move it; only *acting* and *observing* are ours to shape. A vertical agent pushes those to the extreme for one domain — and does the three things a general agent + skills **can't do reliably**:
 
-### 一键脚本（推荐）
+- 🎯 **Determinism, not one big loop** — the drill's order is graph structure, not something the model decides. Intelligence lives in three separate loops (Plan / Execute / Verify), and each phase has its own guard: planning may look but never touch, execute is the only phase allowed to mutate. A general agent has one loop, so one permission set — mutation is either allowed everywhere or nowhere.
+- 🛡️ **Controllability over a hallucinating model** — when a target can't be injected, LLMs "cleverly" switch to another one. BLADE AI freezes the approved target at confirmation and screens every call against it: *the method may change, the identity may not*.
+- ♻️ **Irreversibility — clusters have no undo** — every experiment carries a mandatory timeout that self-destructs even if the agent crashes. And since you can't undo, you must know what changed: BLADE AI snapshots the environment before injecting and diffs it after verifying, so you see what the fault touched **beyond its target**. A general agent confirms the target broke; only a diff shows the blast radius.
 
-不传版本时脚本会自动查询 GitHub Releases 取最新的 `blade-ai-v*` tag，无需手动改脚本：
+The generic plumbing — memory compaction, progressive skill loading — isn't the point; a general agent has that too. The point is turning "it runs" into "it runs stably and safely." Vibe coding has hugely raised development throughput, but shipping something *stable* still needs resilience testing that used to require a senior SRE. BLADE AI exists to lower that barrier — to make chaos engineering safe and simple enough that anyone can do it.
+
+> In one line: a general agent makes "being able to do it" ubiquitous; a vertical agent makes "doing it stably and safely" possible.
+
+---
+
+## How it works
+
+BLADE AI orchestrates the whole drill lifecycle as a deterministic LangGraph state machine. Both entry paths — free-form natural language and deterministic `--direct` parameters — converge at the same `safety_check`, after which every run follows the identical ordered spine.
+
+![Three-phase ReAct pipeline: Plan, Safety Check, Confirm Gate, Execute, Verify, plus an independent Recover subgraph](assets/pipeline.png)
+
+| Stage | Responsibility | Key design |
+| --- | --- | --- |
+| **Phase 1 · Plan** | Understand intent, match skills, generate the fault plan | `FULL` prompt; read-only planning tools — cannot call `blade_create` |
+| **Safety Check** | Namespace blacklist, conflict detection, target validity, blast-radius score | Pure rule engine, no LLM in the path |
+| **Confirm Gate** | Human authorization before anything is injected | Dynamic node-level `interrupt()`, resumed with `Command(resume=…)` |
+| **Baseline** | Capture pre-injection metrics and an environment snapshot | Verification becomes a before/after comparison, not a threshold guess |
+| **Phase 2 · Execute** | Invoke ChaosBlade / kubectl to inject | `MINIMAL` prompt; every tool call screened by the target-drift guard |
+| **Phase 3 · Verify** | Two-layer effect verification | L1 deterministic `blade_status` · L2 LLM semantic judgement (`VERIFICATION`) |
+| **Side-effect Detect** | Diff the post-drill state against the snapshot | Surfaces impact beyond the target |
+| **Recover** | Independent, separately-compiled recovery graph | Its own ReAct loop + two-layer verification + `--force` fallback |
+
+Every super-step is checkpointed by `thread_id = task_id`, so a crashed or interrupted run resumes at the exact node it left off. Per-phase loop caps (`100 / 100 / 60`) and a global `recursion_limit` of `500` bound runaway behaviour.
+
+---
+
+## Quick start
+
+### 1. Install
+
+macOS / Linux:
 
 ```bash
-# macOS / Linux —— 装最新版（默认行为，自动 resolve 最新 release）
+# Latest version
 curl -fsSL https://chaosblade.io/install-agent.sh | bash
 
-# 锁定指定版本（裸 semver，无 blade-ai-v 前缀）
-curl -fsSL https://chaosblade.io/install-agent.sh | bash -s -- --version 0.1.0
-
-# 或通过 env 变量
-BLADE_AI_VERSION=0.1.0 curl -fsSL https://chaosblade.io/install-agent.sh | bash
+# Pin a version
+curl -fsSL https://chaosblade.io/install-agent.sh | bash -s -- --version 0.6.0
 ```
 
-> Windows: `install.ps1` 已就位但当前发布矩阵不包含 Windows 二进制；脚本会主动报「not yet supported」并指引走 WSL2 / 源码构建。Windows 矩阵恢复后 `irm | iex` 立即可用，且自带同款 latest 自动解析。
+The prebuilt bundle embeds the Python runtime, the ChaosBlade binary, and all skill files — unpack and run, zero dependencies. It supports linux-amd64 / linux-arm64 / darwin-amd64 / darwin-arm64. The installer performs SHA256 verification, PATH setup, and receipt recording automatically.
 
-如果 `chaosblade.io` 域名跳转尚未配置，可以直接从 GitHub Releases 下载脚本：
+> Windows has no prebuilt bundle yet — use the bash installer under WSL2.
+
+### 2. Prerequisites
+
+- **kubectl** configured and able to reach the target cluster
+- **ChaosBlade Operator** deployed to the cluster (`kubectl get pods -n chaosblade`)
+- An **LLM API key** (OpenAI-compatible endpoint, DashScope by default)
+
+### 3. Configure
 
 ```bash
-# 直接走 GitHub Release 下载脚本
-VERSION=0.1.0
-curl -fsSL "https://github.com/chaosblade-io/chaosblade/releases/download/blade-ai-v${VERSION}/install.sh" | bash -s -- --version "${VERSION}"
+blade-ai config set llm_api_key sk-xxx        # set API key
+blade-ai config set model_name qwen3.7-plus   # set model (default: qwen3.7-plus)
+blade-ai config                               # show all config
 ```
 
-### 手动下载预编译包
+Config priority: init args > `~/.blade-ai/config.json` > environment variables (`BLADE_AI_*`) > defaults. To harden the namespace blacklist (empty by default), set `BLADE_AI_SAFETY_BLACKLIST_NAMESPACES=kube-system,...`.
 
-每次发布会上传 4 份归档 + `checksums.txt` 到 `blade-ai-v<版本>` Release：
-
-| 平台 | 归档名 |
-|------|-------|
-| Linux x86_64 | `blade-ai-linux-amd64.tar.gz` |
-| Linux ARM64 | `blade-ai-linux-arm64.tar.gz` |
-| macOS Intel | `blade-ai-darwin-amd64.tar.gz` |
-| macOS Apple Silicon | `blade-ai-darwin-arm64.tar.gz` |
+### 4. Your first injection
 
 ```bash
-VERSION=0.1.0
-PLATFORM=darwin-arm64    # 按本机替换
-URL="https://github.com/chaosblade-io/chaosblade/releases/download/blade-ai-v${VERSION}/blade-ai-${PLATFORM}.tar.gz"
-curl -fSLO "${URL}"
-tar -xzf "blade-ai-${PLATFORM}.tar.gz"
-./blade-ai/blade-ai version
-# 把 blade-ai/ 目录加入 PATH，或软链 blade-ai 到 /usr/local/bin
-```
+# Natural-language mode
+blade-ai inject -i "inject 80% CPU pressure into my-pod in the default namespace for 120s"
 
-### 卸载
-
-`uninstall.sh` / `uninstall.ps1` 跟 `install.*` 在每个 `blade-ai-v<版本>` Release 下一同上传，调用方式跟 install 完全对称。
-
-```bash
-# macOS / Linux —— 一键卸载（推荐；与 install 对称）
-#
-# 注意：通过 curl | bash 跑时 stdin 不是 tty，脚本会拒绝交互式
-# y/N 确认；卸载是破坏性操作，必须显式 --force 才会执行。
-# 不希望全删时配合 --keep-config / --version 等。
-curl -fsSL https://chaosblade.io/uninstall-agent.sh | bash -s -- --force
-
-# 先 --dry-run 看 plan，再决定要不要真删
-curl -fsSL https://chaosblade.io/uninstall-agent.sh | bash -s -- --dry-run
-
-# 删二进制 + PATH，保留 ~/.blade-ai/ 配置/记忆/技能
-curl -fsSL https://chaosblade.io/uninstall-agent.sh | bash -s -- --force --keep-config
-
-# 仅删某一版（多版本共存时其它版本和符号链接保留）
-curl -fsSL https://chaosblade.io/uninstall-agent.sh | bash -s -- --force --version 0.1.0
-```
-
-如果 `chaosblade.io` 域名跳转尚未配置，可以直接从 GitHub Releases 拉脚本：
-
-```bash
-VERSION=0.1.0
-curl -fsSL "https://github.com/chaosblade-io/chaosblade/releases/download/blade-ai-v${VERSION}/uninstall.sh" | bash -s -- --force
-```
-
-本地已有脚本（例如装过之后想直接用本地副本）：
-
-```bash
-# 真实终端调用：默认走交互 y/N，不需要 --force
-bash ~/.blade-ai/versions/blade-ai-v0.1.0/scripts/uninstall.sh --dry-run
-bash ~/.blade-ai/versions/blade-ai-v0.1.0/scripts/uninstall.sh
-bash ~/.blade-ai/versions/blade-ai-v0.1.0/scripts/uninstall.sh --keep-config
-bash ~/.blade-ai/versions/blade-ai-v0.1.0/scripts/uninstall.sh --version 0.1.0
-```
-
-```powershell
-# Windows（脚本就位但当前发布矩阵不含 Windows，等 install.ps1 能用时同样能用）
-.\uninstall.ps1                          # 全删
-.\uninstall.ps1 -KeepConfig              # 保留配置
-.\uninstall.ps1 -Version 0.1.0     # 安全校验：仅当 manifest 匹配时才删
-.\uninstall.ps1 -DryRun                  # 看 plan 不删
-```
-
-每次修改 shell rc / 注册表前都会写备份（`~/.zshrc.blade-ai-uninstall.bak` / `~/.blade-ai/path-backup.txt`），误删可还原。
-
-### 源码构建
-
-```bash
-git clone https://github.com/chaosblade-io/chaosblade.git
-cd chaosblade/blade-ai
-make dev      # 安装开发依赖
-make build    # PyInstaller 打包到 dist/blade-ai/
-```
-
----
-
-## 快速开始
-
-### 首次启动
-
-```bash
-blade-ai
-```
-
-首次启动会进入 5 步配置向导（对标 Claude Code 的初始化体验）：
-
-1. **LLM API Key** — 支持阿里云百炼、OpenAI 兼容接口；输入回显掩码
-2. **模型选择** — 推荐 `qwen-max-latest`、`qwq-32b` 等支持深度推理的模型
-3. **集群配置** — 自动扫描 `~/.kube/`，选默认集群和命名空间
-4. **权限模式** — 确认 / 自动 / 计划，日常推荐确认模式
-5. **环境自检** — Blade 二进制、K8s 连通性、Operator 部署、技能完整性
-
-完成后写入 `~/.blade-ai/config.json`，无需重启即进入对话循环。
-
-### 第一次故障注入
-
-```
-💬 你: 帮我在 cms-demo 给 accounting 注入 CPU 压力 80%，持续 5 分钟
-
-🤖 Agent:
-  ⚡ 正在分析你的请求...
-  ▸ 安全检查 ✓ — cms-demo 不在黑名单，无冲突实验
-  ▸ 生成故障计划 ✓ — pod-cpu fullload, cpu-percent=80, timeout=300
-  ▸ 等待人工确认...  → 用户输入 yes
-  ▸ 执行注入 ✓ — ChaosBlade 实验创建成功 (uid: 4d2e...)
-  ▸ 验证注入效果 ✓ — Layer1: blade_status=Running; Layer2: kubectl top pod CPU=82%
-  ✅ 注入完成！任务 ID: task-20260507-a1b2c3
-```
-
-不需要记 `blade create k8s pod-cpu fullload --cpu-percent 80 --namespace cms-demo …` —— 说你想做什么就行。
-
-### 三种使用形态
-
-```bash
-# 1) 对话式 TUI（推荐日常使用）
-blade-ai
-
-# 2) 结构化 CLI（适合脚本化）
+# Structured mode (CI/CD-friendly, zero LLM)
 blade-ai inject --scope pod --target cpu --action fullload \
-  -n "accounting-6fbdb464c7-qn2vr" --namespace cms-demo \
-  -p "cpu-percent=80" -d 600 --kubeconfig ~/.kube/config
+  -n "app=myapp" --namespace default \
+  -p "cpu-percent=80" -d 120 --direct
 
-# 3) Direct 模式（CI/CD，零 LLM 调用）
-blade-ai inject --scope pod --target cpu --action fullload \
-  -n "accounting-6fbdb464c7-qn2vr" --namespace cms-demo \
-  -p "cpu-percent=80" -d 600 --direct --kubeconfig ~/.kube/config
+# List available scenarios
+blade-ai list
 
-# 4) Server 模式（多团队共享）
-blade-ai-server   # 默认 8000 端口，FastAPI + SSE
+# Recover
+blade-ai recover --task-id task-xxx
 ```
 
-详细命令、所有故障场景、Server API 见 **[docs/USAGE.md](docs/USAGE.md)**。
+Full command reference: [docs/USAGE.md](docs/USAGE.md).
 
 ---
 
-## 核心能力
+## Fault scenarios
 
-| 维度 | 说明 |
-|------|------|
-| **意图理解** | 自然语言描述故障意图，自动匹配技能并生成执行计划 |
-| **四层安全** | ToolGuard（命令白名单）→ Safety Check（命名空间黑名单）→ Confirmation Gate（人工确认）→ Loop Max（循环上限） |
-| **故障注入** | 调用 ChaosBlade 在 K8s 集群中注入真实故障 |
-| **两层验证** | Layer 1 操作正确性（确定性） + Layer 2 效果真实性（语义性） |
-| **安全恢复** | 独立恢复链路 + `--force` 降级路径 + 三种分支结果 |
-| **结构化报告** | 每次演练生成 JSON 报告，支持审计和外部系统集成 |
-| **可观测性** | 实时 SSE 流式输出 + Token 追踪 + 执行追踪 |
+Three built-in skill packs cover **88 fault scenarios**. Each pack is one `SKILL.md` plus a catalogue of scenario files under `references/catalogue/`:
 
-支持 **19 个故障场景**，覆盖 Pod/Workload/Service/Node/Storage 5 个层级。完整列表见 [docs/USAGE.md#故障场景速查](docs/USAGE.md#故障场景速查)。
+### k8s-chaos-skills — 61 scenarios
 
----
+| Layer | Examples |
+| --- | --- |
+| **Pod** | CPU fullload, CPU throttling, OOM, disk fill, high disk IO, packet loss, network latency, Pending, ContainerCreating, CrashLoopBackOff, Terminating, image-pull failure, evicted & rebuilt, process kill, deletion … |
+| **Container** | CPU fullload, packet loss, deletion, process anomaly |
+| **Node** | High CPU, high memory, high disk IO, low disk space, unreachable (100% loss), maintenance, network failure |
+| **Workload / Service** | Replica scale-down, HPA maxed out, DaemonSet scheduling anomaly, Service call failure, Service load-balancer anomaly |
 
-## 项目结构
+### host-chaos-skills — 18 scenarios
 
-```
-blade-ai/
-├── README.md                  ← 你正在看这里
-├── docs/
-│   ├── INTRODUCTION.md        ← 项目介绍与架构设计
-│   └── USAGE.md               ← 完整使用文档
-├── pyproject.toml             ← Python 包定义
-├── blade-ai.spec              ← PyInstaller 配置
-├── Makefile                   ← dev / test / build
-├── src/chaos_agent/           ← Python 后端（LangGraph + FastAPI）
-├── tui/                       ← TypeScript + Ink 前端（嵌入 PyInstaller bundle 一起发布）
-├── skills/                    ← 故障注入技能包
-├── scripts/                   ← install.sh / install.ps1
-└── tests/                     ← Pytest 测试
-```
+CPU fullload, memory / cache hogging, disk fill, high disk IO, packet loss / DNS hijack / port occupation, process kill / hang / count spike, file deletion / tampering / handle exhaustion, clock skew, systemd service stop, syscall latency / return-value tampering.
+
+### python-app-chaos-skills — 9 scenarios
+
+HTTP latency / error, MySQL latency / error, Redis latency / error / return-value tampering, Kafka error, gRPC latency.
+
+> Add a scenario file under a pack's `references/catalogue/`, or drop a new `SKILL.md` to add a whole pack — Server mode hot-reloads changes automatically (watchdog + 500 ms debounce).
 
 ---
 
-## 开发与发布
+## Four interfaces
 
-### 本地开发
+| Interface | Entry point | Best for |
+| --- | --- | --- |
+| **CLI** | `blade-ai inject` / `recover` / `list` / `metric` / `config` | Command-line ops, CI/CD pipelines |
+| **TUI** | `blade-ai` (interactive terminal) | Day-to-day ops, watching progress live |
+| **HTTP API** | `POST /api/v1/inject`, `POST /api/v1/inject-stream` (SSE) | Platform integration, external systems |
+| **Python SDK** | `from chaos_agent.l4 import L4ResilienceAgent` | Programmatic calls, test-platform integration |
+
+### Two run modes
+
+The same agent core backs both modes; `blade-ai config set mode` switches which side calls the graph — `AgentRunner` in-process (local) or `AgentClient` over HTTP (server).
 
 ```bash
-# Python 后端
-cd blade-ai
-make dev          # 安装开发依赖（pytest、ruff、mypy）
-make test         # 跑测试
-make build        # PyInstaller 打包
+# Local mode (default) — agent runs in-process, zero network overhead
+blade-ai config set mode local
 
-# TS TUI（独立调试）
-cd tui
-npm install
-npm run dev       # tsx watch，源码改动自动重建
-npm test          # vitest
-npm run typecheck
-
-# 改完 TS 源码必须 npm run build 重新生成 tui/dist/cli.js，
-# 否则 PyInstaller 打的还是旧 bundle
+# Server mode — centralized FastAPI control, CLI/TUI connect remotely
+blade-ai server                                        # terminal 1: start server (default 0.0.0.0:8089)
+blade-ai server --host 127.0.0.1 --port 9000           # bind address / port explicitly
+blade-ai server --port 0 --ready-stdout                # OS-allocated port; prints "BLADE_AI_READY port=N"
+blade-ai config set mode server http://localhost:8089  # terminal 2: switch to server
 ```
 
-### 发布
+---
 
-发布流程由 `chaosblade/.github/workflows/release-blade-ai.yml` 全自动驱动：
+## Safety
+
+Safety is not a single check but five progressive layers. An injection only reaches the cluster after clearing every one of them:
+
+![Five-layer defense in depth: Safety Check, Confirmation Gate, Per-phase Screeners, ToolGuard, Loop Max & Timeout](assets/safety-layers.png)
+
+1. **Safety Check** — a pure rule engine (no LLM): configurable namespace blacklist, conflict detection against live ChaosBlade CRDs, target validity, and a multi-dimensional blast-radius score.
+2. **Confirmation Gate** — a dynamic, data-driven `interrupt()` that pauses for human approve/reject; critical operations cannot proceed without it.
+3. **Per-phase guards** — each phase that lets the LLM pick tools has its own guard with its own red line: planning is denied every mutating call, execute is screened against the frozen approved target (*method may change, identity may not*, including escapes hidden inside `sh -c`), verify and recover are limited to the connected environment.
+4. **ToolGuard** — a fail-closed command whitelist plus a dangerous-pattern blacklist (`rm -rf`, `| bash`, `$(…)` …); everything runs exec-form, so pipes and substitutions are inert. It sits at the execution entry point, so commands from *every* phase pass through it.
+5. **Loop Max & Timeout** — per-phase loop caps, a global recursion limit, and a mandatory timeout (auto-boosted, never shortened) that self-destructs the experiment even if the agent dies.
+
+Those five gate what *reaches* the cluster. One more answers what no gate can: **did it stay inside the blast radius you approved?** The environment is snapshotted before injection and diffed after verification — restarts, evictions, OOM kills, endpoint removals, HPA scaling and more. Verifying that the target broke is easy; proving nothing *else* did is what makes a drill safe to repeat.
+
+---
+
+## Architecture
+
+BLADE AI is layered: entry adapters on top, a unified LangGraph orchestration core, a capabilities layer, and shared infrastructure. All three call paths (Local in-process, Server over HTTP+SSE, SDK) converge on the same compiled graph.
+
+![Layered architecture: Entry, Orchestration, Capabilities, Infrastructure](assets/architecture.png)
+
+A single `AgentState` (organized by lifecycle: identity / intent / planning / safety / confirmation / execution / verification / recovery / loop-control / results / memory) is the source of truth; the deterministic `--direct` path and the LLM planning path merge at `safety_check`; the Recover graph is compiled independently with its own ReAct loop; and SSE streaming (token / tool / confirm / result …) threads through nodes → FastAPI → TUI as the unified real-time channel. Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+| --- | --- |
+| Agent orchestration | LangGraph (StateGraph) · LangChain |
+| Fault injection | ChaosBlade · kubectl |
+| Backend | FastAPI · Typer · pydantic-settings |
+| TUI | TypeScript · Ink · React |
+| Storage | aiosqlite (Checkpointer) · PostgreSQL (optional) |
+| Observability | OpenTelemetry · Prometheus · SSE |
+| LLM | OpenAI-compatible endpoints (DashScope / DeepSeek / Zhipu …) |
+
+---
+
+## Development
 
 ```bash
-# 1) 同步 4 处版本字符串到目标版本
-#    pyproject.toml / tui/package.json / src/chaos_agent/__init__.py
-# 2) 提交并打 tag
-git tag blade-ai-v0.1.0
-git push origin blade-ai-v0.1.0
+make install     # runtime + dev dependencies
+make test        # run tests
+make server      # start the server
+make build       # PyInstaller standalone binary
+make build-tui   # build the TUI frontend
 ```
 
-CI 会：
+Python backend tests: `uv run pytest tests/ -v` · TUI frontend tests: `cd tui && npm test`
 
-1. **verify-versions** — 比对 3 处版本字符串与标签，不一致则失败
-2. **build-tui** — typecheck → tsup bundle → vitest → 上传 `tui-bundle` artifact（含 `cli.js` + `package.json` 标 `{"type":"module"}`）
-3. **build (4 平台矩阵)** — 下载 ChaosBlade v1.8.0 → PyInstaller 打包
-   - linux/amd64: ubuntu-latest 上 native build（glibc 2.39 baseline）
-   - linux/arm64: ubuntu-24.04-arm 上 native build
-   - darwin/amd64: macos-latest（Apple Silicon host）+ python.org universal2 Python + `arch -x86_64` 走 Rosetta 出 x86_64 bundle
-   - darwin/arm64: macos-latest 上 native + ad-hoc codesign
-   - 每个矩阵产出 `blade-ai-<os>-<arch>.tar.gz`
-4. **release** — 聚合 4 份产物 + `checksums.txt` 创建 GitHub Release
+---
 
-整条流水线在 ~25 分钟内产出四平台可执行包。当前不发 npm 和 PyPI。
+## Relationship with ChaosBlade
+
+BLADE AI is part of the [ChaosBlade](https://github.com/chaosblade-io/chaosblade) ecosystem. ChaosBlade is the injection engine (CLI + Operator); BLADE AI is its intelligent agent layer:
+
+- **ChaosBlade** owns *how to inject* — running concrete commands like `blade create k8s pod-cpu fullload`.
+- **BLADE AI** owns *whether to inject, whether it worked, and how to recover* — intent understanding, safety review, effect verification, deterministic recovery.
+
+They are complementary, not competing. BLADE AI calls ChaosBlade underneath and adds LLM orchestration plus safety guardrails on top.
+
+---
+
+## License
+
+[Apache 2.0](NOTICE) — Copyright 2026 ChaosBlade Authors.
