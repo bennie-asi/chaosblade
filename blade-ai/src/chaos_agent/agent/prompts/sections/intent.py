@@ -111,7 +111,7 @@ def get_intent_priorities_section(*, semantic_only: bool = False) -> str:
     ) + """
 
 3. **Convergence** — Minimize dialogue rounds. Ideal path: user states intent
-   → you probe + recommend complete spec → user confirms → submit."""
+   → you probe + recommend complete spec → submit."""
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +337,7 @@ final transport compatibility and feasibility occur after confirmation."""
 
 Only call tools that are bound to you. Use them by category:
 - **Probe** (read-only): use freely to explore current environment state and skill catalog
-- **Submit**: only after user approval
+- **Submit**: once the reviewed spec is complete — the confirmation card collects approval
 - **Route**: for non-inject intents only"""
 
 
@@ -434,8 +434,9 @@ normalises the proposal. If a read-only tool is needed, call the tool without
 prose; after its result, return the normal reply followed by a proposal only
 when the reviewed contract changed. A pure chat or capability reply that does
 not change intent may be ordinary Chinese text. Do not submit in the same
-response that changes fault semantics. After a user explicitly confirms an
-unchanged ready FaultSpec, call the matching submit tool with its exact revision."""
+response that changes fault semantics. Once the reviewed FaultSpec is complete
+and unchanged, call the matching submit tool immediately; when re-submitting an
+already-reviewed spec, carry its exact revision."""
 
 
 # ---------------------------------------------------------------------------
@@ -473,10 +474,10 @@ verification actions, or recovery actions do not by themselves create a batch.
 
 When the user changes the outcome, return the full replacement FaultSpec in the
 private proposal trailer. Do not infer missing fields from old prose. Preserve
-the server-owned `revision` shown below until the user confirms and calls a
-submit tool. If no FaultSpec is present after the user has explicitly approved
-a complete summary, submit the complete structured arguments with
-`fault_revision=0`; the server will create revision 1. Use one `faults` item
+the server-owned `revision` shown below until a submit tool carries it. If no
+reviewed FaultSpec is present when the complete summary is stated, submit the
+complete structured arguments with `fault_revision=0`; the server will create
+revision 1. Use one `faults` item
 for one composite objective; use more than one only for independently meaningful
 objectives.
 
