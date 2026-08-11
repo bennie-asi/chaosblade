@@ -1,6 +1,6 @@
 """``/compact`` must report the same quantity the engine decides on.
 
-Both surfaces (TUI ``_cmd_compact``, server ``/compact`` SSE) used to report
+The server ``/compact`` SSE surface used to report
 ``count_tokens_messages(messages).count`` — message text only. The stated reason
 was to match "their own kubectl/blade cost dashboards", but a dashboard shows the
 provider's ``input_tokens``, which also covers the system prompt and every tool
@@ -15,6 +15,11 @@ and so still describes the conversation as it was before — re-anchoring makes
 ``before == after`` and every compaction looks like it freed nothing (measured:
 saved 1,005 -> 0). Projecting the post-compaction text through the
 pre-compaction overhead keeps both ends on one ruler.
+
+History note: an earlier revision of this file also asserted the Python TUI's
+``CommandDispatcher._compact_thread`` source. That surface was removed with the
+Python TUI — the TS TUI consumes the server's ``/compact`` SSE figures, so the
+server-side anchors below are the single remaining contract.
 """
 
 from __future__ import annotations
@@ -26,7 +31,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from chaos_agent.memory.context_manager import COMPRESSED_HISTORY_PREFIX
 from chaos_agent.memory.tokens import count_tokens_messages, estimate_context_tokens
 from chaos_agent.server.routes import sessions as sessions_route
-from chaos_agent.tui.controllers import commands as tui_commands
 
 
 def _ai_with_usage(input_tokens: int, content: str, msg_id: str) -> AIMessage:
@@ -43,24 +47,8 @@ def _source_of(fn) -> str:
     return inspect.getsource(fn)
 
 
-class TestBothSurfacesUseTheAnchoredReading:
+class TestServerSurfaceUsesTheAnchoredReading:
     """A grep-style guard: the reading itself is what drifted before."""
-
-    def test_tui_compact_anchors_before_on_provider_usage(self):
-        src = _source_of(tui_commands.CommandDispatcher._compact_thread)
-        assert "estimate_context_tokens(messages)" in src
-        assert "count_tokens_messages(messages).count" not in src, (
-            "TUI /compact fell back to counting message text, which understates "
-            "the context by the system prompt and tool schemas"
-        )
-
-    def test_tui_compact_projects_after_instead_of_re_anchoring(self):
-        src = _source_of(tui_commands.CommandDispatcher._compact_thread)
-        assert "usage_before.project(" in src
-        assert "estimate_context_tokens(\n" not in src.split("snapshot_after")[-1], (
-            "the post-compaction side re-anchored on usage; a surviving report "
-            "describes the pre-compaction conversation and zeroes out the saving"
-        )
 
     def test_server_compact_anchors_before_on_provider_usage(self):
         src = _source_of(sessions_route)
@@ -117,17 +105,3 @@ class TestTheArithmeticIsSound:
         assert before - naive_after <= 0, (
             "fixture no longer reproduces the re-anchoring trap"
         )
-
-
-class TestOverheadIsDisclosedToTheUser:
-    """A 5% figure without context reads as 'compaction barely worked'."""
-
-    def test_tui_names_the_incompressible_portion(self):
-        src = _source_of(tui_commands.CommandDispatcher._compact_thread)
-        assert "overhead_tokens" in src
-        assert "不可压缩" in src
-
-    def test_disclosure_is_omitted_when_there_is_no_overhead(self):
-        """Without a usage anchor there is no overhead to disclose."""
-        src = _source_of(tui_commands.CommandDispatcher._compact_thread)
-        assert "if usage_before.overhead_tokens" in src

@@ -1,17 +1,17 @@
 """Wizard validation primitives — public, UI-agnostic.
 
-Extracted from ``tui/renderers/onboarding.py`` so the same validation
-logic backs three different UI front-ends without divergence:
+Extracted from the old ``tui/renderers/onboarding.py`` so validation
+logic never diverges from the UI that presents it. The Python TUI and
+its standalone ``config-wizard`` CLI subcommand were removed; the one
+remaining front-end is:
 
-  · ``tui/renderers/onboarding.py``      — legacy Python Rich wizard
-  · ``cli/commands/config_wizard.py``    — standalone CLI subcommand
   · ``server/routes/wizard.py``          — HTTP endpoints the TS Ink
                                             wizard calls during onboarding
 
 Every public callable here is pure-ish (depends only on stdlib +
-``openai`` SDK + ``kubectl`` subprocess) and never touches Rich /
-prompt_toolkit / Ink. ValidationResult is a plain dataclass with a
-trivial ``to_dict()`` so the HTTP layer can return it verbatim.
+``openai`` SDK + ``kubectl`` subprocess) and never touches any UI
+toolkit. ValidationResult is a plain dataclass with a trivial
+``to_dict()`` so the HTTP layer can return it verbatim.
 
 Model presets live here too: the wizard's "recommended models" radio
 list is part of validation surface (we test "is this model id supported

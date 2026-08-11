@@ -144,10 +144,34 @@ start-tui:
 # Bundle the TS TUI to tui/dist/cli.js (single ESM file).
 # Auto-installs node_modules on a fresh checkout so `make wheel` works
 # end-to-end without a manual `npm install` first.
+#
+# No-npm fallback policy (the Python TUI was removed, so there is no
+# runtime fallback — whoever launches an empty bundle gets a silent
+# black screen):
+#   · Reuse a present non-empty tui/dist/cli.js (pre-built upstream).
+#   · Otherwise create an EMPTY placeholder. This only serves SDK-only
+#     wheel pipelines (internal CI, blade-ai.release) where the wheel
+#     is consumed as a library/server and `blade-ai` is never launched;
+#     the placeholder merely satisfies the hatch force-include.
+# Interactive wheels (public release) must build where npm exists so
+# the real TS bundle is embedded.
 build-tui:
 	@if ! command -v npm >/dev/null 2>&1; then \
-		echo "npm not found — skipping TUI build (Python-only wheel)"; \
-		mkdir -p tui/dist && touch tui/dist/cli.js; \
+		if [ -s tui/dist/cli.js ]; then \
+			echo "npm not found — reusing the existing pre-built tui/dist/cli.js"; \
+		else \
+			echo "npm not found — creating an EMPTY tui/dist/cli.js placeholder."; \
+			echo "  This path serves SDK-only wheel pipelines (e.g. the internal CI in"; \
+			echo "  blade-ai.release): the wheel is consumed as a library/server, the"; \
+			echo "  interactive 'blade-ai' entry is never launched, so the placeholder"; \
+			echo "  is never executed. It exists only to satisfy the hatch force-include"; \
+			echo "  (pyproject.toml maps tui/dist/cli.js into the wheel)."; \
+			echo "  WHEELS FOR INTERACTIVE USE MUST be built with npm available so they"; \
+			echo "  embed the real TS bundle — with the Python TUI removed there is no"; \
+			echo "  runtime fallback, and an empty bundle would exit silently (black"; \
+			echo "  screen) if anyone did launch it."; \
+			mkdir -p tui/dist && touch tui/dist/cli.js; \
+		fi; \
 	else \
 		if [ ! -d tui/node_modules ]; then \
 			echo "tui/node_modules missing — running npm install..."; \

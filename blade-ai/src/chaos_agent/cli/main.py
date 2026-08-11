@@ -47,22 +47,19 @@ def main(ctx: typer.Context) -> None:
 
 
 def _launch_default_tui() -> None:
-    """Pick a TUI flavor and hand the terminal over to it.
+    """Hand the terminal over to the TS (Ink) TUI — the only TUI.
 
-    Resolution order (matches the design's "TS by default, Python as
-    escape hatch" stance — see docs/design/tui-typescript-design.md §六):
+    The legacy Python TUI was removed; the TS TUI is the sole
+    interactive surface. Failure modes are all fail-loud:
 
-      1. ``BLADE_AI_TUI=legacy`` → run the Python TUI directly. This
-         path is also what the TS CLI itself uses to bounce back when
-         a user wants out, so we MUST honor it without re-spawning TS,
-         otherwise we'd build an infinite ping-pong loop.
-      2. ``BLADE_AI_TUI=ts`` → force TS; refuse to fall back. Useful
-         for CI / smoke runs that want to fail loudly if the TS bundle
-         isn't reachable.
-      3. otherwise → try TS, silent fallback to Python if the bundle
-         can't be found or Node is missing. We do NOT print a notice
-         in this path because for end-users who only ever installed
-         the Python wheel, "Python TUI works" is the expected outcome.
+      1. ``BLADE_AI_TUI=legacy`` → rejected with an explanatory error.
+         Kept as an explicit check (instead of falling through) so
+         users with the old env var set get a clear migration note
+         rather than a confusing generic failure.
+      2. TS bundle not found or Node.js missing → print an actionable
+         error and exit 1. There is no fallback TUI anymore.
+      3. ``BLADE_AI_TUI=ts`` remains a legal no-op value (equivalent
+         to the default behaviour; kept for CI / smoke compatibility).
 
     We hand off via ``os.execvp`` rather than ``subprocess.run`` so the
     user's terminal cleanly belongs to the new process — no Python
@@ -71,28 +68,28 @@ def _launch_default_tui() -> None:
     """
     pref = (os.environ.get("BLADE_AI_TUI") or "").strip().lower()
     if pref == "legacy":
-        _run_python_tui()
-        return
+        sys.stderr.write(
+            "blade-ai: BLADE_AI_TUI=legacy is no longer supported — "
+            "the Python TUI has been removed.\n"
+            "  Unset the variable (or set BLADE_AI_TUI=ts) and run blade-ai again.\n"
+        )
+        sys.exit(1)
 
     bundle, reason = _resolve_ts_bundle()
     if bundle is None:
-        if pref == "ts":
-            if reason == "node_missing":
-                sys.stderr.write(
-                    "blade-ai: BLADE_AI_TUI=ts but Node.js is not installed.\n"
-                    "  The TS TUI bundle (cli.js) is present but requires Node.js >= 22 to run.\n"
-                    "  Install Node.js: https://nodejs.org/\n"
-                    "  Or use the Python TUI: BLADE_AI_TUI=legacy blade-ai\n"
-                )
-            else:
-                sys.stderr.write(
-                    "blade-ai: BLADE_AI_TUI=ts but the TS bundle was not found.\n"
-                    "  install: npm install -g @blade-ai/tui\n"
-                    "  or build from source: npm --prefix tui run build\n"
-                )
-            sys.exit(1)
-        _run_python_tui()
-        return
+        if reason == "node_missing":
+            sys.stderr.write(
+                "blade-ai: the TS TUI bundle (cli.js) is present but Node.js is not installed.\n"
+                "  The TS TUI requires Node.js >= 22 to run.\n"
+                "  Install Node.js: https://nodejs.org/\n"
+            )
+        else:
+            sys.stderr.write(
+                "blade-ai: the TS TUI bundle was not found.\n"
+                "  install: npm install -g @blade-ai/tui\n"
+                "  or build from source: npm --prefix tui run build\n"
+            )
+        sys.exit(1)
 
     # PyInstaller --onedir / --onefile sets ``sys.frozen``. In that mode
     # there is NO external Python interpreter on the user's PATH (the
@@ -122,11 +119,10 @@ def _launch_default_tui() -> None:
     try:
         os.execvp(exec_path, argv)
     except OSError as err:
-        # exec failure is rare (PATH lied, perms broken). Don't strand
-        # the user — fall through to Python TUI with a one-line note so
-        # they know the TS path was attempted.
-        sys.stderr.write(f"blade-ai: TS TUI launch failed ({err}); falling back to legacy.\n")
-        _run_python_tui()
+        # exec failure is rare (PATH lied, perms broken). No fallback
+        # TUI exists anymore — fail loud with the underlying error.
+        sys.stderr.write(f"blade-ai: TS TUI launch failed ({err})\n")
+        sys.exit(1)
 
 
 # Sentinel reasons returned alongside None from _resolve_ts_bundle to
@@ -150,10 +146,6 @@ def _resolve_ts_bundle() -> tuple[tuple[list[str], str] | None, str]:
          workflows pointing at a custom build.
       2. PyInstaller frozen-bundle path (``sys._MEIPASS`` set) — for
          curl-bash users who installed via the standalone binary.
-         Falls THROUGH to the __file__ walk if the asset is missing,
-         so a dev who runs the spec without first building the TS
-         bundle still gets a sensible Python-TUI fallback (the spec
-         itself errors at build time, but defense-in-depth here).
       3. Wheel-embedded asset at ``<chaos_agent>/_tui_assets/cli.js`` —
          the bundle force-included into the wheel by hatch (see
          pyproject.toml). Wheel users hit this path; editable installs
@@ -273,26 +265,12 @@ def _exec_form(candidate: Path) -> tuple[tuple[list[str], str] | None, bool]:
     return None, False
 
 
-def _run_python_tui() -> None:
-    """Run the legacy Python TUI in-process. Last-resort path."""
-    from chaos_agent.tui.app import run_tui
-    run_tui()
-
-
 app.command(name="config", help="Manage configuration (mode, API keys, etc.)")(config_command)
-# Exposed as a hyphenated top-level rather than a ``config`` subcommand
-# to avoid restructuring the existing ``config`` typer into a sub-app —
-# both for backward-compat with users who alias ``blade-ai config`` and
-# because typer Typer→Typer nesting requires non-trivial refactoring.
-# The TS TUI runs its own in-Ink wizard over HTTP (/api/v1/wizard/*);
-# this standalone command serves headless/scripted setup outside the TUI.
-from chaos_agent.cli.commands.config_wizard import config_wizard_command  # noqa: E402
-app.command(name="config-wizard", help="Run the first-time setup wizard (LLM, kubeconfig, permissions)")(config_wizard_command)
-# Counterpart to config-wizard — exit 0 iff all 3 required fields
-# (llm_api_key / model_name / api_base_url) resolve to non-empty values
-# via Settings. A machine-readable gate for scripts/CI, ensuring the
-# "is config sufficient?" check matches the Python TUI's check 1:1
-# instead of duplicating Settings defaults elsewhere.
+# Machine-readable gate for scripts/CI — exit 0 iff all 3 required
+# fields (llm_api_key / model_name / api_base_url) resolve to non-empty
+# values via Settings. The interactive counterpart lives in the TS
+# TUI's in-Ink wizard (HTTP /api/v1/wizard/*); the old standalone
+# ``config-wizard`` command shipped with the removed Python TUI.
 from chaos_agent.cli.commands.config_check import config_check_command  # noqa: E402
 app.command(name="config-check", help="Exit 0 if required config fields are set (machine-readable gate for scripts/CI)")(config_check_command)
 app.command(name="inject", help="Inject a fault into a Kubernetes target")(inject_command)

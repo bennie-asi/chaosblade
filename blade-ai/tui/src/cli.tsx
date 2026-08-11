@@ -2,9 +2,11 @@
  * blade-ai TUI v2 — process entry.
  *
  * Resolution order:
- *   1. ``BLADE_AI_TUI=legacy`` → exec the legacy Python TUI and exit.
- *   2. ``BLADE_AI_SERVER=...`` → connect to the remote server, no spawn.
- *   3. otherwise → spawn ``python -m chaos_agent.server.app`` embedded.
+ *   1. ``BLADE_AI_SERVER=...`` → connect to the remote server, no spawn.
+ *   2. otherwise → spawn ``python -m chaos_agent.server.app`` embedded.
+ *
+ * The TS TUI is the only interactive surface — the legacy Python TUI
+ * was removed, so there is no escape hatch / fallback to bounce to.
  *
  * Boot UX:
  *   - cli.tsx renders Ink ~immediately after the bundle loads, with
@@ -30,7 +32,6 @@
  * (SIGTERM with 1.5s grace, then SIGKILL).
  */
 
-import { spawnSync } from "node:child_process";
 import process from "node:process";
 import { render } from "ink";
 import React from "react";
@@ -48,15 +49,6 @@ import { installTerminalRedrawOptimizer } from "./utils/terminalRedrawOptimizer.
 import { PKG_VERSION } from "./utils/version.js";
 
 async function main(): Promise<void> {
-  // Legacy escape hatch — let users opt back into the Python TUI.
-  if (process.env["BLADE_AI_TUI"] === "legacy") {
-    const py = process.env["BLADE_AI_PYTHON"] ?? "python";
-    const result = spawnSync(py, ["-m", "chaos_agent.cli.main"], {
-      stdio: "inherit",
-    });
-    process.exit(result.status ?? 0);
-  }
-
   // Refuse to run without a TTY on stdin. Ink's useInput / useApp
   // require raw-mode capable input; piping or redirecting stdin from
   // ``/dev/null`` triggers a misleading "Raw mode is not supported"
@@ -66,8 +58,7 @@ async function main(): Promise<void> {
     fail(
       "stdin is not a TTY — blade-ai-tui needs an interactive terminal.\n" +
         "  Run `blade-ai-tui` directly in a terminal session.\n" +
-        "  Background / pipe / redirected stdin is not supported.\n" +
-        "  Set BLADE_AI_TUI=legacy to fall back to the Python TUI.",
+        "  Background / pipe / redirected stdin is not supported.",
     );
     return;
   }
@@ -76,9 +67,10 @@ async function main(): Promise<void> {
   // embedded Python server is up and /health responds, BootRunner
   // checks ``GET /api/v1/wizard/needs-setup`` and, if true, renders
   // the in-Ink ``WizardCard`` (talking to the server over HTTP) before
-  // continuing to session creation. The standalone
-  // ``blade-ai config-wizard`` CLI command serves users who run or
-  // re-run setup outside the TUI (headless boxes, scripts).
+  // continuing to session creation. Headless re-setup (no TTY) uses
+  // ``blade-ai config set`` + ``blade-ai config-check`` instead — the
+  // old standalone ``config-wizard`` command shipped with the removed
+  // Python TUI.
 
   const debug = process.env["BLADE_AI_DEBUG"] === "1";
 
