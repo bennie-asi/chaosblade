@@ -70,9 +70,9 @@ packages = ["src/chaos_agent"]
 # been run locally (the CI-downloaded tarball has none). Applies to the
 # platform-wheel hook's vendor force-include too.
 exclude = ["**/.DS_Store", "**/chaosblade/logs/**"]
-# 能力注册表蒸馏产物已 gitignore（每次 sync 行数抖动大），但发版必须带上：
-# artifacts 声明 VCS 忽略、构建时仍纳入的文件（hatchling 默认跳过 gitignore 文件）
-artifacts = ["src/chaos_agent/_capabilities/capabilities_*.json"]
+# 能力注册表蒸馏产物（src/chaos_agent/_capabilities/capabilities_*.json）
+# 已提交入库：远端 CI 从 git 检出处构建，本地蒸馏文件不会出现在 runner 上，
+# 必须随代码库分发；hatchling 按 packages 自动收集，无需 artifacts 声明。
 
 # Platform wheels: the build hook bakes vendor/chaosblade into the wheel
 # and stamps a platform tag when BLADE_AI_WHEEL_PLATFORM is set (CI). A
