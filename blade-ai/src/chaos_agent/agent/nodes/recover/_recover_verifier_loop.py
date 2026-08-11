@@ -1285,17 +1285,17 @@ async def _run_layer2_verification(
     if count >= 4:
         messages.append(HumanMessage(content=(
             "You have gathered sufficient CURRENT (post-recovery) evidence across multiple iterations. "
-            "If your observations clearly show recovery, output RECOVERY_VERIFICATION_RESULT now. "
+            "If your observations clearly show recovery, call submit_recover_verification now. "
             "Do NOT repeat the same check — conclude based on evidence already collected in THIS Layer 2 iteration."
         )))
     if count >= settings.max_recover_verifier_loop - 1:
         messages.append(HumanMessage(content=(
-            f"**RECOVERY VERIFICATION DEADLINE**: This is iteration {count} of max {settings.max_recover_verifier_loop}.\n"
-            f"Based on ALL evidence gathered so far:\n"
-            f"  - If you have sufficient data, output the RECOVERY_VERIFICATION_RESULT format NOW.\n"
-            f"  - This is your last chance to use tools — on the next iteration tools will be unavailable.\n\n"
+            f"**RECOVERY VERIFICATION DEADLINE**: This is iteration {count} of max {settings.max_recover_verifier_loop}. "
+            f"Tools are already unavailable — conclude from the evidence gathered.\n"
+            f"Based on ALL evidence gathered so far, output the RECOVERY_VERIFICATION_RESULT format NOW.\n\n"
             f"Your Overall conclusion must be one of:\n"
-            f"  - **recovered**: Fault effect has been removed, target is back to normal\n"
+            f"  - **recovered**: The fault's cause is undone and every residual deviation is "
+            f"attributable to recovery propagation (trajectory improving toward baseline)\n"
             f"  - **unrecovered**: Fault effect is STILL present despite recovery attempt\n"
         )))
 
@@ -1311,7 +1311,10 @@ async def _run_layer2_verification(
 
     # Final-iteration conclusion prompt (tools already unbound at max-1)
     if count >= settings.max_recover_verifier_loop:
-        layer1_label = "blade_destroy" if blade_uid else "recovery execution"
+        # Single source with the system-prompt label (see the builder call
+        # below): the raw blade_uid heuristic mislabels kubectl-blade/combo
+        # recoveries, whose Layer 1 is LLM-driven despite a live UID.
+        layer1_label = "blade_destroy" if _layer1_is_deterministic else "recovery execution"
         messages.append(HumanMessage(content=(
             f"**FINAL RECOVERY VERIFICATION ITERATION**: This is iteration {count} of max {settings.max_recover_verifier_loop}. "
             f"NO more iterations available. Tools are no longer available.\n"

@@ -148,16 +148,14 @@ def _build_baseline_tool_messages(
     semantics = (
         "### Baseline Comparison Rules\n"
         "You now have PRE-INJECTION baseline data (captured BEFORE the fault was injected). "
-        "This is MORE RELIABLE than first-check-as-baseline because the baseline values "
-        "are guaranteed to be unaffected by the fault.\n"
+        "This is MORE RELIABLE than your first post-injection observation because the "
+        "baseline values are guaranteed to be unaffected by the fault.\n"
         "Rules:\n"
         "- Compare post-injection metrics against the pre-injection baseline above, "
         "NOT against your first post-injection check.\n"
         "- A significant change from baseline (e.g., disk 10%→13%, CPU 100m→800m, "
         "RestartCount 7→8) is STRONG evidence the fault is in effect.\n"
-        "- If metrics are SIMILAR to baseline, the fault may not be working.\n"
-        "- This PRE-INJECTION baseline takes priority over the general FIRST-CHECK-AS-BASELINE "
-        "rule in the Baseline Integrity prompt.\n\n"
+        "- If metrics are SIMILAR to baseline, the fault may not be working.\n\n"
         "**FORMAT REQUIREMENT (mandatory when Pre-Injection Baseline is available)**:\n"
         "Each checklist step's evidence MUST include baseline comparison in the format:\n"
         "  \"baseline: <metric from above> → post-injection: <metric you observe NOW> (Δ<change>)\"\n"
@@ -218,7 +216,7 @@ def _build_convergence_hint(count: int) -> str:
         return (
             f"\n\n**Iteration Progress**: You are on iteration {count} of max {settings.max_verifier_loop} "
             f"({remaining} remaining). "
-            f"If you have gathered enough evidence, output the VERIFICATION_RESULT format now. "
+            f"If you have gathered enough evidence, call submit_verification now. "
             f"If you need more data, focus on the most critical checks only."
         )
     if count >= settings.max_verifier_loop - 1:
@@ -226,7 +224,7 @@ def _build_convergence_hint(count: int) -> str:
             f"\n\n**VERIFICATION DEADLINE**: This is iteration {count} of max {settings.max_verifier_loop} — "
             f"your SECOND-TO-LAST iteration.\n"
             f"Based on ALL evidence gathered so far:\n"
-            f"  - If you have sufficient data, output the VERIFICATION_RESULT format NOW.\n"
+            f"  - If you have sufficient data, call submit_verification NOW.\n"
             f"  - If you need ONE more check, do it now — but you MUST conclude on the next iteration.\n\n"
             f"Your Overall conclusion must be one of:\n"
             f"  - **verified**: Fault effect is confirmed present on the target\n"
@@ -291,8 +289,12 @@ def _build_layer2_messages(
         # Subsequent iterations approaching limit: inject convergence nudge
         messages.append(HumanMessage(content=convergence_hint.strip()))
 
-    # Final-iteration conclusion prompt (tools will be unbound at this count)
-    if count >= settings.max_verifier_loop:
+    # Final-iteration conclusion prompt (tools will be unbound at this count).
+    # Skipped when verifier_json_mode is on: verifier.py appends the JSON
+    # schema reminder at the same count and forces response_format=json_object
+    # — injecting both would give the model two mutually exclusive format
+    # contracts in one call. The JSON reminder is the single format source.
+    if count >= settings.max_verifier_loop and not settings.verifier_json_mode:
         messages.append(HumanMessage(content=(
             f"**FINAL VERIFICATION ITERATION**: This is iteration {count} of max {settings.max_verifier_loop}. "
             f"NO more iterations available. Tools are no longer available.\n"
