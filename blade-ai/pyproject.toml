@@ -1,5 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+# Pin BELOW 1.30.0: hatchling 1.30 bumped core metadata to 2.5, which
+# twine (e.g. 6.2.0 in the internal publish pipeline) rejects with
+# "Invalid distribution metadata: '2.5' is not a valid metadata version"
+# — the release was yanked on PyPI for exactly this, but cached copies
+# survive on mirrors. 1.29.x emits Metadata-Version 2.4.
+requires = ["hatchling<1.30"]
 build-backend = "hatchling.build"
 
 [project]
