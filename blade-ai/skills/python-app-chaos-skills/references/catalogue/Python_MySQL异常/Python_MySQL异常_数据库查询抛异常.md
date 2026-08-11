@@ -6,7 +6,7 @@
 3. 若应用缺少异常捕获/重试/降级，故障沿调用链向上扩散
 
 **资源准备**：
-1. 已生成 Agent hook:`blade prepare python --port 9526 --target-script <应用入口脚本>`(`--target-script` 必填,hook 文件 `sitecustomize.py` 落在该脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
+1. 已生成 Agent hook:`blade prepare python --port 9526 --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
 2. 目标 Python 应用已以 `PYTHONPATH=<hook 目录>:$PYTHONPATH` **重启**,Agent 才在应用进程内监听;且使用 `mysql-connector` 或 `PyMySQL` 客户端
 3. 已记录注入前该接口的成功率/错误率基线
 4. 确认应用日志可见异常堆栈

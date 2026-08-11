@@ -6,7 +6,7 @@
 3. 若应用未校验空值就直接使用，可能返回错误业务数据、抛出 `AttributeError`/`TypeError`，甚至把空值写回缓存造成污染扩散
 
 **资源准备**：
-1. 已生成 Agent hook:`blade prepare python --port 9526 --target-script <应用入口脚本>`(`--target-script` 必填,hook 文件 `sitecustomize.py` 落在该脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
+1. 已生成 Agent hook:`blade prepare python --port 9526 --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
 2. 目标 Python 应用已以 `PYTHONPATH=<hook 目录>:$PYTHONPATH` **重启**,Agent 才在应用进程内监听;且应用使用 `redis` 客户端库
 3. 已记录注入前该接口返回内容的基线,以及数据库 QPS 基线(用于观测穿透)
 4. 确认应用侧可观测:接口返回内容、错误率、数据库 QPS

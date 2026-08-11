@@ -13,6 +13,7 @@
 - [结构化 CLI](#结构化-cli)
 - [三种注入模式详解](#三种注入模式详解)
 - [故障场景速查](#故障场景速查)
+- [Python 应用层故障演练](#python-应用层故障演练)
 - [恢复与降级](#恢复与降级)
 - [Server 模式与 API](#server-模式与-api)
 - [配置管理](#配置管理)
@@ -496,6 +497,102 @@ blade-ai inject -i "将PVC修改为不存在的StorageClass，模拟存储类配
 # Pod 镜像拉取失败
 blade-ai inject -i "对cms-demo命名空间中frontend服务模拟镜像拉取失败" --kubeconfig ~/.kube/config
 ```
+
+---
+
+## Python 应用层故障演练
+
+与上面的资源级故障不同，这类故障发生在 **Python 应用进程内部**（运行时方法拦截）：让应用依赖的某个中间件调用变慢、抛异常或返回被篡改的值，用于验证应用自身的超时、重试、降级、熔断逻辑。注入期间 CPU/内存/磁盘/网络指标与 Kubernetes 对象状态**不变**，这是预期行为，验证必须在应用层进行。
+
+### 支持矩阵
+
+| target（依赖） | delay 延迟 | throwCustomException 抛异常 | returnValue 返回值篡改 |
+|---|---|---|---|
+| redis | ✅ | ✅ | ✅ |
+| mysql | ✅ | ✅ | — |
+| http（requests） | ✅ | ✅ | — |
+| grpc | ✅ | — | — |
+| kafka | — | ✅ | — |
+| httpx / sqlalchemy | 命令形态与 http / mysql 一致，只换 matcher | 同左 | — |
+
+### 第一步：装 Agent（一次性，需要重启应用）
+
+Python 不支持 JVM 那样的动态 attach，Agent 必须在进程启动时加载，**顺序不能颠倒**：
+
+```bash
+# 1. 生成 hook 文件（sitecustomize.py 写到入口脚本所在目录；blade 自带 agent 库，无需 pip install）
+#    --target-script 是应用入口脚本（平时 python xxx.py 的那个文件），blade 只取它的目录作为钩子落点
+#    --python-path 是应用使用的解释器路径，与 --target-script 同为必填
+blade prepare python --port 9526 --python-path /usr/bin/python3 --target-script /path/to/app.py
+
+# 2. 带 hook 重启应用（PYTHONPATH 必须包含 hook 目录，仅文件在目录里不够）
+PYTHONPATH=/path/to:$PYTHONPATH python app.py
+```
+
+> `prepare` 返回 success、`blade status --type prepare` 显示 Running，都**不代表 Agent 已存活**，只是记录状态。真实状态由注入结果反推（见下方排错表）。
+
+### 第二步：配置主机通道
+
+注入命令必须落在**目标应用所在的那台机器**上（blade 只能连它自己所在机器的 agent），因此这类演练只支持主机寻址的通道（`ssh` / `kubewiz_host`）。K8s 通道（`kubeconfig` / `kubewiz_k8s`）会被能力闸门直接拒绝，注入工具根本不会出现。
+
+SSH 通道配置（`~/.blade-ai/config.json`，也可用对应环境变量）：
+
+```json
+{
+  "channel": "ssh",
+  "ssh_host": "10.0.0.1",
+  "ssh_user": "root",
+  "ssh_key_path": "~/.ssh/id_rsa",
+  "ssh_port": 22
+}
+```
+
+对应环境变量：`BLADE_AI_SSH_HOST` / `BLADE_AI_SSH_USER` / `BLADE_AI_SSH_KEY_PATH` / `BLADE_AI_SSH_PORT`。
+
+### 第三步：发起演练
+
+**方式 A：对话式（推荐）**——启动 `blade-ai` 后直接用自然语言描述意图，Agent 自动匹配用例并走确认流程：
+
+```
+> 让 Redis 的 GET 命令延迟 500 毫秒，持续 10 分钟
+> 让调用下游订单服务的 HTTP 请求抛连接异常
+> 让 Redis 缓存返回空值，验证降级逻辑
+```
+
+**方式 B：blade CLI 直接注入**（在目标应用所在机器上执行）：
+
+```bash
+# Redis GET 命令延迟 500ms，实验 600 秒后自动结束
+blade create python redis delay --time 500 --cmd GET --timeout 600
+
+# 记录返回的实验 uid，用于恢复
+blade destroy <uid>
+```
+
+matcher 参数按 target 收窄影响面（**不要省略 matcher 全量注入**，除非明确要求）：
+
+| target | matcher |
+|---|---|
+| redis | `--cmd` / `--key` |
+| mysql / sqlalchemy | `--sql` / `--sqltype` / `--database` |
+| http | `--url` / `--method` / `--host` |
+| httpx | 同 http，另加 `--path` |
+| grpc | `--service` / `--method` |
+| kafka | `--topic` / `--operation` |
+
+### 验证与恢复
+
+- **验证**必须落在应用层并与 action 对应：`delay` → 被拦截调用耗时上升约等于 `--time`；`throwCustomException` → 应用日志/错误率出现配置的异常；`returnValue` → 返回配置的值而非真实值。未匹配 matcher 的调用保持正常，这是 matcher 生效的证据，不是注入不完整。
+- **恢复**用 `blade destroy <uid>`。**不要用 `blade revoke`**——它删除 prepare 生成的 hook 文件，不停止任何故障，还会让应用下次重启后失去 Agent，并影响同主机其他演练。
+
+### 排错速查
+
+| 现象 | 含义 | 补救 |
+|---|---|---|
+| `no running python preparation record found` | 没有 prepare 记录 | 当场补做一次 prepare，然后重试注入 |
+| `connect: connection refused` / `python agent is not running` | 有记录但 Agent 没在进程内 | **需重启应用**，演练中无法补做 |
+| prepare 了新端口却注入到旧端口 | 多条 prepare 记录互相遮蔽，注入取**最早**那条的端口 | `blade status --type prepare --status Running` 检查并 revoke 陈旧记录 |
+| 实验状态正常但应用无变化 | 应用没走到被拦截的调用，或 matcher 不匹配 | 按 matcher 重新收敛，不要重复注入 |
 
 ---
 

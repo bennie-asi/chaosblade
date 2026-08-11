@@ -38,8 +38,8 @@ blade create python ... ──HTTP──> Agent(应用进程内) ──MonkeyPat
 
 Agent 进入应用进程分两步,**顺序不能颠倒**(以下均已对 chaosblade 1.9.0-alpha 实测):
 
-1. **生成 hook 文件**:`blade prepare python --port <port> --target-script <应用入口脚本> [--python-path <解释器>]`
-   - `--target-script` 是**必填**的,缺失时 CLI 直接报 `required flag(s) "target-script" not set`。
+1. **生成 hook 文件**:`blade prepare python --port <port> --python-path <解释器> --target-script <应用入口脚本>`
+   - `--target-script` 与 `--python-path` 都是**必填**的,缺失时 CLI 直接报 `required flag(s) ... not set`。
    - 它把 `sitecustomize.py` 写到 **`--target-script` 所在目录**,内容是"把 blade 自带的 `<blade目录>/lib/python` 加入 sys.path 并启动 Agent"。因此**不需要额外 `pip install`**。
    - `--port` 必须**空闲**;端口已被监听时 prepare 会拒绝(`the port has been used by other program`)。
 2. **重启应用加载 hook**:应用以 `PYTHONPATH=<hook 目录>:$PYTHONPATH` 启动,Agent 才真正在应用进程内监听。
