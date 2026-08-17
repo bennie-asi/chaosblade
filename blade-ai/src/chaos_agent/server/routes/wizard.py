@@ -30,10 +30,13 @@ Why a separate wizard router (vs reusing ``/api/v1/config``):
 from __future__ import annotations
 
 import logging
+import os
+from typing import Any
 
 from fastapi import Body, Request
 
 from chaos_agent.config import wizard_validators
+from chaos_agent.config.settings import settings
 from chaos_agent.models.schemas import JSONEnvelope, ResponseCode
 from chaos_agent.server.routes import wizard_router
 from chaos_agent.config.config_store import ConfigStore
@@ -62,9 +65,113 @@ _SAVABLE_KEYS: frozenset[str] = frozenset(
 )
 
 
+# First-tier discoverability seeds (product decision 2026-08): the
+# wizard historically persisted only the 7 user-filled keys above, so
+# users never learned these safety/context knobs exist. After every
+# successful save, keys listed here are written with their Settings
+# defaults — but ONLY when absent, so re-running the wizard never
+# overwrites a value the user already customized. Deliberately NOT
+# seeded: llm_enable_thinking — thinking must stay on by default for
+# injection-command quality, so the toggle is not user-discoverable.
+# ``model_budgets`` is handled separately at seed time (personalized
+# with the user's configured model — see /save below), not here.
+_WIZARD_SEED_DEFAULTS: dict[str, Any] = {
+    "context_max_tokens": 100_000,
+    "context_compact_ratio": 0.85,
+    "llm_thinking_format": "auto",
+    "safety_blacklist_namespaces": "",
+    "experiment_timeout": 600,
+    "confirmation_required": False,
+    "kube_connection_mode": "kubeconfig",
+    "max_agent_loop": 100,
+}
+
+
 def _store() -> ConfigStore:
     """Fresh ConfigStore — same pattern as routes/config.py."""
     return ConfigStore()
+
+
+def seed_missing_defaults(store: ConfigStore) -> list[str]:
+    """Absent-only seed shared by wizard ``/save`` and boot backfill.
+
+    Writes the first-tier defaults (plus a personalized ``model_budgets``
+    entry) for keys still ABSENT from the file and returns the keys
+    actually written. A value the user saved earlier — this run or a
+    previous one — always wins over the seed.
+    """
+    current = store.read_all()
+    # A non-dict file means corrupt / foreign content — seeding must
+    # never touch it (the boot-time caller pre-checks health; /save
+    # inherits the gate from this shared guard).
+    if not isinstance(current, dict):
+        return []
+    seeded = [key for key in _WIZARD_SEED_DEFAULTS if key not in current]
+    updates: dict[str, Any] = {
+        key: _WIZARD_SEED_DEFAULTS[key] for key in seeded
+    }
+
+    # Personalized model_budgets: instead of a static example, seed an
+    # entry keyed by the user's own configured model, valued via the
+    # same resolver the runtime uses (built-in table when the model is
+    # known, global fallback otherwise). Users see their model name
+    # with real numbers — edit-in-place, no format to guess.
+    model_name = str(current.get("model_name") or "").strip()
+    if "model_budgets" not in current and model_name:
+        max_tokens, ratio = settings.resolve_context_budget(model_name)
+        updates["model_budgets"] = {
+            model_name: {"max_tokens": max_tokens, "compact_ratio": ratio},
+        }
+        seeded.append("model_budgets")
+
+    if updates:
+        store.set_many(updates)
+    return seeded
+
+
+def backfill_seed_defaults() -> tuple[list[str], list[str]]:
+    """Boot-time silent backfill for PRE-EXISTING config files.
+
+    Old installs upgraded past the seed feature never see the wizard
+    again (essential fields complete → the needs-setup gate stays
+    false), so their config.json would never gain the first-tier keys.
+    This closes that gap at server startup — only when the wizard will
+    NOT fire; a wizard-bound boot gets its seeds from ``/save`` and
+    must not be raced.
+
+    Returns ``(seeded, materialized)``: keys written with curated
+    defaults, and essential keys materialized from the environment.
+
+    Skip conditions (any one → return ``([], [])`` without writing):
+    1. config file corrupt — the boot error page owns that file
+    2. config file absent — pure-env-var users get no file fabricated
+    3. essential fields missing — the wizard fires and ``/save`` seeds
+    """
+    if wizard_validators.check_config_file_health():
+        return [], []
+    store = _store()
+    if not os.path.isfile(store.path):
+        return [], []
+    if wizard_validators.missing_essential_config():
+        return [], []
+
+    # Env materialization: a user configured via env vars has a file
+    # that LACKS the essential keys even though the values are live at
+    # runtime (env > file precedence). Seed them from the environment
+    # — never with defaults — so (a) the file states what actually
+    # runs and (b) the personalized model_budgets entry below keys on
+    # the model that is genuinely in the file instead of dangling on
+    # an env-only value. Absent-only: file values are never clobbered,
+    # and env always retains its higher runtime precedence anyway.
+    materialized: list[str] = []
+    current = store.read_all()
+    for field_name, env_name in wizard_validators.ESSENTIAL_CONFIG_FIELDS:
+        env_val = (os.environ.get(env_name) or "").strip()
+        if env_val and field_name not in current:
+            store.set(field_name, env_val)
+            materialized.append(field_name)
+
+    return seed_missing_defaults(store), materialized
 
 
 # ── Read-only ──────────────────────────────────────────────────────────
@@ -247,6 +354,13 @@ async def save_config(req: Request, payload: dict = Body(...)):
             request_id=getattr(req.state, "request_id", ""),
         )
 
+    # Discoverability seed: write curated first-tier defaults for keys
+    # still ABSENT from the file. Absent-only by design — a value the
+    # user just saved above (or customized in a previous run) always
+    # wins over the seed. Shared with the boot-time backfill so both
+    # paths seed identically (see ``seed_missing_defaults``).
+    seeded = seed_missing_defaults(store)
+
     # Rebuild agents so the just-saved LLM-bound keys take effect on
     # the next /turn — see ``server/agent_runtime`` for the rationale.
     # Wizard flow runs at boot, BEFORE /turn is reachable, so no race.
@@ -257,6 +371,7 @@ async def save_config(req: Request, payload: dict = Body(...)):
     return JSONEnvelope.ok(
         data={
             "saved_keys": saved,
+            "seeded_keys": seeded,  # discoverability defaults added
             "saved_path": store.path,
             "errors": errors,  # partial-failure surface
             "agent_rebuild_error": rebuild_error,

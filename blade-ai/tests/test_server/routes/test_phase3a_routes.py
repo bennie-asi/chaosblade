@@ -820,6 +820,7 @@ class TestIntentConfirmDryRunSkip:
                 "names": [],
                 "labels": {},
                 "params": {},
+                "duration_seconds": 600,
             },
             "intent_confidence": 1.0,
             "dry_run": True,
@@ -860,6 +861,7 @@ class TestIntentConfirmDryRunSkip:
                 "names": [],
                 "labels": {},
                 "params": {},
+                "duration_seconds": 600,
             },
             "intent_confidence": 1.0,
             # dry_run absent → defaults to falsy

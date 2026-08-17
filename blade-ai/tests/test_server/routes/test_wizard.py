@@ -15,9 +15,6 @@ unit tests at the module level for the live-call branches.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -363,3 +360,248 @@ def test_save_rejects_non_dict_body(test_client):
     )
     body = resp.json()
     assert body["status"] == "fail"
+
+
+# ── save: first-tier discoverability seeds ────────────────────────────
+
+
+def _read_config(tmp_path) -> dict:
+    return json.loads((tmp_path / ".blade-ai" / "config.json").read_text())
+
+
+def test_save_seeds_first_tier_defaults(test_client, tmp_path):
+    """A fresh save must materialize the curated first-tier knobs so
+    users discover they exist (model_budgets, safety blacklist, ...)."""
+    resp = test_client.post(
+        "/api/v1/wizard/save",
+        json={"config": {"model_name": "qwen3-max-preview"}},
+    )
+    body = resp.json()
+    assert body["status"] == "success"
+
+    seeded = set(body["data"]["seeded_keys"])
+    assert seeded == {
+        "model_budgets",
+        "context_max_tokens",
+        "context_compact_ratio",
+        "llm_thinking_format",
+        "safety_blacklist_namespaces",
+        "experiment_timeout",
+        "confirmation_required",
+        "kube_connection_mode",
+        "max_agent_loop",
+    }
+
+    cfg = _read_config(tmp_path)
+    # Personalized entry: the user's own model, valued from the
+    # built-in table (qwen3-max prefix → 256K), not a generic example.
+    assert cfg["model_budgets"] == {
+        "qwen3-max-preview": {"max_tokens": 262_144, "compact_ratio": 0.8},
+    }
+    assert "_model_budgets_example" not in cfg
+    assert cfg["context_max_tokens"] == 100_000
+    assert cfg["context_compact_ratio"] == 0.85
+    assert cfg["llm_thinking_format"] == "auto"
+    assert cfg["safety_blacklist_namespaces"] == ""
+    assert cfg["experiment_timeout"] == 600
+    assert cfg["confirmation_required"] is False
+    assert cfg["kube_connection_mode"] == "kubeconfig"
+    assert cfg["max_agent_loop"] == 100
+    # Quality-guarantee toggle must NOT be user-discoverable.
+    assert "llm_enable_thinking" not in cfg
+
+
+def test_save_seeds_unknown_model_with_global_fallback(test_client, tmp_path):
+    """Models absent from the built-in table still get a personalized
+    entry — valued with the global fallback so users can tune it."""
+    resp = test_client.post(
+        "/api/v1/wizard/save",
+        json={"config": {"model_name": "totally-unknown-llm"}},
+    )
+    assert resp.json()["status"] == "success"
+    cfg = _read_config(tmp_path)
+    assert cfg["model_budgets"] == {
+        "totally-unknown-llm": {
+            "max_tokens": 100_000,  # global fallback
+            "compact_ratio": 0.85,
+        },
+    }
+
+
+# ── boot-time backfill (old configs, wizard not firing) ───────────────
+
+
+@pytest.fixture
+def seed_env(tmp_path, monkeypatch):
+    """Env isolation for direct backfill_seed_defaults() calls: same
+    HOME / BLADE_AI_CONFIG_DIR redirect as test_client, plus the three
+    essential env vars cleared so the file is the only source."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("BLADE_AI_CONFIG_DIR", str(tmp_path / ".blade-ai"))
+    for var in (
+        "BLADE_AI_LLM_API_KEY",
+        "BLADE_AI_MODEL_NAME",
+        "BLADE_AI_API_BASE_URL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    return tmp_path / ".blade-ai" / "config.json"
+
+
+def _write_config(path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+_OLD_CONFIG = {
+    "llm_api_key": "sk-old",
+    "model_name": "totally-unknown-llm",
+    "api_base_url": "https://example.com/v1",
+    "experiment_timeout": 300,  # user-tuned value that must survive
+}
+
+
+def test_backfill_seeds_old_config(seed_env):
+    """Old install (essentials complete, no seed keys) gets the whole
+    first tier backfilled; pre-existing keys are untouched."""
+    from chaos_agent.server.routes.wizard import backfill_seed_defaults
+
+    _write_config(seed_env, _OLD_CONFIG)
+    seeded, materialized = backfill_seed_defaults()
+    assert materialized == []
+    assert set(seeded) == {
+        "model_budgets",
+        "context_max_tokens",
+        "context_compact_ratio",
+        "llm_thinking_format",
+        "safety_blacklist_namespaces",
+        "confirmation_required",
+        "kube_connection_mode",
+        "max_agent_loop",
+    }  # experiment_timeout EXCLUDED — already present
+
+    cfg = json.loads(seed_env.read_text())
+    assert cfg["experiment_timeout"] == 300  # user value preserved
+    assert cfg["llm_api_key"] == "sk-old"
+    # Personalized entry valued with the global fallback (unknown model).
+    assert cfg["model_budgets"] == {
+        "totally-unknown-llm": {
+            "max_tokens": 100_000,
+            "compact_ratio": 0.85,
+        },
+    }
+    assert cfg["context_max_tokens"] == 100_000
+    assert "llm_enable_thinking" not in cfg
+
+
+def test_backfill_materializes_env_values(seed_env, monkeypatch):
+    """Env-configured user: essentials live ONLY in env vars, the file
+    lacks them. Backfill must write the ENV values into the file —
+    never defaults — and key model_budgets on the env-configured model."""
+    from chaos_agent.server.routes.wizard import backfill_seed_defaults
+
+    monkeypatch.setenv("BLADE_AI_LLM_API_KEY", "sk-from-env")
+    monkeypatch.setenv("BLADE_AI_MODEL_NAME", "qwen3-max-preview")
+    _write_config(seed_env, {"api_base_url": "https://example.com/v1"})
+
+    seeded, materialized = backfill_seed_defaults()
+    assert set(materialized) == {"llm_api_key", "model_name"}
+    assert "model_budgets" in seeded
+
+    cfg = json.loads(seed_env.read_text())
+    # Env values materialized verbatim — defaults must NOT appear.
+    assert cfg["llm_api_key"] == "sk-from-env"
+    assert cfg["model_name"] == "qwen3-max-preview"
+    assert cfg["api_base_url"] == "https://example.com/v1"  # untouched
+    # Budget entry keys on the model now genuinely in the file
+    # (qwen3-max prefix → 256K from the built-in table).
+    assert cfg["model_budgets"] == {
+        "qwen3-max-preview": {"max_tokens": 262_144, "compact_ratio": 0.8},
+    }
+
+
+def test_backfill_skips_when_essential_missing(seed_env):
+    """Wizard-bound boot (an essential field missing) — /save owns the
+    seed there; backfill must not race it."""
+    from chaos_agent.server.routes.wizard import backfill_seed_defaults
+
+    cfg = dict(_OLD_CONFIG)
+    cfg["llm_api_key"] = ""  # empty value counts as missing
+    _write_config(seed_env, cfg)
+    assert backfill_seed_defaults() == ([], [])
+    assert json.loads(seed_env.read_text()) == cfg  # zero changes
+
+
+def test_backfill_skips_corrupt_file(seed_env):
+    from chaos_agent.server.routes.wizard import backfill_seed_defaults
+
+    seed_env.parent.mkdir(parents=True, exist_ok=True)
+    seed_env.write_text('{"llm_api_key": broken', encoding="utf-8")
+    assert backfill_seed_defaults() == ([], [])
+    # The corrupt file is left EXACTLY as-is for the error page.
+    assert seed_env.read_text() == '{"llm_api_key": broken'
+
+
+def test_backfill_skips_when_no_config_file(seed_env):
+    """Pure env-var users with NO file get no config.json fabricated."""
+    from chaos_agent.server.routes.wizard import backfill_seed_defaults
+
+    assert backfill_seed_defaults() == ([], [])
+    assert not seed_env.exists()
+
+
+def test_backfill_is_idempotent(seed_env):
+    from chaos_agent.server.routes.wizard import backfill_seed_defaults
+
+    _write_config(seed_env, _OLD_CONFIG)
+    seeded, _ = backfill_seed_defaults()
+    assert seeded  # first pass seeds
+    assert backfill_seed_defaults() == ([], [])  # second: nothing left
+    # Third pass after a user edit still touches nothing.
+    cfg = json.loads(seed_env.read_text())
+    cfg["context_max_tokens"] = 50_000
+    _write_config(seed_env, cfg)
+    assert backfill_seed_defaults() == ([], [])
+    assert json.loads(seed_env.read_text())["context_max_tokens"] == 50_000
+
+
+def test_seed_never_overwrites_existing_values(test_client, tmp_path):
+    """Re-running the wizard must not clobber user-customized knobs."""
+    cfg_dir = tmp_path / ".blade-ai"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.json").write_text(json.dumps({
+        "context_max_tokens": 50_000,
+        "model_budgets": {"my-llm": {"max_tokens": 4096, "compact_ratio": 0.9}},
+        "safety_blacklist_namespaces": "kube-system,prod",
+    }))
+
+    resp = test_client.post(
+        "/api/v1/wizard/save",
+        json={"config": {"model_name": "qwen3-max-preview"}},
+    )
+    body = resp.json()
+    assert body["status"] == "success"
+    # Already-present keys are NOT re-seeded.
+    seeded = set(body["data"]["seeded_keys"])
+    assert "context_max_tokens" not in seeded
+    assert "model_budgets" not in seeded
+    assert "safety_blacklist_namespaces" not in seeded
+
+    cfg = _read_config(tmp_path)
+    assert cfg["context_max_tokens"] == 50_000
+    assert cfg["model_budgets"] == {"my-llm": {"max_tokens": 4096, "compact_ratio": 0.9}}
+    assert cfg["safety_blacklist_namespaces"] == "kube-system,prod"
+    # Absent keys still get seeded.
+    assert cfg["experiment_timeout"] == 600
+
+
+def test_user_payload_wins_over_seed(test_client, tmp_path):
+    """A wizard answer saved in the same call beats the seed default."""
+    resp = test_client.post(
+        "/api/v1/wizard/save",
+        json={"config": {"confirmation_required": "true"}},
+    )
+    assert resp.json()["status"] == "success"
+    cfg = _read_config(tmp_path)
+    assert cfg["confirmation_required"] is True
+    assert "confirmation_required" not in resp.json()["data"]["seeded_keys"]
+

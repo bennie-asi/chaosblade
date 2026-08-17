@@ -168,6 +168,25 @@ async def lifespan(app: FastAPI):
         app.state.agents = None
         app.state.checkpointer = None
     else:
+        # Silent config backfill for upgraded installs: essentials are
+        # complete (wizard will NOT fire), so seed any first-tier keys
+        # the old config.json predates, and materialize env-configured
+        # essentials into the file (never with defaults). Runs BEFORE
+        # create_agent so the written values (context_max_tokens, ...)
+        # are already in ``settings`` when the graph is built.
+        # Wizard-bound boots are skipped inside — their seeds come
+        # from /save, no double write.
+        from chaos_agent.server.routes.wizard import backfill_seed_defaults
+
+        _seeded, _materialized = backfill_seed_defaults()
+        if _seeded or _materialized:
+            logger.info(
+                "Config backfill: %d first-tier key(s) seeded%s",
+                len(_seeded),
+                f", {len(_materialized)} essential key(s) materialized "
+                f"from environment ({', '.join(_materialized)})"
+                if _materialized else "",
+            )
         agents = await create_agent(registry, mcp_manager=mcp_manager)
         app.state.agents = agents
         app.state.checkpointer = agents.get("checkpointer")
