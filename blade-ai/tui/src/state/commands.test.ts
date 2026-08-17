@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildRegistry,
+  formatReviewCard,
   parseSlashCommand,
   parseSlashLine,
   parseTasksArgs,
@@ -552,6 +553,68 @@ describe("Phase 2 / new command registration", () => {
     expect(tasks.usage).toContain("failed");
     expect(tasks.usage).toContain("all");
     expect(tasks.streamSafe).toBe(true);
+  });
+});
+
+describe("formatReviewCard", () => {
+  // Regression anchors for the field contract with the server's
+  // ``get_metric`` envelope (task_store.py). Each test pins one bug
+  // that made /review look broken:
+
+  it("renders ✓ for the DERIVED 'success' status (infer_status rollup)", () => {
+    // status comes from infer_status() — success/failed/in_progress/
+    // pending — NOT the raw task_state. Previously stateGlyph only
+    // matched raw states, so every successful task showed "·".
+    const card = formatReviewCard("task-1", { status: "success" });
+    expect(card).toContain("✓");
+  });
+
+  it("prefers top-level duration_ms over the node-span sum", () => {
+    // summary.total_duration_ms is the span sum and can be 0 even
+    // when the task ran; the server-computed wall clock wins.
+    const card = formatReviewCard("task-1", {
+      status: "success",
+      duration_ms: 42000,
+      summary: { total_duration_ms: 0 },
+    });
+    expect(card).toContain("42");
+  });
+
+  it("renders token usage + call counts and the error line", () => {
+    const card = formatReviewCard("task-1", {
+      status: "failed",
+      summary: {
+        total_token_input: 1200,
+        total_token_output: 300,
+        total_llm_calls: 4,
+        total_tool_calls: 2,
+      },
+      error: "blade create failed: no such pod",
+    });
+    expect(card).toContain("1200");
+    expect(card).toContain("300");
+    expect(card).toContain("LLM ×4");
+    expect(card).toContain("Tool ×2");
+    expect(card).toContain("blade create failed: no such pod");
+    expect(card).toContain("✗");
+  });
+
+  it("renders the frozen model_name when the envelope carries it", () => {
+    // task_details.model_name is the at-run snapshot written at task
+    // finalize; the card must surface which model ran the drill.
+    const card = formatReviewCard("task-1", {
+      status: "success",
+      model_name: "qwen3.8-max",
+    });
+    expect(card).toContain("qwen3.8-max");
+  });
+
+  it("omits the model line for legacy tasks without model_name", () => {
+    // Tasks archived before the column existed carry no value — the
+    // line must not render at all (no empty "model:" row).
+    const card = formatReviewCard("task-1", { status: "success" });
+    expect(card.toLowerCase()).not.toContain("model:");
+    expect(card).not.toContain("模型");
   });
 });
 

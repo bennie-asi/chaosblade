@@ -61,11 +61,19 @@ const forge = {
   fire: "#E87841",
   // Heated-iron deep — hard decisions, result frames, "this is final".
   iron: "#A8451E",
-  // Dim fire (forge.fire desaturated ~30%) — reserved for container
-  // borders that need a brand-warm tint without competing with the
-  // saturated chips / buttons inside. First user: ConfirmMessage
-  // frames (both soft + hard tiers share this single token now, so
-  // tier is signaled by chip + glyph rather than by border colour).
+  // Molten gold — the ◎ node-progress reticle leader. Hue-shifted
+  // toward yellow (≈36°) vs fire's red-orange (≈20°) so the system
+  // readout stays visually distinct from the ⏺ agent leader, while
+  // full saturation keeps it legible on light terminals (the earlier
+  // desaturated forge.dim read muddy and hard to see).
+  gold: "#D89B3D",
+  // Dim fire (forge.fire desaturated ~30%) — brand-warm tint that
+  // never competes with the saturated chips / glyphs inside it.
+  // User: ConfirmMessage frames (both soft + hard tiers share this
+  // single token, so tier is signaled by chip + glyph rather than by
+  // border colour). The ◎ node-progress reticle leader used this
+  // token too but migrated to forge.fire — the dim tone read muddy
+  // and hard to see on light terminals.
   dim: "#A87050",
 } as const;
 
@@ -97,30 +105,33 @@ const status = {
   // language matches the operator vocabulary.
   armed: forge.fire,      // pending fire-button press
   executing: forge.iron,  // pushing real disruption
-  // Success — sage / yellow-green. Lives in the warm half of the
+  // Success — deep sage / yellow-green. Lives in the warm half of the
   // colour wheel so it sits beside forge.fire (the brand orange)
   // without clashing. The previous blue-green ``#5BB371`` read as
-  // cold against the all-orange chrome and pulled the eye away from
-  // the chrome itself. Sage keeps the "this is a result, not chrome"
-  // separation but stays in the same temperature family.
-  ok: "#A4D55C",
+  // cold against the all-orange chrome, and the later light sage
+  // ``#A4D55C`` read washed-out on white terminals (success-card
+  // border barely visible) — this deeper same-hue sage holds ≥3:1
+  // contrast on light canvases while staying ≥6:1 on dark ones.
+  ok: "#6E9C34",
   // Caution amber — used for "low confidence", "warn this turn".
   warn: "#E8B341",
   // Failure red — slightly muted so it doesn't strobe.
   err: "#C44545",
   // Change / drift alert — "pay attention, the course changed".
-  // Reads cautionary like warn but is hue-distant from BOTH warn
-  // amber (execution-confirm cards) and err red (failure cards), so
-  // 目标变更 / 计划变更 cards can't be mistaken for either.
+  // Violet is the canonical drift/change hue: unmistakably distinct
+  // from warn amber (execution-confirm cards), err red (failure
+  // cards) and the brand orange, so 目标变更 / 计划变更 cards can't
+  // be mistaken for any of them. (An earlier crimson/magenta pair
+  // read pink and off on light terminals — user rejected it.)
   //
   // Per-terminal-bg pair (same pattern as USER_BUBBLE_PALETTE):
-  // dark-canvas gets the deep crimson (#A5306B) which holds contrast
-  // against near-black; light-canvas gets the lifted magenta
-  // (#C8558F) so the hue stays vivid on white. Picked via
+  // dark-canvas gets the lifted violet (#8B5CF6) which holds contrast
+  // against near-black; light-canvas gets the deeper violet (#7C3AED)
+  // so the hue stays vivid on white. Picked via
   // ``Theme.status.change[useTerminalBg()]``.
   change: {
-    dark: "#A5306B",
-    light: "#C8558F",
+    dark: "#8B5CF6",
+    light: "#7C3AED",
   },
   // Cool info — calm, factual, for advisory metadata.
   info: "#5A8A9A",

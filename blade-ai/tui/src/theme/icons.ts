@@ -48,6 +48,15 @@ export interface IconSet {
   tree: string;
   bullet: string;
   arrow: string;
+  /** Reticle leader for node-progress readouts
+   *  (``◎ Checking target health...``) — the system sighting the
+   *  target and taking a reading. Double-ring hollow: distinct from
+   *  the agent's filled ⏺, pending ○ and active ◉. Painted in
+   *  ``forge.gold`` (molten gold) — same warm family as the ⏺
+   *  leader but hue-shifted so the two speakers stay distinct; an
+   *  earlier desaturated ``forge.dim`` tone read muddy and hard to
+   *  see on light terminals. */
+  scope: string;
 }
 
 const Unicode: IconSet = {
@@ -69,6 +78,7 @@ const Unicode: IconSet = {
   // Visual decorations
   bullet: "•",
   arrow: "→",
+  scope: "◎", // U+25CE bullseye — instrument reticle
 };
 
 const Ascii: IconSet = {
@@ -86,6 +96,7 @@ const Ascii: IconSet = {
   tree: "\\",
   bullet: "*",
   arrow: "->",
+  scope: "@",
 };
 
 export const Icons: IconSet = _ASCII ? Ascii : Unicode;

@@ -1258,10 +1258,10 @@ function buildBuiltInCommands(): SlashCommand[] {
     },
     {
       // ``/review [task_id|E#]`` — show the metric/result card for a
-      // task. Mirrors Python ``_cmd_review`` (``tui/controllers/
-      // commands.py:434+``). Falls back to "most recent task in the
-      // store" when no id is given so users can simply type ``/review``
-      // after a finished turn to see what landed.
+      // task, backed by ``GET /api/v1/metric/{task_id}``. Falls back to
+      // "most recent task in the store" when no id is given so users
+      // can simply type ``/review`` after a finished turn to see what
+      // landed.
       //
       // ``E#`` locator is also accepted because users routinely chain
       // ``/show E1`` and ``/review E1`` in the same flow — resolving
@@ -2370,10 +2370,17 @@ function formatFaultType(row: Record<string, unknown>): string {
 // just legible plain text the LogItem renderer can show as-is.
 
 /** Format the metric envelope returned by ``/api/v1/metric/{id}`` into
- *  a multi-line review card. Echoes the Python ``review_panel`` shape
- *  (header + key fields + verification hint) but stays in plain text
- *  so it slots into the existing LogItem flow. */
-function formatReviewCard(
+ *  a multi-line review card. Plain text so it slots into the existing
+ *  LogItem flow. Field semantics are anchored to
+ *  ``persistence/task_store.py::get_metric``:
+ *  - ``status`` is the DERIVED rollup from ``infer_status()``
+ *    (success/failed/in_progress/pending/null), NOT the raw task_state;
+ *  - ``duration_ms`` is the task-level wall clock computed server-side
+ *    (``summary.total_duration_ms`` is only the node-span sum and can
+ *    be 0 even when the task ran), so prefer the top-level field;
+ *  - ``error`` merges failure_reason + error and is the line users
+ *    actually need when a drill went sideways. */
+export function formatReviewCard(
   taskId: string,
   data: Record<string, unknown>,
 ): string {
@@ -2385,7 +2392,14 @@ function formatReviewCard(
     "";
   const createdShort = created.replace("T", " ").slice(0, 19);
   const summary = (data["summary"] as Record<string, unknown>) || {};
-  const durationMs = (summary["total_duration_ms"] as number) || 0;
+  const durationMs =
+    (data["duration_ms"] as number) ||
+    (summary["total_duration_ms"] as number) ||
+    0;
+  const tokenIn = (summary["total_token_input"] as number) || 0;
+  const tokenOut = (summary["total_token_output"] as number) || 0;
+  const llmCalls = (summary["total_llm_calls"] as number) || 0;
+  const toolCalls = (summary["total_tool_calls"] as number) || 0;
   const blade = (data["blade_uid"] as string) || "";
   const lines = [
     t("review.head", { id: taskId }),
@@ -2397,13 +2411,23 @@ function formatReviewCard(
   if (durationMs > 0) {
     lines.push(`  ${t("review.duration_label")}: ${formatMs(durationMs)}`);
   }
+  if (tokenIn > 0 || tokenOut > 0 || llmCalls > 0 || toolCalls > 0) {
+    lines.push(`  ${t("review.tokens_label")}: ${tokenIn}↓ ${tokenOut}↑ · LLM ×${llmCalls} · Tool ×${toolCalls}`);
+  }
+  // LLM model frozen at task finalize (at-run snapshot, not live config).
+  // Empty for tasks archived before the model_name column existed — render
+  // only when present, same discipline as blade_uid above.
+  const modelName = (data["model_name"] as string) || "";
+  if (modelName) {
+    lines.push(`  ${t("review.model_label")}: ${modelName}`);
+  }
   if (createdShort) {
     lines.push(`  ${t("review.created_label")}: ${createdShort}`);
   }
-  const result = data["result"];
-  if (typeof result === "string" && result) {
+  const error = (data["error"] as string) || "";
+  if (error) {
     lines.push("");
-    lines.push(`  ${result.split("\n")[0]}`);
+    lines.push(`  ${t("review.error_label")}: ${truncate(error, 200)}`);
   }
   return lines.join("\n");
 }
@@ -2776,6 +2800,10 @@ function stateGlyph(state: string): string {
     case "injected":
     case "recovered":
     case "completed":
+    // ``infer_status()`` derives these rollup values for the metric
+    // envelope's ``status`` field — /review passes the DERIVED value,
+    // so it must map here too or every successful task renders "·".
+    case "success":
       return "✓";
     case "failed":
     case "rolled_back":

@@ -2480,3 +2480,33 @@ describe("reducer / COMPACT_MANUAL lifecycle", () => {
     expect(initialAppState.currentManualCompact).toBeNull();
   });
 });
+
+describe("NODE_MESSAGE commit shape", () => {
+  // Progress readouts commit straight to history as tagged LogItems.
+  // LogMessage gives every readout the standard one-row spacer, so
+  // the reducer carries no block-boundary flag — spacing is a pure
+  // render concern.
+
+  it("commits a tagged log with trailing newlines trimmed", () => {
+    const s = fold([
+      { type: "NODE_MESSAGE", content: "probing…\n\n", node: "safety_check" },
+    ]);
+    expect(s.history).toHaveLength(1);
+    expect(s.history[0]).toMatchObject({
+      kind: "log",
+      tag: "safety_check",
+      text: "probing…",
+    });
+  });
+
+  it("consecutive readouts commit as independent history items", () => {
+    const s = fold([
+      { type: "NODE_MESSAGE", content: "a\n\n", node: "baseline" },
+      { type: "NODE_MESSAGE", content: "b\n\n", node: "baseline" },
+    ]);
+    expect(s.history).toHaveLength(2);
+    expect(s.history.every((i) => i.kind === "log" && i.tag === "baseline")).toBe(
+      true,
+    );
+  });
+});

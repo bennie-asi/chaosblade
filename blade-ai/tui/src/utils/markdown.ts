@@ -26,7 +26,7 @@
 
 import { Marked } from "marked";
 import { markedTerminal } from "marked-terminal";
-import { reflowWideTables } from "./tableReflow.js";
+import { reflowWideTables, visualLen } from "./tableReflow.js";
 
 const MAX_CACHE = 4;
 const _cache = new Map<number, Marked>();
@@ -77,8 +77,36 @@ export function renderMarkdown(text: string, width = 80): string {
     // those to a vertical record list before parsing (no-op when the
     // table fits).
     const prepared = reflowWideTables(text, width);
-    const result = getMarked(width).parse(prepared, { async: false });
+    let result = getMarked(width).parse(prepared, { async: false });
     if (typeof result !== "string") return text;
+    // Post-hoc shred guard: ``naturalWidth`` inside tableReflow is a
+    // heuristic estimate of marked-terminal's actual box width (per-
+    // column padding model). When the estimate undershoots the real
+    // rendered width — observed 283 estimated vs 289 actual on a real
+    // drill summary table — a terminal width inside the gap window
+    // passes the table through unconverted and the 6-char overflow
+    // hard-wraps every border line into misaligned fragments. Detect
+    // any over-long rendered line that carries box-drawing chars
+    // (i.e. an actual table border, not a long code line) and fall
+    // back to converting ALL tables to record form: slightly
+    // conservative, never shredded. Measure with ``visualLen`` —
+    // ``line.length`` would miss CJK-heavy tables whose glyphs take
+    // 2 cells but count as 1 JS char.
+    const rendered = result.replace(/\x1b\[[0-9;]*m/g, "");
+    let shredded = false;
+    for (const line of rendered.split("\n")) {
+      if (visualLen(line) > width && /[─│┌┐└┘├┤┬┴┼]/.test(line)) {
+        shredded = true;
+        break;
+      }
+    }
+    if (shredded) {
+      const forced = reflowWideTables(text, 0);
+      if (forced !== text) {
+        const retry = getMarked(width).parse(forced, { async: false });
+        if (typeof retry === "string") result = retry;
+      }
+    }
     // marked-terminal often appends a trailing newline; trim so our
     // Ink <Box marginTop> handles spacing instead.
     return result.replace(/\n+$/, "");

@@ -1223,7 +1223,15 @@ export function reducer(state: AppState, action: Action): AppState {
         ...s,
         history: [
           ...s.history,
-          { kind: "log", id, level: "info" as const, text: trimmed },
+          {
+            kind: "log",
+            id,
+            level: "info" as const,
+            text: trimmed,
+            // Source node becomes the readout tag (``safety_check · …``);
+            // empty for the rare events that lack one.
+            tag: action.node || undefined,
+          },
         ],
         nextItemId: counter,
       };

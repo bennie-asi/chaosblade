@@ -28,8 +28,9 @@
  *  heuristic underestimates tables with Chinese headers and leaves
  *  them unconverted. Coverage is the common East-Asian ranges;
  *  anything exotic falls back to 1 cell, which only makes the
- *  threshold slightly optimistic. */
-function visualLen(s: string): number {
+ *  threshold slightly optimistic. Exported so the post-render
+ *  shred guard in markdown.ts measures lines the same way. */
+export function visualLen(s: string): number {
   let n = 0;
   for (const ch of s) {
     const code = ch.codePointAt(0) ?? 0;

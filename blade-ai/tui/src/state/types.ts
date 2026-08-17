@@ -220,14 +220,21 @@ export interface ConfirmPromptItem {
   payload?: Record<string, unknown>;
 }
 
-/** Pre-formatted log message printed by slash commands. */
+/** Pre-formatted log message printed by slash commands, or a
+ *  programmatic progress line from a graph node (``node_message``). */
 export interface LogItem {
   kind: "log";
   id: string;
   /** Severity for color picking. ``info`` is the default. */
   level: "info" | "warn" | "ok";
-  /** Markdown-light text — rendered by SystemMessage. Multi-line allowed. */
+  /** Markdown-light text — rendered by LogMessage. Multi-line allowed. */
   text: string;
+  /** Source node name for ``node_message`` progress lines (e.g.
+   *  ``safety_check``). Not displayed — users don't care about graph
+   *  internals — but its presence marks the item as a progress
+   *  readout, which LogMessage renders as a cool reticle line.
+   *  Absent for slash-command output, which stays leaderless. */
+  tag?: string;
 }
 
 export interface SystemItem {

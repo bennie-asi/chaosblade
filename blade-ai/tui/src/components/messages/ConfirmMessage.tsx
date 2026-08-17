@@ -704,6 +704,16 @@ const IntentConfirmCard: React.FC<{
     ? names.map(asString).filter(Boolean).join(", ")
     : "";
 
+  // Duration contract: every reviewed spec carries a positive
+  // duration_seconds (user-stated or system recommended). Rendered
+  // ALWAYS so the operator sees the effective bound before approving —
+  // auto-recovery depends on it.
+  const durationRaw = fi["duration_seconds"];
+  const durationStr =
+    typeof durationRaw === "number" && Number.isFinite(durationRaw) && durationRaw > 0
+      ? `${durationRaw}s`
+      : "";
+
   const risk = computeRiskInfo(fi);
 
   const intentReasoning = asString(payload?.["intent_reasoning"]);
@@ -714,7 +724,13 @@ const IntentConfirmCard: React.FC<{
       : 0;
   const showReasoning =
     intentReasoning.length > 0 && confidence < LOW_CONFIDENCE_THRESHOLD;
-  const hasAuditTrail = showReasoning || clarificationRound > 0;
+  // The clarification-round row is ALWAYS rendered (0 included) per the
+  // constant-render rule for confirm-card fields: "how many rounds did
+  // the user need to revise the proposal" is a question the card must
+  // answer explicitly — hiding the row at 0 made "no revision needed"
+  // indistinguishable from "the metric doesn't exist". Gating on > 0
+  // also silently dropped the whole audit-trail box for clean first-pass
+  // intents.
 
   return (
     <ConfirmFrameSoft
@@ -736,6 +752,11 @@ const IntentConfirmCard: React.FC<{
             const fNs = asString(f["namespace"]);
             const fNames = asArray(f["names"]);
             const fNamesStr = fNames ? fNames.map(asString).filter(Boolean).join(", ") : "*";
+            const fDurationRaw = f["duration_seconds"];
+            const fDurationStr =
+              typeof fDurationRaw === "number" && Number.isFinite(fDurationRaw) && fDurationRaw > 0
+                ? `${fDurationRaw}s`
+                : "";
             return (
               <Box key={i}>
                 <Box minWidth={FIELD_LABEL_WIDTH} paddingRight={1}>
@@ -746,7 +767,7 @@ const IntentConfirmCard: React.FC<{
                     {`${fScope}-${fTarget}-${fAction}`}
                   </Text>
                   <Text color={Theme.gray[500]}>
-                    {`  @ ${fNs}/${fNamesStr}`}
+                    {`  @ ${fNs}/${fNamesStr}${fDurationStr ? ` (${fDurationStr})` : ""}`}
                   </Text>
                 </Box>
               </Box>
@@ -757,20 +778,29 @@ const IntentConfirmCard: React.FC<{
         /* Single fault: existing structured fields */
         <>
           <Field label={t("confirm.field.fault_type")} value={asString(fi["fault_type"])} />
-          {/* Skill use case the user chose during clarification — optional
+          {/* Case file the user settled during clarification — optional
            *  upstream (empty when no case was chosen). Rendered ALWAYS so
            *  the row's presence doesn't imply anything about selection:
            *  "无" / "None" is the explicit answer to "did we match a
-           *  case?" — hiding the row would make that question unaskable. */}
+           *  case?" — hiding the row would make that question unaskable.
+           *  Value is the path relative to the skill directory — exactly
+           *  what ``read_skill_resource`` consumes downstream. */}
           <Field
-            label={t("confirm.field.use_case_name")}
-            value={asString(fi["use_case_name"]) || t("confirm.none")}
-            valueColor={asString(fi["use_case_name"]) ? Theme.text.primary : Theme.gray[500]}
+            label={t("confirm.field.case_resource_path")}
+            value={asString(fi["case_resource_path"]) || t("confirm.none")}
+            valueColor={asString(fi["case_resource_path"]) ? Theme.text.primary : Theme.gray[500]}
           />
           <Field label={t("confirm.field.scope")} value={asString(fi["scope"])} />
           <Field label={t("confirm.field.target")} value={asString(fi["target"])} />
           <Field label={t("confirm.field.action")} value={asString(fi["action"])} />
           <Field label={t("confirm.field.namespace")} value={asString(fi["namespace"])} />
+          {/* Always rendered — mirrors the backend summary contract: the
+           *  operator must see the effective duration before approving. */}
+          <Field
+            label={t("confirm.field.duration")}
+            value={durationStr || t("confirm.none")}
+            valueColor={durationStr ? Theme.text.primary : Theme.gray[500]}
+          />
           <Field label={t("confirm.field.labels")} value={labelsStr} />
           <Field label={t("confirm.field.names")} value={namesStr} />
           <Field label={t("confirm.field.params")} value={paramsStr} />
@@ -787,25 +817,25 @@ const IntentConfirmCard: React.FC<{
           <ConfidenceRow confidence={confidence} faultIntent={fi} />
         </Box>
       )}
-      {hasAuditTrail && (
-        <Box marginTop={1} flexDirection="column">
-          {showReasoning && (
-            <Field
-              label={t("confirm.field.intent_reasoning")}
-              value={intentReasoning}
-              wrap
-            />
-          )}
-          {clarificationRound > 0 && (
-            <Field
-              label={t("confirm.field.clarification_round")}
-              value={t("confirm.clarification.label", { n: clarificationRound })}
-              labelColor={Theme.status.warn}
-              valueColor={Theme.status.warn}
-            />
-          )}
-        </Box>
-      )}
+      <Box marginTop={1} flexDirection="column">
+        {showReasoning && (
+          <Field
+            label={t("confirm.field.intent_reasoning")}
+            value={intentReasoning}
+            wrap
+          />
+        )}
+        <Field
+          label={t("confirm.field.clarification_round")}
+          value={
+            clarificationRound > 0
+              ? t("confirm.clarification.label", { n: clarificationRound })
+              : t("confirm.clarification.zero")
+          }
+          labelColor={clarificationRound > 0 ? Theme.status.warn : undefined}
+          valueColor={clarificationRound > 0 ? Theme.status.warn : Theme.gray[500]}
+        />
+      </Box>
     </ConfirmFrameSoft>
   );
 };
@@ -900,6 +930,15 @@ const ExecutionConfirmCard: React.FC<{ payload: Payload; taskId?: string }> = ({
         .filter((s) => !s.endsWith("="))
         .join(", ")
     : "";
+
+  // Duration contract: params no longer carry ``timeout`` — the
+  // effective bound travels as a top-level payload field and must be
+  // visible at this last gate before execution.
+  const execDurationRaw = payload?.["duration_seconds"];
+  const execDurationStr =
+    typeof execDurationRaw === "number" && Number.isFinite(execDurationRaw) && execDurationRaw > 0
+      ? `${execDurationRaw}s`
+      : "";
 
   // P0-1: target_health_report — DiskPressure / Evicted / etc.
   // Schema (HealthReport.to_dict in target_health.py):
@@ -1099,6 +1138,14 @@ const ExecutionConfirmCard: React.FC<{ payload: Payload; taskId?: string }> = ({
           label={t("confirm.field.params")}
           value={paramsStr || t("confirm.params.none")}
           wrap
+        />
+        {/* Always rendered — the operator must see the effective fault
+         *  bound before approving execution (auto-recovery depends on
+         *  it). Old servers without the field fall back to 无/None. */}
+        <Field
+          label={t("confirm.field.duration")}
+          value={execDurationStr || t("confirm.none")}
+          valueColor={execDurationStr ? Theme.text.primary : Theme.gray[500]}
         />
       </Box>
 
@@ -1371,7 +1418,22 @@ const PlanChangeCard: React.FC<{ payload: Payload; taskId?: string }> = ({
     const scope = asString(ft["scope"]);
     const target = asString(ft["blade_target"]);
     const action = asString(ft["blade_action"]);
-    return <Text>{`${scope}-${target}-${action}`}</Text>;
+    // Duration contract: the bound is part of the reviewed contract, so a
+    // material change proposal must surface it (embedded fault_spec carries
+    // duration_seconds). Stays dim when absent so unchanged contracts
+    // don't fake a difference.
+    const innerSpec = asRecord(ft["fault_spec"]);
+    const durRaw = innerSpec?.["duration_seconds"];
+    const durStr =
+      typeof durRaw === "number" && Number.isFinite(durRaw) && durRaw > 0
+        ? `  ·  ${durRaw}s`
+        : "";
+    return (
+      <Text>
+        {`${scope}-${target}-${action}`}
+        {durStr && <Text color={Theme.gray[500]}>{durStr}</Text>}
+      </Text>
+    );
   };
 
   return (
@@ -1596,12 +1658,17 @@ const ConfirmContextMessageInternal: React.FC<{
   if (!item.autoApproved) return body;
   // Auto-approved: same card body, followed by a read-only badge BELOW it so it
   // reads as "already approved by auto mode" — no interactive prompt follows.
+  // The badge sits on the shared left rail (paddingLeft 2, same as the
+  // card frame, the ⏺ / ▸ / ◎ leaders and the manual ╰─▶ ARMED chip)
+  // with the same one-row spacer the resolved chip gets.
   return (
     <Box flexDirection="column">
       {body}
-      <Text color={Theme.status.ok} bold>
-        {`${Icons.success} ${item.node ? t("confirm.auto_approved_node", { node: item.node }) : t("confirm.auto_approved")}`}
-      </Text>
+      <Box paddingLeft={2} marginTop={1}>
+        <Text color={Theme.status.ok} bold>
+          {`${Icons.success} ${item.node ? t("confirm.auto_approved_node", { node: item.node }) : t("confirm.auto_approved")}`}
+        </Text>
+      </Box>
     </Box>
   );
 };

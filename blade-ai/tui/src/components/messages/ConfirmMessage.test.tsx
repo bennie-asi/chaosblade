@@ -16,6 +16,7 @@ import {
   ConfirmPromptMessage,
 } from "./ConfirmMessage.js";
 import { StoreProvider } from "../../state/store.js";
+import { Icons } from "../../theme/icons.js";
 import type {
   ConfirmContextItem,
   ConfirmPromptItem,
@@ -88,9 +89,10 @@ describe("ConfirmContextMessage", () => {
       expect(lastFrame() ?? "").toContain("cpu_percent=80");
     });
 
-    it("always renders the Use Case row with the chosen case verbatim", () => {
-      // use_case_name is optional upstream, but when the user chose a
-      // skill use case during clarification the card must show it.
+    it("always renders the Case file row with the chosen path verbatim", () => {
+      // case_resource_path is optional upstream, but when a skill case
+      // was settled during clarification the card must show its path
+      // (relative to the skill directory).
       const withCase = baseContext({
         node: "intent_confirm",
         payload: {
@@ -100,23 +102,114 @@ describe("ConfirmContextMessage", () => {
             scope: "node",
             target: "cpu",
             action: "fullload",
-            use_case_name: "进程CPU满载 导致 Host_CPU使用率过高",
+            case_resource_path:
+              "references/catalogue/Host_CPU使用率过高/Host_CPU使用率过高_进程CPU满载.md",
           },
           intent_confidence: 0.9,
         },
       });
       const { lastFrame } = render(<ConfirmContextMessage item={withCase} />);
-      expect(lastFrame() ?? "").toContain("进程CPU满载 导致 Host_CPU使用率过高");
+      // The value wraps at terminal width and the wrapped fragments sit
+      // inside box borders — compare with whitespace and box-drawing
+      // chars stripped so the assertion is width-agnostic.
+      const path =
+        "references/catalogue/Host_CPU使用率过高/Host_CPU使用率过高_进程CPU满载.md";
+      expect((lastFrame() ?? "").replace(/[\s│]+/g, "")).toContain(path);
     });
 
-    it("never hides the Use Case row: explicit 无/None when nothing chosen", () => {
-      // The base fixture carries no use_case_name — the row must still
-      // render with confirm.none as its value instead of disappearing.
+    it("never hides the Case file row: explicit 无/None when nothing chosen", () => {
+      // The base fixture carries no case_resource_path — the row must
+      // still render with confirm.none as its value instead of disappearing.
       const { lastFrame } = render(<ConfirmContextMessage item={item} />);
       const frame = lastFrame() ?? "";
       // Locale-agnostic label check (zh dict is active by default).
-      expect(frame.includes("用例") || frame.includes("Use case")).toBe(true);
+      expect(frame.includes("用例文件") || frame.includes("Case file")).toBe(true);
       expect(frame.includes("无") || frame.includes("None")).toBe(true);
+    });
+
+    it("always renders the clarification row with zero-state text when round is 0", () => {
+      // Constant-render rule: "how many turns did the user spend clarifying
+      // the intent" must be answered explicitly. The base fixture has no
+      // clarification_round (defaults to 0) — the row must NOT disappear.
+      const { lastFrame } = render(<ConfirmContextMessage item={item} />);
+      const frame = lastFrame() ?? "";
+      expect(
+        frame.includes("澄清轮次") || frame.includes("Clarification"),
+      ).toBe(true);
+      expect(
+        frame.includes("无需澄清") ||
+          frame.includes("no clarification needed"),
+      ).toBe(true);
+    });
+
+    it("renders the counted clarification rounds in warn color when > 0", () => {
+      const withRounds = baseContext({
+        node: "intent_confirm",
+        payload: {
+          type: "intent_confirm",
+          fault_intent: {
+            fault_type: "node-cpu-fullload",
+            scope: "node",
+            target: "cpu",
+            action: "fullload",
+          },
+          intent_confidence: 0.9,
+          clarification_round: 2,
+        },
+      });
+      const { lastFrame } = render(<ConfirmContextMessage item={withRounds} />);
+      const frame = lastFrame() ?? "";
+      expect(
+        frame.includes("已澄清 2 轮") || frame.includes("2 clarification round"),
+      ).toBe(true);
+    });
+
+    it("renders the reviewed duration in seconds", () => {
+      // Duration contract: the operator must see the effective bound
+      // before approving — duration_seconds travels in fault_intent.
+      const withDuration = baseContext({
+        node: "intent_confirm",
+        payload: {
+          type: "intent_confirm",
+          fault_intent: {
+            fault_type: "node-cpu-fullload",
+            scope: "node",
+            target: "cpu",
+            action: "fullload",
+            duration_seconds: 600,
+          },
+          intent_confidence: 0.9,
+        },
+      });
+      const { lastFrame } = render(<ConfirmContextMessage item={withDuration} />);
+      expect(lastFrame() ?? "").toContain("600s");
+    });
+
+    it("never hides the Duration row: explicit 无/None when missing", () => {
+      // The base fixture carries no duration_seconds — the row must
+      // still render (matches the always-render field convention).
+      const { lastFrame } = render(<ConfirmContextMessage item={item} />);
+      const frame = lastFrame() ?? "";
+      expect(frame.includes("持续时间") || frame.includes("Duration")).toBe(true);
+    });
+
+    it("renders batch rows with per-fault duration", () => {
+      const batchItem = baseContext({
+        node: "intent_confirm",
+        payload: {
+          type: "intent_confirm",
+          fault_intent: {},
+          batch_faults: [
+            { scope: "pod", target: "cpu", action: "fullload", namespace: "prod", names: ["api-0"], duration_seconds: 300 },
+            { scope: "node", target: "disk", action: "fill", names: ["node-a"], duration_seconds: 900 },
+          ],
+          intent_confidence: 0.9,
+        },
+      });
+      const { lastFrame } = render(<ConfirmContextMessage item={batchItem} />);
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("(300s)");
+      expect(frame).toContain("(900s)");
     });
 
     it("formats intent_confidence as a percentage", () => {
@@ -267,7 +360,10 @@ describe("ConfirmContextMessage", () => {
       expect(warningIdx).toBeLessThan(skillIdx);
     });
 
-    it("renders the Parameters section when payload carries a params dict", () => {
+    it("renders the Parameters section + Duration row from the contract payload", () => {
+      // Duration contract: params carry fault intensity only; the bound
+      // travels as the top-level ``duration_seconds`` field and renders
+      // as its own row (previously it hid inside params as timeout).
       const cr = baseContext({
         node: "confirmation_gate",
         payload: {
@@ -275,13 +371,28 @@ describe("ConfirmContextMessage", () => {
           target: { namespace: "cms-demo", names: ["node-1"] },
           plan_summary: "blade create",
           safety_status: "safe",
-          params: { cpu_percent: 80, timeout: 600 },
+          params: { cpu_percent: 80 },
+          duration_seconds: 600,
         },
       });
       const { lastFrame } = render(<ConfirmContextMessage item={cr} />);
       const frame = lastFrame() ?? "";
       expect(frame).toContain("cpu_percent=80");
-      expect(frame).toContain("timeout=600");
+      expect(frame).toContain("600s");
+      expect(frame).not.toContain("timeout=600");
+    });
+
+    it("never hides the L2 Duration row: 无/None when server omits it", () => {
+      const cr = baseContext({
+        node: "confirmation_gate",
+        payload: {
+          skill_name: "node-cpu-fullload",
+          safety_status: "safe",
+        },
+      });
+      const { lastFrame } = render(<ConfirmContextMessage item={cr} />);
+      const frame = lastFrame() ?? "";
+      expect(frame.includes("持续时间") || frame.includes("Duration")).toBe(true);
     });
 
     it("ALWAYS renders Parameters + Target health rows (even when empty)", () => {
@@ -671,6 +782,35 @@ describe("ConfirmContextMessage", () => {
     });
   });
 
+  describe("plan_change_confirm", () => {
+    it("renders original/proposed faults with their contract duration", () => {
+      // Duration is part of the reviewed contract: a material-change
+      // proposal must show the bound next to each fault triple so the
+      // operator can spot a duration change before approving.
+      const item = baseContext({
+        node: "plan_change_confirm",
+        payload: {
+          type: "plan_change",
+          reason: "original fault not viable",
+          original: {
+            scope: "pod", blade_target: "network", blade_action: "delay",
+            fault_spec: { duration_seconds: 60 },
+          },
+          proposed: {
+            scope: "pod", blade_target: "network", blade_action: "drop",
+            fault_spec: { duration_seconds: 300 },
+          },
+        },
+      });
+      const { lastFrame } = render(<ConfirmContextMessage item={item} />);
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("pod-network-delay");
+      expect(frame).toContain("pod-network-drop");
+      expect(frame).toContain("60s");
+      expect(frame).toContain("300s");
+    });
+  });
+
   describe("generic fallback", () => {
     it("renders raw content when payload is missing", () => {
       const item = baseContext({
@@ -746,5 +886,32 @@ describe("ConfirmPromptMessage", () => {
     const frame = lastFrame() ?? "";
     expect(frame).toContain("ABORTED");
     expect(frame).not.toContain("开始注入");
+  });
+});
+
+describe("ConfirmContextMessage / auto-approved badge rail", () => {
+  // The ✓ auto-approved badge shares the conversation's left rail:
+  // same 2-column indent as the card frame and the ⏺ / ▸ / ◎ leaders,
+  // with a one-row spacer above (parity with the manual ╰─▶ ARMED
+  // chip). It used to render at column 0, glued to the card's bottom
+  // border — off-rail and stuck.
+
+  it("badge sits on the shared left rail (indent 2) with a spacer row", () => {
+    const item = baseContext({
+      node: "confirmation_gate",
+      autoApproved: true,
+    });
+    const { lastFrame } = render(<ConfirmContextMessage item={item} />);
+    const lines = (lastFrame() ?? "").split("\n");
+    const idx = lines.findIndex(
+      (l) => l.includes("自动批准") || l.includes("Auto-approved"),
+    );
+    expect(idx).toBeGreaterThan(0);
+    // One blank row separates the badge from the card above.
+    expect(lines[idx - 1]?.trim()).toBe("");
+    // Exactly two leading spaces before the ✓ glyph — the rail, not
+    // the old column-0 glue.
+    expect(lines[idx]?.startsWith(`  ${Icons.success}`)).toBe(true);
+    expect(lines[idx]?.startsWith(`    ${Icons.success}`)).toBe(false);
   });
 });

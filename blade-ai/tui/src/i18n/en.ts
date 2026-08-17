@@ -224,6 +224,9 @@ export const en: Dict = {
   "review.phase_label": "phase",
   "review.uid_label": "blade uid",
   "review.duration_label": "duration",
+  "review.tokens_label": "usage",
+  "review.model_label": "model",
+  "review.error_label": "error",
   "review.created_label": "created",
 
   // -- /experiments ---------------------------------------------------
@@ -508,15 +511,17 @@ export const en: Dict = {
 
   // -- ConfirmMessage field labels ----------------------------------
   "confirm.field.fault_type": "Fault type",
-  // Skill use case chosen during intent clarification (use_case_name) —
-  // optional upstream; the row is ALWAYS rendered with confirm.none as
-  // the explicit "nothing was chosen" value instead of hiding the row.
-  "confirm.field.use_case_name": "Use case",
+  // Skill case file settled during intent clarification
+  // (case_resource_path, relative to the skill directory) — optional
+  // upstream; the row is ALWAYS rendered with confirm.none as the
+  // explicit "nothing was chosen" value instead of hiding the row.
+  "confirm.field.case_resource_path": "Case file",
   "confirm.none": "None",
   "confirm.field.scope": "Scope",
   "confirm.field.target": "Target",
   "confirm.field.action": "Action",
   "confirm.field.namespace": "Namespace",
+  "confirm.field.duration": "Duration",
   "confirm.field.labels": "Labels",
   "confirm.field.names": "Names",
   "confirm.field.params": "Params",
@@ -582,6 +587,7 @@ export const en: Dict = {
   "confirm.complexity.complex": "complex (formal plan generated)",
   "confirm.attempt.label": "attempt {n}",
   "confirm.clarification.label": "{n} clarification round(s)",
+  "confirm.clarification.zero": "no clarification needed",
   "confirm.plan_saved": "saved ({path}) · /show plan to view",
   "confirm.field.conflicts": "Conflicts",
   "confirm.conflicts.hint": "/show experiments to inspect",

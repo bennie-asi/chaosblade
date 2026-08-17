@@ -210,6 +210,9 @@ export const zh: Dict = {
   "review.phase_label": "阶段",
   "review.uid_label": "blade uid",
   "review.duration_label": "耗时",
+  "review.tokens_label": "消耗",
+  "review.model_label": "模型",
+  "review.error_label": "失败原因",
   "review.created_label": "创建时间",
 
   // -- /experiments ---------------------------------------------------
@@ -491,14 +494,16 @@ export const zh: Dict = {
 
   // -- ConfirmMessage 字段标签 --------------------------------------
   "confirm.field.fault_type": "故障类型",
-  // intent 澄清中用户选择的技能用例（use_case_name）——上游是可选字段，
-  // 卡片恒显示此行：未选中时值为 confirm.none（"无"），不隐藏整行。
-  "confirm.field.use_case_name": "用例",
+  // intent 澄清中定下的技能用例文件（case_resource_path，相对技能目录）
+  // ——上游是可选字段，卡片恒显示此行：未选中时值为 confirm.none（"无"），
+  // 不隐藏整行。
+  "confirm.field.case_resource_path": "用例文件",
   "confirm.none": "无",
   "confirm.field.scope": "范围",
   "confirm.field.target": "目标",
   "confirm.field.action": "动作",
   "confirm.field.namespace": "命名空间",
+  "confirm.field.duration": "持续时间",
   "confirm.field.labels": "标签选择器",
   "confirm.field.names": "目标资源",
   "confirm.field.params": "参数",
@@ -562,6 +567,7 @@ export const zh: Dict = {
   "confirm.complexity.complex": "复杂任务（已生成正式计划）",
   "confirm.attempt.label": "第 {n} 次尝试",
   "confirm.clarification.label": "已澄清 {n} 轮",
+  "confirm.clarification.zero": "无需澄清",
   "confirm.plan_saved": "已保存（{path}）· /show plan 查看",
   "confirm.field.conflicts": "冲突实验",
   "confirm.conflicts.hint": "/show experiments 查看详情",
