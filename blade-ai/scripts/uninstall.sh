@@ -13,9 +13,9 @@
 #     (config.json / memory / logs / skills / vendor)
 #
 # Usage:
-#   bash uninstall.sh                       # remove ALL installed versions + config
+#   bash uninstall.sh                       # remove ALL versions, KEEP ~/.blade-ai/
 #   bash uninstall.sh --version 0.1.0       # remove only blade-ai-v0.1.0
-#   bash uninstall.sh --keep-config         # keep ~/.blade-ai/{config.json,memory,...}
+#   bash uninstall.sh --purge               # also delete ~/.blade-ai/ (irreversible)
 #   bash uninstall.sh --dry-run             # show plan, do nothing
 #   bash uninstall.sh --force               # skip y/N prompt
 #
@@ -35,45 +35,6 @@
 #     ``# blade-ai`` marker that install.sh added — no false positives.
 #   * Each modified rc file gets a sibling ``.blade-ai-uninstall.bak``
 #     so a misclick is recoverable.
-
-# ── Re-exec with bash if running under sh / bash-posix ───────────────────────
-#
-# Users often invoke the script as ``sh uninstall.sh`` which bypasses
-# the shebang. The script uses bash-only features (process substitution
-# ``done < <(...)``, arrays, ``[[ ]]``); under POSIX /bin/sh it dies
-# with ``syntax error near unexpected token '<'`` during the parse
-# phase — *before* this guard can execute, if the unsupported syntax
-# is at top level (not inside a function).
-#
-# Subtle case: on macOS, ``/bin/sh`` is actually bash running in POSIX
-# mode. ``$BASH_VERSION`` is still set in that mode (because it IS
-# bash), so a naive ``[ -z "${BASH_VERSION:-}" ]`` check would miss
-# this scenario — the script would keep running with bash-posix and
-# still die on ``< <(...)``. We additionally check POSIX mode flags
-# (``$POSIXLY_CORRECT`` and ``$SHELLOPTS``) and re-exec via plain
-# bash (no --posix) when either is set.
-#
-# The guard variable prevents an infinite loop if the re-exec itself
-# somehow lands back in a constrained shell.
-__blade_ai_needs_reexec() {
-    [ -z "${BASH_VERSION:-}" ] && return 0
-    [ -n "${POSIXLY_CORRECT:-}" ] && return 0
-    case ":${SHELLOPTS:-}:" in
-        *":posix:"*) return 0 ;;
-    esac
-    return 1
-}
-
-if __blade_ai_needs_reexec && [ -z "${__BLADE_AI_UNINSTALL_REEXEC:-}" ]; then
-    if command -v bash >/dev/null 2>&1; then
-        export __BLADE_AI_UNINSTALL_REEXEC=1
-        exec bash "$0" "$@"
-    else
-        echo "Error: This script requires bash. Please install bash first." >&2
-        exit 1
-    fi
-fi
-unset -f __blade_ai_needs_reexec 2>/dev/null || true
 
 # pipefail catches broken pipes; deliberately no -e (best-effort) and
 # no -u (older bash on macOS 3.2 trips on empty arrays).
@@ -103,7 +64,7 @@ SYMLINK_PATH="${SYMLINK_DIR}/blade-ai"
 VERSIONS_DIR="${BLADE_AI_HOME}/versions"
 
 VERSION=""
-KEEP_CONFIG=0
+PURGE_CONFIG=0
 FORCE=0
 DRY_RUN=0
 
@@ -112,7 +73,7 @@ print_help() {
 ${BOLD}blade-ai uninstaller${NC} — undo install.sh's footprint.
 
 Usage:
-  $0 [--version VERSION] [--keep-config] [--force] [--dry-run]
+  $0 [--version VERSION] [--purge] [--force] [--dry-run]
 
 Options:
   --version VERSION   Uninstall only this specific version (bare semver,
@@ -120,7 +81,9 @@ Options:
                       \$BLADE_AI_HOME/versions/blade-ai-vVERSION.
                       If omitted, ${BOLD}ALL${NC} installed versions are removed.
 
-  --keep-config       Keep config.json, logs/, memory/, skills/, vendor/
+  --purge             Also delete ~/.blade-ai/ (config.json, memory/, logs/,
+                      skills/, vendor/). Kept by default — drill records
+                      cannot be re-downloaded the way binaries can.
                       under \$BLADE_AI_HOME. Only removes binaries +
                       install metadata + PATH lines. Implies you may
                       reinstall later without losing your settings.
@@ -138,7 +101,7 @@ Environment overrides:
 
 Examples:
   $0                                  # remove every version + config
-  $0 --version 0.1.0 --keep-config    # remove just v0.1.0, keep config
+  $0 --version 0.1.0                  # remove just v0.1.0
   $0 --dry-run                        # preview without deleting
   $0 --force                          # CI-friendly, no prompt
 EOF
@@ -150,9 +113,16 @@ while [[ $# -gt 0 ]]; do
             if [[ -z "${2:-}" ]] || [[ "$2" == -* ]]; then
                 err "--version requires a value (e.g. 0.1.0)"
             fi
+            # The value is interpolated into a path that gets rm -rf'd, so it has
+            # to be a plain version number. Measured before this check:
+            # --version '0.6.0/../../memory' resolved out of versions/ and
+            # deleted ~/.blade-ai/memory, reporting it as a removed version.
+            if [[ ! "$2" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+                err "Invalid --version '$2' (expected a plain version like 0.1.0)"
+            fi
             VERSION="$2"; shift 2 ;;
-        --keep-config)
-            KEEP_CONFIG=1; shift ;;
+        --purge)
+            PURGE_CONFIG=1; shift ;;
         --force|-f)
             FORCE=1; shift ;;
         --dry-run)
@@ -182,7 +152,14 @@ INSTALLED_VERSIONS=()
 if [[ -d "${VERSIONS_DIR}" ]]; then
     for dir in "${VERSIONS_DIR}"/blade-ai-v*; do
         [[ -d "${dir}" ]] || continue
-        INSTALLED_VERSIONS+=("$(basename "${dir}")")
+        _name="$(basename "${dir}")"
+        # The glob also matches in-flight directories: install.sh and the
+        # blade-ai CLI both create "blade-ai-v<ver>.replaced-<pid>" while
+        # swapping a version into place, and a kill can strand one. Listing it
+        # as an installed version put junk in the confirmation prompt.
+        # Same rule as the CLI's _VERSION_DIR_RE.
+        [[ "${_name}" =~ ^blade-ai-v[0-9]+(\.[0-9]+)*$ ]] || continue
+        INSTALLED_VERSIONS+=("${_name}")
     done
 fi
 
@@ -249,7 +226,7 @@ REMOVE_ALL_VERSIONS=0
 [[ -z "${VERSION}" ]] && REMOVE_ALL_VERSIONS=1
 
 REMOVE_BLADE_AI_HOME=0
-if [[ ${REMOVE_ALL_VERSIONS} -eq 1 ]] && [[ ${KEEP_CONFIG} -eq 0 ]]; then
+if [[ ${REMOVE_ALL_VERSIONS} -eq 1 ]] && [[ ${PURGE_CONFIG} -eq 1 ]]; then
     REMOVE_BLADE_AI_HOME=1
 fi
 
@@ -307,8 +284,8 @@ fi
 # users see it before they hit Y.
 if [[ ${REMOVE_BLADE_AI_HOME} -eq 1 ]]; then
     echo -e "  Config dir: ${RED}${BOLD}${BLADE_AI_HOME}${NC} ${RED}(WILL BE REMOVED — config / memory / skills / logs all gone)${NC}"
-elif [[ ${KEEP_CONFIG} -eq 1 ]]; then
-    echo -e "  Config dir: ${BLADE_AI_HOME}  ${DIM}(KEPT — --keep-config)${NC}"
+elif [[ ${PURGE_CONFIG} -eq 0 ]]; then
+    echo -e "  Config dir: ${BLADE_AI_HOME}  ${DIM}(KEPT — use --purge to delete)${NC}"
 else
     echo -e "  Config dir: ${BLADE_AI_HOME}  ${DIM}(KEPT — only specific version requested)${NC}"
 fi
@@ -322,36 +299,13 @@ fi
 # ── Confirmation ──────────────────────────────────────────────────────────────
 if [[ ${FORCE} -eq 0 ]]; then
     echo ""
-
-    # Print the prompt explicitly via printf instead of ``read -p``.
-    # ``read -p`` writes the prompt to stderr — and on some terminal
-    # / buffering combinations users have reported the prompt never
-    # reaches the screen, leaving the script silently "hanging" while
-    # actually waiting for input. printf to stdout shows up reliably.
-    #
-    # If stdin is not a tty (e.g. invoked under a pipe / nohup / CI
-    # without --force), reading would just receive EOF immediately and
-    # we'd silently fall into the "Cancelled" branch — that's
-    # surprising. Detect that case and print an actionable hint
-    # instead.
-    if [ ! -t 0 ]; then
-        printf "Proceed with uninstall? [y/N] "
-        echo ""
-        warn "stdin is not a tty — cannot ask interactively."
-        info "Re-run with --force to skip the prompt, or run from an interactive terminal."
-        exit 1
-    fi
-
-    printf "Proceed with uninstall? [y/N] "
-    ans=""
-    read -r ans || true
+    # ``read -r`` keeps backslashes literal; -p prints prompt to stderr.
+    # We tolerate either ``y`` or ``yes`` (any case); anything else
+    # (including the default empty-Enter) cancels.
+    read -r -p "Proceed with uninstall? [y/N] " ans
     case "${ans}" in
         y|Y|yes|YES|Yes) ;;
-        *)
-            echo ""
-            info "Cancelled."
-            exit 0
-            ;;
+        *) info "Cancelled."; exit 0 ;;
     esac
 fi
 
@@ -477,7 +431,7 @@ if [[ ${REMOVE_BLADE_AI_HOME} -eq 1 ]]; then
         fi
     fi
 elif [[ ${REMOVE_ALL_VERSIONS} -eq 1 ]]; then
-    # All versions removed but --keep-config asked us to leave the
+    # All versions removed but config was not purged, so leave the
     # config in place. At minimum drop the install metadata so a
     # future install starts from a clean state.
     for f in install-manifest.json receipt.json; do

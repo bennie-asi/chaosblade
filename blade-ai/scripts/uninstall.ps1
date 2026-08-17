@@ -11,7 +11,7 @@
 # Usage:
 #   .\uninstall.ps1                        # remove everything (binary + config + PATH)
 #   .\uninstall.ps1 -Version 0.1.0         # only proceed if manifest matches v0.1.0
-#   .\uninstall.ps1 -KeepConfig            # keep ~\.blade-ai\ config/memory/skills
+#   .\uninstall.ps1 -Purge                 # ALSO delete ~\.blade-ai\ (irreversible)
 #   .\uninstall.ps1 -DryRun                # print plan, no deletion
 #   .\uninstall.ps1 -Force                 # skip y/N confirmation
 #   irm https://chaosblade.io/uninstall-agent.ps1 | iex
@@ -34,7 +34,7 @@
 [CmdletBinding()]
 param(
     [string]$Version = "",
-    [switch]$KeepConfig,
+    [switch]$Purge,
     [switch]$Force,
     [switch]$DryRun,
     [switch]$Help
@@ -57,7 +57,7 @@ if ($Help) {
 blade-ai uninstaller — undo install.ps1's footprint.
 
 Usage:
-  .\uninstall.ps1 [-Version VERSION] [-KeepConfig] [-Force] [-DryRun]
+  .\uninstall.ps1 [-Version VERSION] [-Purge] [-Force] [-DryRun]
 
 Parameters:
   -Version VERSION  Safety check: only proceed if the install manifest
@@ -65,7 +65,8 @@ Parameters:
                     Mismatch aborts cleanly. Omit to uninstall whatever
                     is currently installed.
 
-  -KeepConfig       Keep config.json, logs/, memory/, skills/, vendor/
+  -Purge            Also delete ~\.blade-ai\ (config.json, memory\, logs\,
+                    skills\, vendor\). Kept by default.
                     under `$env:USERPROFILE\.blade-ai`. Only removes
                     the binary directory + install metadata + PATH
                     entry. Lets you reinstall later without losing
@@ -80,7 +81,7 @@ Parameters:
 
 Examples:
   .\uninstall.ps1                                # full uninstall
-  .\uninstall.ps1 -KeepConfig                    # keep config dir
+  .\uninstall.ps1 -Purge                         # also delete config dir
   .\uninstall.ps1 -Version 0.1.0 -DryRun         # safety check + preview
   .\uninstall.ps1 -Force                         # CI-friendly, no prompt
 
@@ -151,34 +152,29 @@ if ($Version) {
 $UserPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
 if ($null -eq $UserPath) { $UserPath = "" }
 
-# install.ps1 adds the ``blade-ai`` SUBFOLDER of the install dir to PATH
-# (the zip extracts to $InstallDir\blade-ai\). An older layout added
-# $InstallDir itself — match both so upgrades from either layout clean
-# up completely.
-$PathTargets = @($InstallDir, (Join-Path $InstallDir "blade-ai")) |
-    Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
-
 $PathContainsInstallDir = $false
-$MatchedPathTarget = $null
-if ($UserPath) {
-    # Split by ';' and compare each entry exactly to the targets
+if ($InstallDir -and $UserPath) {
+    # Split by ';' and compare each entry exactly to InstallDir
     # (case-insensitive on Windows). Avoids partial matches like
     # "C:\Programs\blade-ai-old" colliding with "C:\Programs\blade-ai".
-    foreach ($entry in ($UserPath -split ';' | Where-Object { $_ -ne "" })) {
+    $PathEntries = $UserPath -split ';' | Where-Object { $_ -ne "" }
+    foreach ($entry in $PathEntries) {
         $trimmed = $entry.TrimEnd('\')
-        foreach ($t in $PathTargets) {
-            if ([string]::Equals($trimmed, $t, [StringComparison]::OrdinalIgnoreCase)) {
-                $PathContainsInstallDir = $true
-                $MatchedPathTarget = $entry
-                break
-            }
+        $target = $InstallDir.TrimEnd('\')
+        if ([string]::Equals($trimmed, $target, [StringComparison]::OrdinalIgnoreCase)) {
+            $PathContainsInstallDir = $true
+            break
         }
-        if ($PathContainsInstallDir) { break }
     }
 }
 
 # ── Decide scope ───────────────────────────────────────────────────────────────
-$RemoveConfigDir = (-not $KeepConfig)
+# Deleting ~\.blade-ai\ must be asked for, never assumed: it holds config,
+# task records and postmortems, and unlike the binaries none of that can be
+# downloaded again. This mirrors uninstall.sh and the blade-ai CLI, which were
+# reversed for the same reason — a default that destroys data catches everyone
+# who does not know a flag exists.
+$RemoveConfigDir = [bool]$Purge
 
 # ── Plan summary ───────────────────────────────────────────────────────────────
 Write-Host ""
@@ -202,7 +198,7 @@ if (Test-Path $InstallDir) {
 
 # PATH line
 if ($PathContainsInstallDir) {
-    Write-Host "  User PATH:   will remove '$MatchedPathTarget' entry (backup at $ReceiptDir\path-backup.txt)" -ForegroundColor White
+    Write-Host "  User PATH:   will remove '$InstallDir' entry (backup at $ReceiptDir\path-backup.txt)" -ForegroundColor White
 } else {
     Write-Host "  User PATH:   no entry to remove" -ForegroundColor DarkGray
 }
@@ -226,7 +222,7 @@ if ($RemoveConfigDir) {
     }
 } else {
     Write-Host "  Config dir:  $ReceiptDir " -NoNewline -ForegroundColor White
-    Write-Host "(KEPT — -KeepConfig)" -ForegroundColor DarkGray
+    Write-Host "(kept — use -Purge to delete)" -ForegroundColor DarkGray
 }
 
 if ($DryRun) {
@@ -294,17 +290,13 @@ if (Test-Path $InstallDir) {
 if ($PathContainsInstallDir) {
     try {
         $newEntries = @()
+        $target = $InstallDir.TrimEnd('\')
         foreach ($entry in ($UserPath -split ';')) {
             if ([string]::IsNullOrEmpty($entry)) { continue }
             $trimmed = $entry.TrimEnd('\')
-            $isTarget = $false
-            foreach ($t in $PathTargets) {
-                if ([string]::Equals($trimmed, $t, [StringComparison]::OrdinalIgnoreCase)) {
-                    $isTarget = $true
-                    break
-                }
+            if (-not [string]::Equals($trimmed, $target, [StringComparison]::OrdinalIgnoreCase)) {
+                $newEntries += $entry
             }
-            if (-not $isTarget) { $newEntries += $entry }
         }
         $newPath = $newEntries -join ';'
         [System.Environment]::SetEnvironmentVariable("Path", $newPath, "User")
@@ -312,19 +304,12 @@ if ($PathContainsInstallDir) {
         # Update current session PATH too so the change is visible
         # without a logoff/login.
         $sessionEntries = ($env:Path -split ';') | Where-Object {
-            $t2 = $_.TrimEnd('\')
-            $hit = $false
-            foreach ($t in $PathTargets) {
-                if ([string]::Equals($t2, $t, [StringComparison]::OrdinalIgnoreCase)) {
-                    $hit = $true
-                    break
-                }
-            }
-            -not $hit
+            $t = $_.TrimEnd('\')
+            -not [string]::Equals($t, $target, [StringComparison]::OrdinalIgnoreCase)
         }
         $env:Path = ($sessionEntries -join ';')
 
-        Write-Ok "Removed '$MatchedPathTarget' from User PATH"
+        Write-Ok "Removed '$InstallDir' from User PATH"
         Write-Info "(Open a new terminal for other apps to see the change.)"
     } catch {
         Write-Warn "Could not update User PATH ($_)"
