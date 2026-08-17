@@ -30,7 +30,7 @@
      --namespace <namespace> \
      --labels "<label-key>=<label-value>" \
      --container-names <sidecar-container-name> \
-     --timeout 600 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
 5. 观察容器被删除后 kubelet 重建行为及服务中断时长

@@ -27,7 +27,7 @@
      --labels "<label-key>=<label-value>" \
      --domain <target-domain> \
      --ip <错误IP地址> \
-     --timeout 300 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
    - `--domain`：要劫持的域名（必填）
@@ -85,11 +85,20 @@
 
 前提条件：目标 Pod 由 Deployment / StatefulSet / DaemonSet 管理（能承受一次滚动重建）
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**）：
 ```bash
-# 1) 记录当前是否已有 hostAliases（恢复时要还原成这个样子）
-kubectl get deployment <deployment-name> -n <namespace> \
-  -o jsonpath='{.spec.template.spec.hostAliases}'
+# 1) 导出基线模板并武装定时还原（到期自动用基线整体替换还原 hostAliases，补齐自恢复能力；
+#    PID 落盘供提前恢复时终止定时器；基线必须剥离 metadata 中的
+#    resourceVersion/uid/creationTimestamp/generation 与整个 status——实证结论：带
+#    resourceVersion 的 get -o yaml 原样输出，无论 apply 还是 replace 都会因乐观锁 Conflict 报错；
+#    还原必须用 kubectl replace 而非 apply——apply 的三方合并会保留注入后新增的字段）
+kubectl get deployment <deployment-name> -n <namespace> -o json | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+m=d['metadata']
+for k in ('resourceVersion','uid','creationTimestamp','generation','managedFields'): m.pop(k,None)
+d.pop('status',None); json.dump(d,open('/tmp/blade-hostaliases-baseline.json','w'))"
+( sleep <duration>; kubectl replace -f /tmp/blade-hostaliases-baseline.json ) >/dev/null 2>&1 &
+echo $! > /tmp/blade-restore-hostaliases.pid
 
 # 2) 注入劫持记录 —— 把域名指向一个不可达 IP（240.0.0.0/4 是保留段，必然不可达）
 kubectl patch deployment <deployment-name> -n <namespace> --type=strategic -p \
@@ -101,13 +110,16 @@ kubectl rollout status deployment/<deployment-name> -n <namespace> --timeout=120
 
 恢复命令：
 ```bash
+# 提前恢复时先终止武装的定时器
+kill $(cat /tmp/blade-restore-hostaliases.pid) 2>/dev/null; rm -f /tmp/blade-restore-hostaliases.pid
+
 # 原本没有 hostAliases —— 整个字段移除
 kubectl patch deployment <deployment-name> -n <namespace> --type=json -p \
   '[{"op":"remove","path":"/spec/template/spec/hostAliases"}]'
 
-# 原本有 hostAliases —— 用第 1 步记录的原值覆盖回去
+# 原本有 hostAliases —— 用注入前记录的原值覆盖回去
 kubectl patch deployment <deployment-name> -n <namespace> --type=strategic -p \
-  '{"spec":{"template":{"spec":{"hostAliases":<第1步记录的原值>}}}}'
+  '{"spec":{"template":{"spec":{"hostAliases":<注入前记录的原值>}}}}'
 
 kubectl rollout status deployment/<deployment-name> -n <namespace> --timeout=120s
 ```
@@ -123,13 +135,19 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'ls -l /etc/hosts; id -u; test -
 ```
 输出 `NOT_WRITABLE` 就改走路径 A。
 
-注入命令：
+注入命令（**先备份 → 武装定时恢复 → 再注入**，三步严格串行；到期自动用备份还原 /etc/hosts）：
 ```bash
 kubectl exec <pod-name> -n <namespace> -- sh -c \
-  'cp /etc/hosts /etc/hosts.bak && echo "<错误IP> <target-domain>" >> /etc/hosts'
+  'cp /etc/hosts /etc/hosts.bak &&
+   { ( sleep <duration>; cp /etc/hosts.bak /etc/hosts; rm -f /etc/hosts.bak ) >/dev/null 2>&1 & } &&
+   echo "<错误IP> <target-domain>" >> /etc/hosts'
 ```
 
-恢复命令：
+结构说明：外层 `{ ... & }` 在前台执行（立即返回），保证备份**先于**注入完成；
+若写成 `cp ... && ( ... ) & echo ...` 会把备份与注入并行，备份可能混入劫持记录，
+导致到期"恢复"成被劫持状态——**严禁该写法**。
+
+恢复命令（提前恢复；SIGCONT 类幂等不适用此处，务必先还原再删备份）：
 ```bash
 kubectl exec <pod-name> -n <namespace> -- sh -c \
   'cp /etc/hosts.bak /etc/hosts && rm -f /etc/hosts.bak'
@@ -139,6 +157,8 @@ kubectl exec <pod-name> -n <namespace> -- sh -c \
 - 路径 A 会触发滚动重建，故障在**新 Pod** 上生效，原 Pod 名会变 —— 注入后需重新获取 Pod 名
 - 路径 A 的劫持随 Pod 生命周期持续，重启也不丢；路径 B 改的是容器内临时文件，
   容器一旦重启，kubelet 重新生成 /etc/hosts，修改**自动丢失**（这也算一种兜底恢复）
-- 两条路径都无自动超时恢复，必须手动还原
+- 自恢复基于注入前武装的定时器：路径 A 为客户端 sleep <duration> + 基线 replace（剥离
+  metadata 后的整体替换），路径 B 为容器内 sleep <duration> + 备份还原；到期自动还原，
+  提前恢复仍用上方手动命令
 - 若应用绕过 hosts 直连 DNS 解析器（自带 resolver 或 DNS 缓存），两条路径都可能不生效；
   这种情况要在 DNS 层面做（见 `Pod_网络故障_CoreDNS异常`）

@@ -82,19 +82,23 @@ kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-imag
 # 1) 填充量 = 分区总容量 × 目标使用率(如 85%) − 当前已用量
 #    例：分区 100G、已用 50G、目标 85% → 100×0.85 − 50 = 35G
 
-# 2) 通过 kubectl debug node 在 /var/log 或 /tmp 目录填充数据
+# 2) 通过 kubectl debug node 在 /var/log 或 /tmp 目录填充数据。
+#    **先武装定时清理，再填充**：timer 由宿主机 systemd(PID 1) 管理，到期自动删除填充文件；
+#    `&&` 串联保证武装失败时不会执行填充
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'dd if=/dev/zero of=/var/log/app-archive.log bs=1M count=<算出的填充量换算的MB数>'
+  'systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-diskfill rm -f /var/log/app-archive.log &&
+   dd if=/dev/zero of=/var/log/app-archive.log bs=1M count=<算出的填充量换算的MB数>'
 # 或使用 fallocate（更快）：
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'fallocate -l <算出的填充量>G /tmp/app-archive.log'
+  'systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-diskfill rm -f /tmp/app-archive.log &&
+   fallocate -l <算出的填充量>G /tmp/app-archive.log'
 ```
 
-恢复命令：
+恢复命令（timer 到期前可提前手动恢复）：
 ```bash
-# 删除填充文件
+# 提前恢复：删除填充文件（同时停掉已武装的 timer）
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'rm -f /var/log/app-archive.log /tmp/app-archive.log'
+  'systemctl stop blade-restore-diskfill 2>/dev/null; rm -f /var/log/app-archive.log /tmp/app-archive.log'
 # 删除 debug Pod
 kubectl delete pod <debug-pod-name> --force --grace-period=0
 ```
@@ -102,4 +106,4 @@ kubectl delete pod <debug-pod-name> --force --grace-period=0
 注意事项：
 - 填充路径对应的分区取决于节点配置，需参考上方「CRD 模式路径→分区映射表」
 - 与 ChaosBlade `--percent` 不同，此方式需按**增量**手动计算填充字节数（填充量 = 分区总容量 × 目标使用率 − 当前已用量）；量太小达不到 85% 告警阈值，量太大把分区填满会触发非预期的 DiskPressure/驱逐
-- 无自动超时恢复，必须手动删除填充文件
+- 自恢复基于 systemd-run transient timer 到期自动删除填充文件，补齐了 ChaosBlade `--timeout` 的自恢复能力；timer 载荷里的文件路径必须与填充路径逐字一致

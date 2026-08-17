@@ -32,7 +32,7 @@
      --container-names <sidecar-container-name> \
      --process <进程名> \
      --signal 15 \
-     --timeout 600 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
 5. 观察 Sidecar 容器重启行为及主容器是否受影响
@@ -42,10 +42,11 @@
 2. 确认主容器仍正常运行，restartCount 未变化
 3. 执行 `kubectl describe pod <pod-name> -n <namespace>`，确认 Events 中有目标容器重启记录
 4. 验证 Sidecar 提供的服务在重启期间中断（如代理端口不可达、日志缺失）
-5. **持续性检查（"反复重启"意图必须做）**：注入动作结束后**停止一切操作、静观 1-2 分钟**，
-   再次查看各容器 restartCount，确认 sidecar 容器的计数在无外部干预下仍在递增、
-   且主容器计数始终不变。若 sidecar 计数不再增长，说明达成的是**离散重启**，
-   验证结论必须如实写"离散重启 N 次"，不得报"反复重启已达成"
+5. **持续性检查（"反复重启"意图必须做）**——判据是"无外部干预下杀进程仍在继续"，按证据强度分层：
+   - **白盒主证（首选，即时）**：故障机制本身仍存活——blade 实验状态 Running，或宿主 systemd 循环单元 active 且守卫 timer pending。机制存活且循环指向目标容器时，"持续在杀"由构造成立
+   - **有界佐证（≤60 秒）**：静观一个短窗口后再次查看各容器 restartCount，sidecar 计数无干预递增、主容器计数始终不变即强确认。注意 CrashLoopBackOff 深期 kubelet 退避可达 60-90 秒，窗口内未见递增不等于机制已停——以白盒主证为准，佐证缺失如实记录即可
+   - **黑盒回退（仅当机制状态完全不可查时）**：停止一切操作、静观 1-2 分钟后再查 restartCount
+   - 若机制已终止且 sidecar 计数不再增长，说明达成的是**离散重启**，验证结论必须如实写"离散重启 N 次"，不得报"反复重启已达成"
 
 **注入恢复**：
 1. 销毁 ChaosBlade 实验：

@@ -12,7 +12,7 @@
 
 **演练步骤**：
 1. 定位运行应用 A 的节点
-2. 使用 chaosblade 对该节点注入网络完全丢包（node-network drop 即全量丢包，不需要 --percent），并设置 `--timeout 600`（600 秒后自动恢复），模拟节点与集群失联的宕机场景
+2. 使用 chaosblade 对该节点注入网络完全丢包（node-network drop 即全量丢包，不需要 --percent），并设置 `--timeout <duration>`（到期自动恢复），模拟节点与集群失联的宕机场景
 3. 观察节点状态和 Pod 调度行为变化
 
 **注入验证**：
@@ -24,7 +24,7 @@
 4. 确认应用 A 的服务整体仍可访问（多副本场景）
 
 **注入恢复**：
-1. 等待 chaosblade 实验自动超时恢复（600 秒内），agent 本地定时器会自动清理网络规则
+1. 等待 chaosblade 实验自动超时恢复（`<duration>` 内），agent 本地定时器会自动清理网络规则
 2. 如超时后仍未恢复，通过 `blade destroy <UID>` 或重启节点强制恢复
 
 **恢复验证**：
@@ -50,7 +50,7 @@
 # ⚠️ 全量/控制面 DROP 会切断 exec 依赖的通道，必须先用 systemd-run 武装定时恢复，再下 DROP。
 
 # 方案 1：仅屏蔽与 API Server 的通信（保留 SSH，恢复通道不断）
-kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep 900
+kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep <duration>
 kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
   systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-nodedown sh -c "
     iptables -D INPUT -s <api-server-ip> -j DROP;
@@ -60,7 +60,7 @@ kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
 '
 
 # 方案 2：全量断网（更彻底，模拟真实宕机）——必须内置 systemd 定时自恢复
-kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep 900
+kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep <duration>
 kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
   systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-nodedown-full sh -c "iptables -D INPUT -j DROP; iptables -D OUTPUT -j DROP" &&
   iptables -I INPUT -j DROP && iptables -I OUTPUT -j DROP

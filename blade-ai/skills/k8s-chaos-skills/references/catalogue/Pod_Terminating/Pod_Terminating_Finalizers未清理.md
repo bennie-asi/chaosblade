@@ -22,12 +22,19 @@
 
 **演练步骤**：
 1. 定位目标 Pod
-2. 使用 kubectl patch 给 Pod 添加自定义 finalizer：
+2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动移除注入的
+   finalizer 让 Pod 被 GC 清除，补齐自恢复能力；PID 落盘供提前恢复时终止定时器）：
+   ```bash
+   ( sleep <duration>; kubectl patch pod <pod-name> -n <namespace> --type=json \
+       -p '[{"op":"remove","path":"/metadata/finalizers"}]' ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-finalizer.pid
+   ```
+3. 使用 kubectl patch 给 Pod 添加自定义 finalizer：
    `kubectl patch pod <pod-name> -n <namespace> -p '{"metadata":{"finalizers":["vol.ops/detach-pending"]}}'`
-3. 使用 `--wait=false` 删除 Pod，触发终止流程：
+4. 使用 `--wait=false` 删除 Pod，触发终止流程：
    `kubectl delete pod <pod-name> -n <namespace> --wait=false`
    > 不加 `--wait=false` 会导致 kubectl 等待删除完成，因 finalizer 阻塞而超时。
-4. 观察 Pod 状态变化
+5. 观察 Pod 状态变化
 
 **注入验证**：
 1. 执行 `kubectl get pod <pod-name>`，确认 Pod 对象仍存在（显示 Terminating 或 Error）
@@ -36,9 +43,13 @@
 4. 确认没有控制器在处理该 finalizer（`vol.ops/detach-pending` 无对应控制器，因此不会被自动清理）
 
 **注入恢复**：
-1. 移除 Pod 上的 finalizer：
+1. 等待 `<duration>` 到期后武装的定时器自动移除 finalizer；如需提前恢复，先终止定时器：
+   ```bash
+   kill $(cat /tmp/blade-restore-finalizer.pid) 2>/dev/null; rm -f /tmp/blade-restore-finalizer.pid
+   ```
+2. 移除 Pod 上的 finalizer：
    `kubectl patch pod <pod-name> -n <namespace> --type=json -p '[{"op":"remove","path":"/metadata/finalizers"}]'`
-2. Pod 将被 Kubernetes GC 自动清除
+3. Pod 将被 Kubernetes GC 自动清除
 
 **恢复验证**：
 1. 执行 `kubectl get pod <pod-name>`，确认 Pod 已从集群中删除（返回 NotFound）

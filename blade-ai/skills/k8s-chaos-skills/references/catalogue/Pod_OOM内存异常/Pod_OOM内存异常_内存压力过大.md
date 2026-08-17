@@ -16,7 +16,7 @@
 
 **注入命令**：
 ```bash
-blade create k8s pod-mem load --mode ram --mem-percent 80 --names <Pod名> --namespace <命名空间> --kubeconfig <path> --timeout 300
+blade create k8s pod-mem load --mode ram --mem-percent <percent> --names <Pod名> --namespace <命名空间> --kubeconfig <path> --timeout <duration>
 ```
 > **必须使用 `--mode ram`**。默认的 cache 模式在 cgroup v2 环境下不会增加 Pod 的 RSS 内存占用，kubectl top 观测不到变化。`--mode ram` 直接分配匿名内存，确保 Pod 内存使用率真实上升。
 

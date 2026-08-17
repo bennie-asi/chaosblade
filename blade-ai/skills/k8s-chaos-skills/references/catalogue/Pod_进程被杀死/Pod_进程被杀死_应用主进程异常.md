@@ -36,13 +36,14 @@
 
 **注入验证**：
 1. 执行 `kubectl get pods -l <labels> -n <namespace>`，确认 RESTARTS 数相比注入前增加
-2. 执行 `kubectl exec <pod-name> -n <namespace> -- ps aux`，确认主进程 PID 已变化（容器重启后 PID 重新分配）
-3. 执行 `kubectl describe pod <pod-name> -n <namespace>`，确认 Events 中有 `Back-off restarting failed container` 或 Last State 显示 terminated 且 reason 为 Error/Signal
+2. 确认容器发生过重建：优先从 `kubectl get pod <pod-name> -n <namespace> -o json` 读取 containerID 变化与 Last State（terminated 时间戳）——**故障生效期间容器正在崩溃，exec 大概率失败（unable to upgrade connection），不要把 exec 作为首选**；exec `ps aux` 看 PID 变化仅作容器已稳定时的补充手段
+3. 执行 `kubectl describe pod <pod-name> -n <namespace>`，确认 Events 中有 `Back-off restarting failed container` 或 Last State 显示 terminated 且 reason 为 Error/Signal（第 1、3 步相互独立，应同批并行执行）
 4. 若 timeout 期间持续杀进程，确认 Pod 状态是否进入 CrashLoopBackOff
-5. **持续性检查（"反复重启"意图必须做）**：注入动作结束后**停止一切操作、静观 1-2 分钟**，
-   再次执行 `kubectl get pods -l <labels> -n <namespace>`，确认 RESTARTS 在无外部干预下仍在递增。
-   若计数不再增长，说明达成的是**离散重启**（每次重启都靠外部触发），不是持续的"反复重启"状态，
-   验证结论必须如实写"离散重启 N 次"，不得报"反复重启已达成"
+5. **持续性检查（"反复重启"意图必须做）**——判据是"无外部干预下杀进程仍在继续"，按证据强度分层：
+   - **白盒主证（首选，即时）**：故障机制本身仍存活——blade 实验状态 Running，或路径 B 的 `systemctl is-active <unit>` 为 active 且守卫 timer pending。机制存活且循环指向目标容器时，"持续在杀"由构造成立
+   - **有界佐证（≤60 秒）**：静观一个短窗口后再次执行 `kubectl get pods`，RESTARTS 无干预递增即强确认。注意 CrashLoopBackOff 深期 kubelet 退避可达 60-90 秒，窗口内未见递增不等于机制已停——以白盒主证为准，佐证缺失如实记录即可
+   - **黑盒回退（仅当机制状态完全不可查时）**：停止一切操作、静观 1-2 分钟后再查 RESTARTS
+   - 若机制已终止且计数不再增长，说明达成的是**离散重启**（每次重启都靠外部触发），不是持续的"反复重启"状态，验证结论必须如实写"离散重启 N 次"，不得报"反复重启已达成"
 
 **注入恢复**：
 1. 销毁 ChaosBlade 实验：
@@ -100,6 +101,11 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -9 $(pgrep -f <process-nam
 
 注意事项：
 - 必须确认实际进程名（通过 `ps aux` 确认），不可凭服务名猜测
+- **目标进程是容器 PID 1 时本路径无效（实测确证）**：内核 PID namespace 对容器内
+  init 有信号保护——未注册 handler 的 PID 1 会忽略 SIGTERM，连 SIGKILL 也投递不进去
+  （实测 busybox `sleep` 作 PID 1，`kill -15 1` / `kill -9 1` 均无任何效果）。
+  单进程容器（entrypoint 即主进程）属常态，注入前先 `ps` 确认目标 PID 是否为 1，
+  是则直接走路径 B（节点侧 `crictl stop` 实测有效，kubelet 会自动重启容器）
 - 单次执行只 kill 一次，不像 ChaosBlade 可在 timeout 窗口内持续 kill
 - "反复重启/持续崩溃"意图不要用 `watch`/循环脚本在容器内堆次数——应改用
   路径 B 第 3 步的**持续模式**（节点侧 systemd-run 有界循环），它有定时自停兜底；

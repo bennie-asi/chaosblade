@@ -15,13 +15,25 @@
 4. 确认删除目标 Pod 后控制器（StatefulSet/Deployment）会自动重建——重建是触发重新 mount 的必要条件
 
 **演练步骤**：
-1. 向 PV 注入无效挂载选项（追加，不覆盖既有选项）：
+1. **先武装定时基线还原，再注入**（在运行 kubectl 的机器上后台武装，到期自动按资源准备第 2 条
+   记录的基线还原 PV mountOptions，补齐自恢复能力；按基线二选一，仅执行其中一行；PID 落盘供提前
+   恢复时终止定时器）：
+   ```bash
+   # 基线为空时
+   ( sleep <duration>; kubectl patch pv <pv> --type json \
+       -p '[{"op":"remove","path":"/spec/mountOptions"}]' ) >/dev/null 2>&1 &
+   # 基线非空时（<基线选项JSON数组> 为注入前记录的原值，如 ["nolock","noatime"]）
+   ( sleep <duration>; kubectl patch pv <pv> --type json \
+       -p '[{"op":"replace","path":"/spec/mountOptions","value":<基线选项JSON数组>}]' ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-mntopt.pid
+   ```
+2. 向 PV 注入无效挂载选项（追加，不覆盖既有选项）：
    ```
    kubectl patch pv <pv> --type json -p '[{"op":"add","path":"/spec/mountOptions","value":["chaos-invalid-mntopt"]}]'
    ```
    若 PV 已有 mountOptions，改用 `add` 到 `/spec/mountOptions/-` 追加。注入选项命名使用 `chaos-` 前缀标识，便于恢复审计
-2. 删除目标 Pod 触发控制器重建：`kubectl delete pod <pod> -n <ns>`（用普通删除即可，本机制不依赖强制删除）
-3. 新 Pod 调度后 kubelet 执行 mount 时携带无效选项失败，进入 ContainerCreating 并周期性重试（默认分钟级，可通过 Events 观察重试计数）
+3. 删除目标 Pod 触发控制器重建：`kubectl delete pod <pod> -n <ns>`（用普通删除即可，本机制不依赖强制删除）
+4. 新 Pod 调度后 kubelet 执行 mount 时携带无效选项失败，进入 ContainerCreating 并周期性重试（默认分钟级，可通过 Events 观察重试计数）
 
 **机制反证条件（命中即停）**：
 删除目标 Pod 后，若观察到以下任一现象，说明机制不可达，**立即停止一切尝试，上报偏离并转入恢复**：
@@ -35,8 +47,12 @@
 3. `kubectl get pv <pv> -o jsonpath='{.spec.mountOptions}'`：确认注入选项仍在 PV 上（故障持续的原因）
 
 **注入恢复**：
-1. 按基线还原 PV mountOptions：基线为空时 `kubectl patch pv <pv> --type json -p '[{"op":"remove","path":"/spec/mountOptions"}]'`；基线非空时 patch 回原值数组
-2. kubelet 下一轮 mount 重试（分钟级）自动成功，Pod 原地转为 Running——**无需删除或重建 Pod**，恢复动作只有一个 patch
+1. 等待 `<duration>` 到期后武装的定时器自动按基线还原 PV mountOptions；如需提前恢复，先终止定时器：
+   ```bash
+   kill $(cat /tmp/blade-restore-mntopt.pid) 2>/dev/null; rm -f /tmp/blade-restore-mntopt.pid
+   ```
+2. 按基线还原 PV mountOptions：基线为空时 `kubectl patch pv <pv> --type json -p '[{"op":"remove","path":"/spec/mountOptions"}]'`；基线非空时 patch 回原值数组
+3. kubelet 下一轮 mount 重试（分钟级）自动成功，Pod 原地转为 Running——**无需删除或重建 Pod**，恢复动作只有一个 patch
 
 **恢复验证**：
 1. `kubectl get pod <pod> -n <ns>`：状态恢复 Running，READY 1/1，且 Pod 对象未变（AGE 与注入前一致，证明原地恢复而非重建）

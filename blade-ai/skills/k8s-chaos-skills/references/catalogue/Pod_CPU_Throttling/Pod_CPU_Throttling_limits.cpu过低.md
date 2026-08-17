@@ -10,8 +10,21 @@
 2. 确认监控系统可观测 Pod CPU 使用率及 throttle 指标
 
 **演练步骤**：
-1. 定位应用 A 的 Deployment
-2. 使用 kubectl patch 将应用 A 的 CPU limits 调低为极小值（如 50m），模拟 limits.cpu 配置过低的场景
+1. 定位应用 A 的 Deployment，并记录其 CPU limits 原始值
+2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动将 CPU limits 还原为
+   原始值，补齐自恢复能力；PID 落盘供提前恢复时终止定时器）：
+   ```bash
+   # 记录原始 limits（多容器 Pod 请调整 containers 索引至目标容器）
+   ORIG_CPU=$(kubectl get deployment <deployment-name> -n <namespace> \
+     -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}')
+   # 武装定时还原
+   ( sleep <duration>; kubectl patch deployment <deployment-name> -n <namespace> --type='json' \
+       -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/limits/cpu\",\"value\":\"${ORIG_CPU}\"}]" ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-cpulimit.pid
+   # 再调低 limits 注入
+   kubectl patch deployment <deployment-name> -n <namespace> --type='json' \
+     -p='[{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/cpu","value":"<调低后的limits值>"}]'
+   ```
 3. 使用 chaosblade 对应用 A 的 Pod 注入 CPU 负载，确保实际 CPU 需求超过 limits，触发内核 throttle
 4. 观察 Pod CPU throttle 指标变化及应用响应延迟
 
@@ -21,8 +34,12 @@
 3. （可选，仅当演练方提供了应用访问入口时）确认请求延迟显著增大；无入口时上述 throttling 与 CPU 证据成立即可判定
 
 **注入恢复**：
-1. 销毁 chaosblade CPU 负载实验
-2. 使用 kubectl patch 将应用 A 的 CPU limits 恢复为原始合理值
+1. 等待 `<duration>` 到期后武装的定时器自动将 CPU limits 还原为原始值；如需提前恢复，先终止定时器：
+   ```bash
+   kill $(cat /tmp/blade-restore-cpulimit.pid) 2>/dev/null; rm -f /tmp/blade-restore-cpulimit.pid
+   ```
+2. 销毁 chaosblade CPU 负载实验
+3. 使用 kubectl patch 将应用 A 的 CPU limits 恢复为原始合理值
 
 **恢复验证**：
 1. 查看 `cpu.stat`，确认 `nr_throttled` 停止增长

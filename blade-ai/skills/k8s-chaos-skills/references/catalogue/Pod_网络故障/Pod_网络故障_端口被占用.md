@@ -27,7 +27,7 @@
      --labels "<label-key>=<label-value>" \
      --port <port> \
      --force \
-     --timeout 300 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
    - `--port`：要占用的端口（必填）

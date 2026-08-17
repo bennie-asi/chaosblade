@@ -16,8 +16,15 @@
    kubectl get deployment coredns -n kube-system -o jsonpath='{.spec.selector.matchLabels}'
    ```
    记录返回的标签（如 `component=coredns` 或 `k8s-app=kube-dns`），后续步骤中用 `<coredns-label>` 表示该标签
-2. 将 CoreDNS Deployment 的副本数缩为 0，模拟 CoreDNS 完全不可用：
+2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动将副本数扩回
+   原始值，补齐自恢复能力；PID 落盘供提前恢复时终止定时器；武装失败则不注入。
+   注意：CoreDNS 是集群级依赖，缩零期间**全集群** DNS 解析瘫痪，duration 应尽量短）：
    ```bash
+   ORIG_REPLICAS=$(kubectl get deployment coredns -n kube-system -o jsonpath='{.spec.replicas}')
+   ( sleep <duration>; kubectl scale deployment coredns -n kube-system \
+       --replicas=$ORIG_REPLICAS ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-coredns.pid
+   # 再缩零注入
    kubectl scale deployment coredns -n kube-system --replicas=0
    ```
 3. 在应用 A 的 Pod 内尝试进行 DNS 解析
@@ -33,11 +40,15 @@
 3. 确认应用 A 依赖 DNS 的服务调用出现错误
 
 **注入恢复**：
-1. 恢复 CoreDNS 副本数：
+1. 等待 `<duration>` 到期后武装的定时器自动将副本数扩回原始值；如需提前恢复，先终止定时器：
+   ```bash
+   kill $(cat /tmp/blade-restore-coredns.pid) 2>/dev/null; rm -f /tmp/blade-restore-coredns.pid
+   ```
+2. 恢复 CoreDNS 副本数：
    ```bash
    kubectl scale deployment coredns -n kube-system --replicas=<原始副本数>
    ```
-2. 等待 CoreDNS Pod 启动并就绪
+3. 等待 CoreDNS Pod 启动并就绪
 
 **恢复验证**：
 1. 执行 `kubectl get pods -n kube-system -l <coredns-label>`（使用演练步骤 1 中获取的实际标签），确认 CoreDNS Pod 全部 Running 且 Ready

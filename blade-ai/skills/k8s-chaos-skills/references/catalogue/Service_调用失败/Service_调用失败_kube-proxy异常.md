@@ -24,7 +24,7 @@
    blade create k8s node-process kill \
      --names <目标节点> \
      --process kube-proxy \
-     --timeout 120 \
+     --timeout <duration> \
      --kubeconfig <路径>
    ```
 3. 在目标节点上的 Pod 内通过 ClusterIP 访问 Service
@@ -36,7 +36,8 @@
 3. 检查节点 iptables/ipvs 规则，确认 Service 相关转发规则缺失或过期
 
 **注入恢复**：
-1. 若使用标签方式：移除节点标签并恢复 DaemonSet 配置：
+1. 若使用标签方式：移除节点标签并恢复 DaemonSet 配置（若原 DaemonSet 本就有 affinity，
+   须用注入前记录的原值还原，而非直接 remove）：
    ```bash
    kubectl label node <目标节点> net.ops/proxy-degraded-
    kubectl patch ds kube-proxy -n kube-system --type=json \
@@ -62,29 +63,49 @@
 
 前提条件：具备修改 kube-proxy DaemonSet 的权限
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**）：
 ```bash
-# 方式A：通过标签排除目标节点上的 kube-proxy 调度
+# 方式A：通过标签排除目标节点上的 kube-proxy 调度。
+# 先取证原 affinity（可能为空），武装定时还原按基线分支：为空则 remove，非空则还原原值——
+# 无条件 remove 会在原 DaemonSet 本就有 affinity 时把它删丢，属于错误恢复
+ORIG_AFFINITY=$(kubectl get ds kube-proxy -n kube-system -o jsonpath='{.spec.template.spec.affinity}')
+( sleep <duration>; kubectl label node <目标节点> net.ops/proxy-degraded-; \
+  if [ -z "$ORIG_AFFINITY" ]; then \
+    kubectl patch ds kube-proxy -n kube-system --type=json \
+      -p='[{"op":"remove","path":"/spec/template/spec/affinity"}]'; \
+  else \
+    kubectl patch ds kube-proxy -n kube-system --type=json \
+      -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/affinity\",\"value\":$ORIG_AFFINITY}]"; \
+  fi ) >/dev/null 2>&1 &
+echo $! > /tmp/blade-restore-proxy.pid
+# 再注入
 kubectl label node <目标节点> net.ops/proxy-degraded=true
 kubectl patch ds kube-proxy -n kube-system \
-  -p '{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"net.ops/proxy-degraded","operator":"DoesNotExist"}]}]}}}}}}'
-# 方式B：通过 kubectl debug node 挂起 kube-proxy 进程
+  -p '{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"net.ops/proxy-degraded","operator":"DoesNotExist"}]}]}}}}}}}'
+# 方式B：通过 kubectl debug node 挂起 kube-proxy 进程。
+# 先武装定时 CONT（timer 由宿主机 systemd(PID 1) 管理），再 STOP；`&&` 串联保证武装失败不冻结
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'kill -STOP $(pidof kube-proxy)'
+  'systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-proxy sh -c "kill -CONT \$(pidof kube-proxy)" &&
+   kill -STOP $(pidof kube-proxy)'
 ```
 
-恢复命令：
+恢复命令（timer 到期前可提前手动恢复）：
 ```bash
-# 方式A：移除标签并恢复 DaemonSet
+# 方式A：终止定时器，移除标签并按注入前取证的基线还原 affinity
+kill $(cat /tmp/blade-restore-proxy.pid) 2>/dev/null; rm -f /tmp/blade-restore-proxy.pid
 kubectl label node <目标节点> net.ops/proxy-degraded-
+# 基线为空 → remove；基线非空 → 用注入前记录的 $ORIG_AFFINITY 原值 replace（与武装块同构）
 kubectl patch ds kube-proxy -n kube-system --type=json \
   -p='[{"op":"remove","path":"/spec/template/spec/affinity"}]'
-# 方式B：恢复 kube-proxy 进程
+# 方式B：停掉 timer，恢复 kube-proxy 进程
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'kill -CONT $(pidof kube-proxy)'
+  'systemctl stop blade-restore-proxy 2>/dev/null; kill -CONT $(pidof kube-proxy)'
 ```
 
 注意事项：
 - 方式A 效果更彻底（kube-proxy Pod 被完全移除），但修改了 DaemonSet 配置，需注意恢复
 - 方式B 更轻量，但 kube-proxy 被 systemd 或 kubelet 管理时可能自动重启
-- 与 ChaosBlade 不同，此方式无自动超时恢复
+- 自恢复机制：方式A 依赖客户端武装的后台定时器（到期去标签+按基线分支还原 affinity），
+  方式B 依赖宿主机 systemd-run transient timer（到期自动 SIGCONT）；方式A 的还原已在武装块
+  内按注入前取证的 $ORIG_AFFINITY 分支处理（为空 remove、非空 replace 原值），不会删丢
+  原有 affinity

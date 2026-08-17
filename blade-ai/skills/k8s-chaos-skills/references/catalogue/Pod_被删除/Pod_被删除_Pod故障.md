@@ -33,9 +33,11 @@
 2. 执行 `kubectl get events -n <namespace> --sort-by='.lastTimestamp'`，确认存在 Killing 事件（旧 Pod 被删除）以及 Scheduled/Created/Started 事件（新 Pod 被重建）
 3. 执行 `kubectl get endpoints <service-name> -n <namespace>`，观察 Endpoints 是否短暂减少（取决于新 Pod 就绪速度）
 4. **持续性检查（"持续删除"意图必须做）**：单次删除与持续删除是两种故障形态——
-   单次删除后控制器重建一次即稳定。若注入的是持续删除，注入后**停止一切操作、静观 1-2 分钟**，
-   确认 Pod 仍在被反复 Killing、AGE 持续极短；若已稳定，只能报"单次删除"，
-   不得报"持续删除已达成"
+   单次删除后控制器重建一次即稳定。判据是"无外部干预下删除仍在继续"，按证据强度分层：
+   - **白盒主证（首选，即时）**：故障机制本身仍存活——blade 实验状态 Running（或宿主 systemd 循环单元 active 且守卫 timer pending）。机制存活时"持续在删"由构造成立
+   - **有界佐证（≤60 秒）**：静观一个短窗口后再次执行 `kubectl get pods`，Pod 仍在被反复 Killing、AGE 持续极短即强确认
+   - **黑盒回退（仅当机制状态完全不可查时）**：停止一切操作、静观 1-2 分钟后再查
+   - 若机制已终止且 Pod 已稳定，只能报"单次删除"，不得报"持续删除已达成"
 
 **注入恢复**：
 1. 销毁 ChaosBlade 实验：

@@ -31,10 +31,20 @@
        requests:
          storage: 10Gi
    ```
-3. 使用 `kubectl patch` 修改应用 A 的 Deployment，添加引用该 PVC 的 volume 和 volumeMount
-4. 等待 Pod 滚动更新完成，确认所有旧 Pod 已被替换
-5. 滚动更新完成后，立即还原 maxUnavailable 为原始值（maxUnavailable 只是使滚动更新完成的手段，不是故障本身，不应泄漏到恢复阶段）
-6. 观察新 Pod 的状态
+3. **先武装定时恢复，再修改模板**（在运行 kubectl 的机器上后台武装，到期自动移除注入的
+   volumes/volumeMounts 并删除 PVC，补齐自恢复能力；`<volume-index>`/`<mount-index>` 为注入时
+   新增项在数组中的索引，添加前先记录；PID 落盘供提前恢复时终止定时器）：
+   ```bash
+   ( sleep <duration>; \
+     kubectl patch deployment <deployment-name> -n <namespace> --type='json' \
+       -p='[{"op":"remove","path":"/spec/template/spec/containers/<container-index>/volumeMounts/<mount-index>"},{"op":"remove","path":"/spec/template/spec/volumes/<volume-index>"}]'; \
+     kubectl delete pvc app-data-claim -n <namespace> ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-pvc.pid
+   ```
+4. 使用 `kubectl patch` 修改应用 A 的 Deployment，添加引用该 PVC 的 volume 和 volumeMount
+5. 等待 Pod 滚动更新完成，确认所有旧 Pod 已被替换
+6. 滚动更新完成后，立即还原 maxUnavailable 为原始值（maxUnavailable 只是使滚动更新完成的手段，不是故障本身，不应泄漏到恢复阶段）
+7. 观察新 Pod 的状态
 
 **注入验证**：
 1. 执行 `kubectl rollout status deployment <deployment-name>`，确认滚动更新已完成（所有旧 Pod 已被替换）。如果滚动更新未完成（卡死），则故障未完全生效，不可判定为 verified
@@ -44,9 +54,13 @@
 5. 执行 `kubectl describe pvc app-data-claim`，确认 StorageClass 不存在或 Provisioner 异常
 
 **注入恢复**：
-1. 恢复应用 A 的 Deployment 定义，移除引用 app-data-claim 的 volume
-2. 删除注入时创建的 PVC：`kubectl delete pvc app-data-claim`
-3. 等待 Pod 滚动更新完成
+1. 等待 `<duration>` 到期后武装的定时器自动移除注入的 volumes/volumeMounts 并删除 PVC；如需提前恢复，先终止定时器：
+   ```bash
+   kill $(cat /tmp/blade-restore-pvc.pid) 2>/dev/null; rm -f /tmp/blade-restore-pvc.pid
+   ```
+2. 恢复应用 A 的 Deployment 定义，移除引用 app-data-claim 的 volume
+3. 删除注入时创建的 PVC：`kubectl delete pvc app-data-claim`
+4. 等待 Pod 滚动更新完成
 
 **恢复验证**：
 1. 执行 `kubectl get pods`，确认 Pod 状态恢复为 Running

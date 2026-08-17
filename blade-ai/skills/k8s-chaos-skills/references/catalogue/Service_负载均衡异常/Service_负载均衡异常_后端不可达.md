@@ -60,6 +60,9 @@ NET_ADMIN，精简镜像通常两者都不满足，选它之前先验证。
 kubectl exec <pod-name> -n <namespace> -- sh -c 'kill 1'
 # 方式B：注入网络丢包（需容器内真有 iptables 且有 NET_ADMIN，先验证：
 #         kubectl exec <pod-name> -n <namespace> -- sh -c 'command -v iptables || echo NO_IPTABLES'）
+#         先武装定时 -D 再 -A，到期自动恢复
+kubectl exec <pod-name> -n <namespace> -- sh -c \
+  '( sleep <duration>; iptables -D OUTPUT -j DROP ) >/dev/null 2>&1 &' &&
 kubectl exec <pod-name> -n <namespace> -- iptables -A OUTPUT -j DROP
 # 方式B'：容器内无 iptables 时，用临时容器 + tc（临时容器与目标容器共享网络命名空间，
 #         工具来自调试镜像，--profile=netadmin 提供 NET_ADMIN）
@@ -80,7 +83,10 @@ kubectl debug <pod-name> -n <namespace> --image=<verified-cluster-image> \
 kubectl get pod <pod-name> -n <namespace> \
   -o jsonpath='{range .status.ephemeralContainerStatuses[*]}{.name}{"="}{.state}{"\n"}{end}'
 
-# 经载体注入：载体与目标容器共享网络命名空间，操作 eth0 即操作目标 Pod 的网卡
+# 经载体注入：载体与目标容器共享网络命名空间，操作 eth0 即操作目标 Pod 的网卡。
+# 同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）
+kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- sh -c \
+  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
 kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev eth0 root netem loss 100%
 # 方式C：直接删除后端 Pod
 kubectl delete pod <pod-name> -n <namespace>

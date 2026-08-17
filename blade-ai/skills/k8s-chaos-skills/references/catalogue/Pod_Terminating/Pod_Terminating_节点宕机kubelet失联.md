@@ -12,7 +12,7 @@
 **演练步骤**：
 1. 定位运行应用 A 的目标节点
 2. 先通过 kubectl 删除应用 A 在目标节点上的 Pod（触发 Terminating）
-3. 立即使用 chaosblade 对目标节点注入网络完全丢包（node-network drop 即全量丢包，不需要 --percent），并设置 `--timeout 300`，模拟节点宕机导致 kubelet 失联
+3. 立即使用 chaosblade 对目标节点注入网络完全丢包（node-network drop 即全量丢包，不需要 --percent），并设置 `--timeout <duration>`，模拟节点宕机导致 kubelet 失联
 4. 观察 Pod Terminating 状态持续时间
 
 **注入验证**：
@@ -23,7 +23,7 @@
 3. 查看 Pod 详情，确认 deletionTimestamp 已设置但 Pod 未被实际清理
 
 **注入恢复**：
-1. 等待 chaosblade 实验自动超时恢复（300 秒内）
+1. 等待 chaosblade 实验自动超时恢复（`<duration>` 内）
 2. 如超时后仍未恢复，通过 `blade destroy <UID>` 或重启节点强制恢复
 3. kubelet 恢复后会自动清理 Terminating 状态的 Pod
 
@@ -47,7 +47,7 @@
 注入命令：
 ```bash
 # 屏蔽节点与 API Server 的通信并启动 systemd 定时自恢复
-kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep 900
+kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep <duration>
 # ⚠️ 关键顺序：先用 systemd-run 武装恢复（仅登记闹钟），再下 DROP。屏蔽 6443 会切断 exec 响应回程，
 # 若恢复排在 DROP 后，定时器可能未成功武装 → 永不恢复。
 # ✅ 注入后本条 exec 会因 6443 被切断而超时（如 timed out after 10s）——这是预期成功信号，**不要重试该 exec、不要换镜像**；立即改用集群侧 `kubectl get nodes`（应 NotReady）与 `kubectl get pods`（应 Terminating）验证。

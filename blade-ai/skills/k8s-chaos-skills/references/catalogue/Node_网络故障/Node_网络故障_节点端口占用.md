@@ -25,7 +25,7 @@
      --names <node-name> \
      --port <port> \
      --force \
-     --timeout 300 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
 
@@ -37,7 +37,7 @@
      --channel ssh \
      --ssh-host <node-ip> \
      --ssh-user root \
-     --timeout 300
+     --timeout <duration>
    ```
    - `--port`：要占用的端口（必填）
    - `--force`：强制杀死当前使用该端口的进程后占用
@@ -90,18 +90,21 @@
 
 前提条件：集群需支持 `kubectl debug node` 功能（K8s 1.18+）；宿主机需包含 `nc`（netcat）或 `socat`（因 `chroot /host` 后工具从宿主机解析）；宿主机变更必须 `--profile=sysadmin`；禁用 `-it`
 
-注入命令：
+注入命令（**用 `timeout` 给占用进程设定时自停**——到期 nc 退出、debug Pod 转 Completed，
+端口自动释放，补齐 ChaosBlade `--timeout` 的自恢复能力）：
 ```bash
-# 通过 kubectl debug node 在宿主机网络空间占用端口（nc 作为 debug Pod 主进程常驻，端口持续被占用；恢复=删除该 debug Pod）
-kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host nc -l -p <port> -k
-# 如需强制占用（先杀原进程再监听，exec 让 nc 取代 shell 成为主进程）：
+# 通过 kubectl debug node 在宿主机网络空间占用端口（nc 作为 debug Pod 主进程常驻；
+# timeout 到期自动终止 nc，恢复=到期自停或提前删除该 debug Pod）
+kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host \
+  timeout <duration> nc -l -p <port> -k
+# 如需强制占用（先杀原进程再监听，exec 让 timeout+nc 取代 shell 成为主进程）：
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'fuser -k <port>/tcp; exec nc -l -p <port> -k'
+  'fuser -k <port>/tcp; exec timeout <duration> nc -l -p <port> -k'
 ```
 
-恢复命令：
+恢复命令（到期前可提前手动恢复）：
 ```bash
-# 终止占用端口的 nc 进程
+# 提前恢复：终止占用端口的 nc 进程
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
   'fuser -k <port>/tcp'
 # 删除 debug Pod
@@ -112,4 +115,5 @@ kubectl delete pod <debug-pod-name> --force --grace-period=0
 注意事项：
 - `nc -l -p` 在宿主机网络命名空间监听，效果与节点端口被占用等价
 - 如需占用 UDP 端口，使用 `nc -l -u -p <port>`
-- 与 ChaosBlade 不同，此方式无自动超时恢复，必须手动终止 nc 进程
+- 自恢复基于 `timeout <duration>` 包裹：到期 nc 退出后 debug Pod 主进程结束、端口释放；
+  若宿主机无 `timeout`（coreutils 缺失的极端环境），改用 `sh -c 'nc ... & sleep <duration>; kill $!'` 等效实现

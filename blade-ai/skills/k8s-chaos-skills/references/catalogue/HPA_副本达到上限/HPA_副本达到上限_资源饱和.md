@@ -48,7 +48,7 @@
 kubectl get pods -n <namespace> -l <label-selector> -o name
 
 # 方式一：容器内有 stress-ng（后台+重定向让 exec 立即返回，--timeout 自带自动恢复）
-kubectl exec <pod-name> -n <namespace> -- sh -c 'stress-ng --cpu 0 --cpu-load 80 --timeout 600s >/dev/null 2>&1 &'
+kubectl exec <pod-name> -n <namespace> -- sh -c 'stress-ng --cpu 0 --cpu-load <percent> --timeout <duration>s >/dev/null 2>&1 &'
 
 # 方式二：容器无 stress-ng，用 shell 循环。
 # 关键点：① 每个循环重定向到 /dev/null（否则 exec 会挂到 10s 超时）；

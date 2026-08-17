@@ -1,7 +1,7 @@
 **用例名称** 异常进程占用 导致 Node_内存使用率过高
 
 **故障现象**：
-1. 节点内存使用率持续超过 90%
+1. 节点内存使用率持续超过注入的目标百分比
 2. 节点上 Pod 出现 OOMKilled 或被驱逐
 3. 节点 Status 出现 MemoryPressure 条件为 True
 
@@ -16,12 +16,12 @@
 
 **注入命令**：
 ```bash
-blade create k8s node-mem load --mode ram --mem-percent 90 --names <节点名> --kubeconfig <path> --timeout 600
+blade create k8s node-mem load --mode ram --mem-percent <percent> --names <节点名> --kubeconfig <path> --timeout <duration>
 ```
 > **必须使用 `--mode ram`**。默认的 cache 模式在 cgroup v2 节点上不会增加实际物理内存占用（仅填充页缓存），kubectl top 观测不到变化。`--mode ram` 通过分配匿名内存直接占用物理 RAM。
 
 **注入验证**：
-1. `kubectl top node <node-name>` 确认节点内存使用率持续超过 90%
+1. `kubectl top node <node-name>` 确认节点内存使用率持续超过注入的目标百分比
 2. 执行 `kubectl describe node <节点名>`，确认 MemoryPressure 条件为 True
 3. 确认应用 A 的 Pod 出现 OOMKilled 或被驱逐
 
@@ -35,7 +35,7 @@ blade create k8s node-mem load --mode ram --mem-percent 90 --names <节点名> -
 
 **基准事实**：
 - **根因**：节点上存在异常进程大量占用内存，导致节点内存使用率过高，触发 MemoryPressure，Pod 被 OOMKilled 或驱逐
-- **必现现象**：节点内存使用率持续超过 90%；MemoryPressure 条件为 True；Pod 出现 OOMKilled 或被驱逐
+- **必现现象**：节点内存使用率持续超过注入的目标百分比；MemoryPressure 条件为 True；Pod 出现 OOMKilled 或被驱逐
 
 ---
 

@@ -15,7 +15,7 @@
 3. 确认监控系统可观测网络流量和包计数指标
 4. 确认有可用的 **iproute2** `tc`（见演练步骤 3 —— 精简镜像里常有同名的 BusyBox applet，它不支持 netem）
 5. 若需走临时容器路径：先确认当前集群**能拉取**一个含 iproute2 的镜像。不要假定公网镜像可用 —— 内网/离线集群常拉不到 Docker Hub，需换成集群已在使用的仓库地址
-6. 确认目标节点内核支持 netem（**内核级依赖，路径 A/B 都绕不开**）：netem 由宿主机内核的 sch_netem 模块提供，容器与宿主共享内核，换 Pod / 换临时容器都改变不了。只读探查：`kubectl exec <pod-name> -n <namespace> -- grep sch_netem /proc/modules`（临时容器载体同样可用）——有输出说明已加载；无输出**不能**判定不可行（注入时内核可能自动加载模块），记为待 Phase 2 验证的假设。**判据以注入输出为准**：注入报 `RTNETLINK answers: Operation not supported` 即为内核不支持 netem 的确证，见演练步骤 4
+6. 确认目标节点内核支持 netem（**内核级依赖，路径 A/B 都绕不开**）：netem 由宿主机内核的 sch_netem 模块提供，容器与宿主共享内核，换 Pod / 换临时容器都改变不了。只读探查：`kubectl exec <pod-name> -n <namespace> -- grep sch_netem /proc/modules`（临时容器载体同样可用）——有输出说明已加载；无输出**不能**判定不可行（注入时内核可能自动加载模块），记为待 Phase 2 验证的假设。**判据以注入输出为准**：注入报 `RTNETLINK answers: Operation not supported` 或 `RTNETLINK answers: No such file or directory`（后者为节点上 sch_netem 模块文件本身缺失、内核自动加载失败，实测确证）即为内核不支持 netem 的确证，见演练步骤 4
 
 **演练步骤**：
 1. 确认目标 Pod 的标签选择器和命名空间：
@@ -38,9 +38,13 @@
 
 4. 注入网络包重复故障，按上一步结论二选一。
 
-   **路径 A —— 容器内确认是 iproute2 tc**（需容器有 NET_ADMIN；`CapEff` 全零的容器会报 EPERM）：
+   **路径 A —— 容器内确认是 iproute2 tc**（需容器有 NET_ADMIN；`CapEff` 全零的容器会报 EPERM）。
+   **先武装定时自删，再注入规则**（后台进程与目标容器同 netns，到期自动移除规则；
+   必须重定向后台化，否则 exec 挂住）：
    ```bash
-   kubectl exec <pod-name> -n <namespace> -- tc qdisc add dev eth0 root netem duplicate 30%
+   kubectl exec <pod-name> -n <namespace> -- sh -c \
+     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+   kubectl exec <pod-name> -n <namespace> -- tc qdisc add dev eth0 root netem duplicate <percent>
    ```
 
    **路径 B —— 容器内没有可用 tc（精简镜像的常态）**：用临时容器注入。临时容器与目标容器
@@ -64,8 +68,11 @@
      -o jsonpath='{range .status.ephemeralContainerStatuses[*]}{.name}{"="}{.state}{"\n"}{end}'
 
    # 3) 经载体注入。载体与目标容器共享同一个网络命名空间，操作 eth0 即操作目标 Pod 的网卡；
-   #    tc 来自调试镜像，--profile=netadmin 提供 NET_ADMIN capability
-   kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev eth0 root netem duplicate 30%
+   #    tc 来自调试镜像，--profile=netadmin 提供 NET_ADMIN capability。
+   #    同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）
+   kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- sh -c \
+     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+   kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev eth0 root netem duplicate <percent>
    ```
    - `<verified-cluster-image>`：必须是当前集群**已验证可拉取**且含 **iproute2**（非 BusyBox）的镜像。
      可靠的找法是看集群里已经在跑的镜像 —— 它们必然可拉取：
@@ -75,11 +82,11 @@
    - `--quiet`：不进入交互附着；**不要加 `-it`**
 
    参数含义（两条路径相同）：
-   - `duplicate 30%`：约 30% 的出站数据包会被复制一份重新发送
+   - `duplicate <percent>`：指定比例的出站数据包会被复制一份重新发送，比例按演练目标确定（如 30%）
    - `eth0`：网络接口名称，根据实际情况调整（可通过 `ip link show` 确认）
    - 原理：tc netem 的 duplicate 选项对出站包进行复制，接收端会收到重复数据包
    - **内核级依赖（两条路径相同）**：netem 需要宿主机内核支持 sch_netem。若注入报
-     `RTNETLINK answers: Operation not supported`，即内核不支持 netem 的确证 —— 立即停止，
+     `RTNETLINK answers: Operation not supported` 或 `RTNETLINK answers: No such file or directory`（模块文件缺失），即内核不支持 netem 的确证 —— 立即停止，
      **不要重试、不要换 Pod 或重建临时容器**（内核是同一个，重试只是空转），发起 replan
      并附上该报错证据，由 Phase 1 改选其他可行方案或判定不可行
 
@@ -90,7 +97,7 @@
    # 路径 B（复用注入时创建的临时容器）
    kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc show dev eth0
    ```
-   应显示 `qdisc netem ... duplicate 30%`
+   应显示 `qdisc netem ... duplicate <percent>`（即注入时配置的重复比例）
 
 **注入验证**：
 1. 在目标 Pod 内查看网络接口统计，确认发送包数异常增高：
@@ -107,10 +114,11 @@
    ```bash
    kubectl logs <pod-name> -n <namespace> --tail=30
    ```
-4. 确认网络监控显示出站流量异常增加约 30%
+4. 确认网络监控显示出站流量按注入比例异常增加
 
 **注入恢复**：
-1. 移除 tc netem 规则 —— **必须用注入时那条路径**，因为 `tc qdisc del` 同样需要真 tc：
+1. 等待 `<duration>` 到期后注入前武装的定时器自动删除规则；如需提前恢复，手动移除 tc netem 规则
+   —— **必须用注入时那条路径**，因为 `tc qdisc del` 同样需要真 tc：
    ```bash
    # 路径 A（注入时用的是容器自带 iproute2 tc）
    kubectl exec <pod-name> -n <namespace> -- tc qdisc del dev eth0 root
@@ -139,7 +147,7 @@
 3. 确认应用响应时间和吞吐量恢复正常
 
 **基准事实**：
-- **根因**：Pod 网络接口上约 30% 的出站数据包被 tc netem duplicate 复制重发，导致接收端收到重复包，占用额外带宽和处理资源
-- **必现现象**：出站 TX packets 增长率异常偏高（约 1.3 倍）；网络带宽占用增加；TCP 层自动去重但消耗额外 CPU；应用层若无幂等保护可能处理重复业务消息
+- **根因**：Pod 网络接口上按注入比例的出站数据包被 tc netem duplicate 复制重发，导致接收端收到重复包，占用额外带宽和处理资源
+- **必现现象**：出站 TX packets 增长率异常偏高（与注入比例对应）；网络带宽占用增加；TCP 层自动去重但消耗额外 CPU；应用层若无幂等保护可能处理重复业务消息
 - **方案说明**：此为 kubectl-native 方案（选用前提：`pod-network` 未提供 duplicate action，以 `--help` 实测为准）。恢复不使用 blade destroy，而是通过 `tc qdisc del dev eth0 root` 移除规则，且必须沿注入时那条路径执行
 - **tc 来源决定成败**：netem 只有 iproute2 的 tc 支持。目标容器里同名的 BusyBox applet 会以 `invalid argument 'root' to 'command'` 失败，而 `command -v tc` 检测不出这个差别 —— 判据是 `tc -Version` 的输出内容。临时容器与目标容器共享网络命名空间，因此用调试镜像的 tc 操作 `eth0` 等价于操作目标 Pod 的网卡，这条路径不依赖目标镜像里有什么，也不依赖集群安装 ChaosBlade

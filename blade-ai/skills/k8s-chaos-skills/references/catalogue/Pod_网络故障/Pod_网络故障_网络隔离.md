@@ -108,11 +108,16 @@
 注入命令：
 ```bash
 # 1. 在目标 Pod 所在节点创建 debug Pod
-kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep 900
+kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep <duration>
 
 # 2. 获取目标 Pod 容器 PID，nsenter 进入其网络命名空间执行 iptables
+#    取 PID 链已实测：crictl ps 不支持 --namespace 参数（v1.16 实测报 flag not defined），
+#    必须先用 crictl pods --label io.kubernetes.pod.uid=<pod-uid> 定位 sandbox 再按 --pod 过滤；
+#    inspect 输出的 "pid": 后带空格，grep 模式必须容忍空白。
 kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
-  PID=$(crictl inspect $(crictl ps --name <container-name> --namespace <namespace> -q | head -1) -o json 2>/dev/null | grep -o "\"pid\":[0-9]*" | head -1 | cut -d: -f2)
+  POD_ID=$(crictl pods --label io.kubernetes.pod.uid=<pod-uid> -q | head -1)
+  CID=$(crictl ps --pod $POD_ID --name <container-name> -q | head -1)
+  PID=$(crictl inspect $CID 2>/dev/null | grep -o "\"pid\":[[:space:]]*[0-9]*" | head -1 | grep -o "[0-9]*")
   # 先武装定时恢复（$PID 此刻由外层 shell 展开并固化进 timer），再注入 DROP，与宿主机类用例保持一致的“恢复先于自断”规范。
   # 注意：武装块与各条注入之间必须用 && 串联（不能仅靠换行分隔），
   # 否则 target_guard 的 iptables 正反规则配对解析会把后续 -A 规则误并入前一条 -D 捕获，导致校验失败被拦截。
@@ -126,7 +131,9 @@ kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
 ```bash
 # 通过 debug Pod 手动恢复（如 systemd timer 尚未到期）
 kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
-  PID=$(crictl inspect $(crictl ps --name <container-name> --namespace <namespace> -q | head -1) -o json 2>/dev/null | grep -o "\"pid\":[0-9]*" | head -1 | cut -d: -f2)
+  POD_ID=$(crictl pods --label io.kubernetes.pod.uid=<pod-uid> -q | head -1)
+  CID=$(crictl ps --pod $POD_ID --name <container-name> -q | head -1)
+  PID=$(crictl inspect $CID 2>/dev/null | grep -o "\"pid\":[[:space:]]*[0-9]*" | head -1 | grep -o "[0-9]*")
   nsenter -t $PID -n iptables -D OUTPUT -j DROP
   nsenter -t $PID -n iptables -D INPUT -j DROP
 '

@@ -17,7 +17,7 @@
    blade create k8s node-process stop \
      --names <节点名> \
      --process terway \
-     --timeout 120 \
+     --timeout <duration> \
      --kubeconfig <路径>
    ```
    或删除 CNI 插件 DaemonSet 中该节点的 Pod（先 cordon 节点防止重建）
@@ -52,22 +52,30 @@
 
 前提条件：集群需支持 `kubectl debug node` 功能（K8s 1.18+），或可操作 CNI DaemonSet
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**）：
 ```bash
 # 方式A：通过 kubectl debug node 挂起 CNI 插件进程
+# ⚠️ 先用 systemd-run 登记定时 SIGCONT 再 STOP —— 定时器由宿主机 systemd(PID 1) 管理，
+#    不受 debug pod 生命周期影响
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'kill -STOP $(pidof terway-daemon || pidof cilium-agent || pidof calico-node)'
-# 方式B：删除节点上的 CNI Pod（先 cordon 防止重建）
+  'systemd-run --on-active=<recovery-seconds>s --unit=blade-cont-cni \
+     sh -c "kill -CONT \$(pidof terway-daemon || pidof cilium-agent || pidof calico-node)" &&
+   kill -STOP $(pidof terway-daemon || pidof cilium-agent || pidof calico-node)'
+
+# 方式B：删除节点上的 CNI Pod（先武装定时 uncordon，再 cordon + 删除）
+( sleep <duration>; kubectl uncordon <node-name> ) >/dev/null 2>&1 &
+echo $! > /tmp/blade-restore-cordon-cni.pid
 kubectl cordon <node-name>
 kubectl delete pod -n kube-system -l app=terway --field-selector spec.nodeName=<node-name>
 ```
 
-恢复命令：
+恢复命令（提前恢复）：
 ```bash
-# 方式A：恢复 CNI 插件进程
+# 方式A：恢复 CNI 插件进程（SIGCONT 幂等，武装的定时器后续再触发也无副作用）
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
   'kill -CONT $(pidof terway-daemon || pidof cilium-agent || pidof calico-node)'
-# 方式B：uncordon 节点，等待 DaemonSet 重建 CNI Pod
+# 方式B：先终止武装的定时器，再 uncordon 节点，等待 DaemonSet 重建 CNI Pod
+kill $(cat /tmp/blade-restore-cordon-cni.pid) 2>/dev/null; rm -f /tmp/blade-restore-cordon-cni.pid
 kubectl uncordon <node-name>
 # 删除 debug Pod
 kubectl delete pod <debug-pod-name> --force --grace-period=0
@@ -76,4 +84,5 @@ kubectl delete pod <debug-pod-name> --force --grace-period=0
 注意事项：
 - CNI 插件名称因集群而异：Terway（阿里云）、Cilium、Calico 等，需根据实际环境确认进程名
 - 方式B 删除 CNI Pod 后，如未 cordon 节点，DaemonSet 会立即重建，故障窗口极短
-- 与 ChaosBlade 不同，此方式无自动超时恢复，必须手动恢复进程或 uncordon 节点
+- 自恢复基于注入前武装的定时器：方式 A 为宿主机 systemd-run 定时 SIGCONT，方式 B 为客户端
+  sleep <duration> + uncordon；到期自动恢复，提前恢复仍用上方手动命令

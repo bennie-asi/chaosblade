@@ -21,8 +21,8 @@
      --path / \
      --read \
      --write \
-     --size 10 \
-     --timeout 600 \
+     --size <size> \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
    - `--path` 必须使用 `/`（容器根文件系统，overlay 挂载）。不要使用 EmptyDir、hostPath 等子目录挂载路径，这些路径在 ChaosBlade nsexec 模式下校验会失败。

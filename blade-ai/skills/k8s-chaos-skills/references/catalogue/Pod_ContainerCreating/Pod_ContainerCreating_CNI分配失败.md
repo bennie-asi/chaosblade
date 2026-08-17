@@ -11,15 +11,25 @@
 
 **演练步骤**：
 1. 查看目标节点的 ENI 和 IP 分配情况，确认目标应用 Pod 所在节点（记为 `<目标节点>`）
-2. 给目标节点添加标签，并给应用 A 的 Deployment 添加 nodeSelector，确保新 Pod 只能调度到目标节点（防止调度器规避耗尽节点）：
+2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动删除耗尽 Deployment、
+   还原 nodeSelector、移除节点标签，补齐自恢复能力；PID 落盘供提前恢复时终止定时器）：
+   ```bash
+   ( sleep <duration>; \
+     kubectl delete deployment chaos-ip-exhaust -n <namespace>; \
+     kubectl patch deployment <deployment-name> -n <namespace> --type='json' \
+       -p='[{"op":"remove","path":"/spec/template/spec/nodeSelector/net.ops~1ipam-audit"}]'; \
+     kubectl label node <目标节点> net.ops/ipam-audit- ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-cni.pid
+   ```
+3. 给目标节点添加标签，并给应用 A 的 Deployment 添加 nodeSelector，确保新 Pod 只能调度到目标节点（防止调度器规避耗尽节点）：
    ```bash
    kubectl label node <目标节点> net.ops/ipam-audit=true
    kubectl patch deployment <deployment-name> -n <namespace> --type='merge' \
      -p='{"spec":{"template":{"spec":{"nodeSelector":{"net.ops/ipam-audit":"true"}}}}}'
    ```
    等待 rollout 完成（Pod 仍在原节点运行，因为目标节点已有此标签）。
-   记录原始 nodeSelector 值，恢复时还原。
-3. 使用 `execute_skill_script` 在目标节点批量创建 Pod 耗尽 IP/ENI 资源（**`kubectl create/apply` 不可用，必须使用脚本**）：
+   记录原始 nodeSelector 值，恢复时还原（武装还原仅移除新增的 key，若原本还有其他 nodeSelector 不受影响）。
+4. 使用 `execute_skill_script` 在目标节点批量创建 Pod 耗尽 IP/ENI 资源（**`kubectl create/apply` 不可用，必须使用脚本**）：
    ```
    execute_skill_script(
      skill_name="k8s-chaos-skills",
@@ -28,8 +38,8 @@
    )
    ```
    脚本会创建 `chaos-ip-exhaust` Deployment 并绑定到目标节点，脚本输出中的 `[drill-vehicle: ...]` 登记行会被框架自动解析，将该 Deployment 注册为演练占位载具（恢复阶段与任务中途崩溃时的兜底清理都依赖此登记）。
-4. 删除应用 A 在目标节点上的 Pod，触发重建。由于 nodeSelector 约束，新 Pod 只能调度到已耗尽的目标节点，将进入 ContainerCreating 状态
-5. 观察新 Pod 的 ContainerCreating 状态
+5. 删除应用 A 在目标节点上的 Pod，触发重建。由于 nodeSelector 约束，新 Pod 只能调度到已耗尽的目标节点，将进入 ContainerCreating 状态
+6. 观察新 Pod 的 ContainerCreating 状态
 
 **注入验证**：
 1. 执行 `kubectl get pods`，确认应用 A 新 Pod 状态为 ContainerCreating
@@ -37,10 +47,18 @@
 3. 查看节点 ENI/IP 使用情况，确认资源已耗尽
 
 **注入恢复**：
-1. 删除批量创建的 Deployment：`kubectl delete deployment chaos-ip-exhaust -n <namespace>`（该 Deployment 已由脚本登记行注册为演练载具，此删除会被守卫豁免）
-2. 移除应用 A 的 Deployment 上添加的 nodeSelector（还原为原始值，若原本无 nodeSelector 则移除整个 nodeSelector）
-3. 移除目标节点上添加的标签：`kubectl label node <目标节点> net.ops/ipam-audit-`
-4. 等待 IP/ENI 资源释放和 Pod 滚动更新完成
+1. 等待 `<duration>` 到期后武装的定时器自动删除耗尽 Deployment、还原 nodeSelector、移除节点标签；如需提前恢复，先终止定时器：
+   ```bash
+   kill $(cat /tmp/blade-restore-cni.pid) 2>/dev/null; rm -f /tmp/blade-restore-cni.pid
+   ```
+2. 删除批量创建的 Deployment：`kubectl delete deployment chaos-ip-exhaust -n <namespace>`（该 Deployment 已由脚本登记行注册为演练载具，此删除会被守卫豁免）
+3. 移除应用 A 的 Deployment 上添加的 nodeSelector（还原为原始值，若原本无 nodeSelector 则移除整个 nodeSelector）：
+   ```bash
+   kubectl patch deployment <deployment-name> -n <namespace> --type='json' \
+     -p='[{"op":"remove","path":"/spec/template/spec/nodeSelector/net.ops~1ipam-audit"}]'
+   ```
+4. 移除目标节点上添加的标签：`kubectl label node <目标节点> net.ops/ipam-audit-`
+5. 等待 IP/ENI 资源释放和 Pod 滚动更新完成
 
 **恢复验证**：
 1. 执行 `kubectl get pods`，确认应用 A 的 Pod 状态恢复为 Running

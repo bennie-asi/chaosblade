@@ -46,7 +46,7 @@
    #（kubewiz 通道约 1024 字节 ≈ 15-20 个节点名），超出则拆成多批顺序提交。
    blade create k8s node-network drop \
      --names <node1>,<node2>,...,<nodeK> \
-     --timeout 120 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
    ⚠️ 严禁把 `EXCLUDED_NODES`（API Server/控制面节点、kubewiz-executor Pod 所在节点）纳入任何一批。
@@ -136,7 +136,7 @@ TARGET_NODES="<NODES 去掉 EXCLUDED_NODES 后的列表>"
 
 # 2. 遍历目标节点屏蔽 K8s 控制面端口（kubelet + API Server）；EXCLUDED_NODES 禁止注入
 for NODE in $TARGET_NODES; do
-  kubectl debug node/$NODE --profile=sysadmin --image=<verified-cluster-image> -- sleep 900
+  kubectl debug node/$NODE --profile=sysadmin --image=<verified-cluster-image> -- sleep <duration>
   # ⚠️ 关键顺序：先用 systemd-run 武装定时恢复（仅登记闹钟、不删规则），再下 DROP。
   #    DROP 会切断 10250/6443——本条 exec 依赖的通道，若恢复排在 DROP 后，exec 流会在闹钟登记前被切断 → 永不恢复。
   #    ✅ 注入后本条 exec 会因 6443/10250 被切断而超时（如 timed out after 10s）——这是预期成功信号，**不要重试该 exec、不要换镜像**；继续下一个节点，并改用集群侧 `kubectl get nodes -l topology.kubernetes.io/zone=<az-name>` 验证。
@@ -185,7 +185,7 @@ TARGET_NODES="<NODES 去掉 EXCLUDED_NODES 后的列表>"
 
 # 对目标节点注入全量 DROP 并启动 systemd 定时恢复；EXCLUDED_NODES 禁止注入
 for NODE in $TARGET_NODES; do
-  kubectl debug node/$NODE --profile=sysadmin --image=<verified-cluster-image> -- sleep 900
+  kubectl debug node/$NODE --profile=sysadmin --image=<verified-cluster-image> -- sleep <duration>
   kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
     systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-azfull sh -c "iptables -D OUTPUT -j DROP; iptables -D INPUT -j DROP" &&
     iptables -I OUTPUT -j DROP && iptables -I INPUT -j DROP

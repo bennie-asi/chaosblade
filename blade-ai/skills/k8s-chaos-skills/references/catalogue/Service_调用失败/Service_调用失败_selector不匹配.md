@@ -11,8 +11,14 @@
 
 **演练步骤**：
 1. 记录应用 A 的 Service 当前 selector 配置
-2. 使用 kubectl patch 修改 Service 的 selector，使其不匹配任何 Pod：
+2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动将 selector 还原为
+   原始值，补齐自恢复能力；PID 落盘供提前恢复时终止定时器）：
    ```bash
+   ORIG_SELECTOR=$(kubectl get svc <service-name> -n <namespace> -o jsonpath='{.spec.selector}')
+   ( sleep <duration>; kubectl patch svc <service-name> -n <namespace> --type='json' \
+       -p="[{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${ORIG_SELECTOR}}]" ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-selector.pid
+   # 再篡改 selector 注入
    kubectl patch svc <service-name> -n <namespace> \
      -p '{"spec":{"selector":{"app":"non-existent-app"}}}'
    ```
@@ -25,12 +31,16 @@
 4. 对比 Service selector 与 Pod labels，确认不匹配
 
 **注入恢复**：
-1. 使用 kubectl patch 将 Service selector 恢复为原始值：
+1. 等待 `<duration>` 到期后武装的定时器自动将 selector 还原为原始值；如需提前恢复，先终止定时器：
+   ```bash
+   kill $(cat /tmp/blade-restore-selector.pid) 2>/dev/null; rm -f /tmp/blade-restore-selector.pid
+   ```
+2. 使用 kubectl patch 将 Service selector 恢复为原始值：
    ```bash
    kubectl patch svc <service-name> -n <namespace> \
      -p '{"spec":{"selector":{"app":"<原始标签>"}}}'
    ```
-2. 等待 Endpoints 自动更新
+3. 等待 Endpoints 自动更新
 
 **恢复验证**：
 1. 执行 `kubectl get endpoints <service-name>`，确认 Endpoints 列表恢复，包含后端 Pod IP

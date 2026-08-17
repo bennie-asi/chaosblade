@@ -11,10 +11,16 @@
 
 **演练步骤**：
 1. 选取一个运行 DaemonSet Pod 的节点
-2. 使用 kubectl 将该节点标记为不可调度（cordon）：`kubectl cordon <node>`
-3. 给该节点添加一个 DaemonSet 未配置容忍的自定义污点：`kubectl taint nodes <node> node.ops/maintenance=true:NoSchedule`
-4. 删除该节点上的 DaemonSet Pod，观察 Pod 是否被重建
-5. 观察 DaemonSet 副本数变化
+2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动 uncordon 并摘除污点，
+   补齐自恢复能力）：
+   ```bash
+   ( sleep <duration>; kubectl uncordon <node>; kubectl taint nodes <node> node.ops/maintenance=true:NoSchedule- ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-ds.pid
+   ```
+3. 使用 kubectl 将该节点标记为不可调度（cordon）：`kubectl cordon <node>`
+4. 给该节点添加一个 DaemonSet 未配置容忍的自定义污点：`kubectl taint nodes <node> node.ops/maintenance=true:NoSchedule`
+5. 删除该节点上的 DaemonSet Pod，观察 Pod 是否被重建
+6. 观察 DaemonSet 副本数变化
 
 **注入验证**：
 1. 执行 `kubectl get nodes`，确认目标节点标记为 SchedulingDisabled
@@ -23,9 +29,13 @@
 4. 确认目标节点上的 DaemonSet Pod 删除后无法被重建
 
 **注入恢复**：
-1. 使用 kubectl 取消节点不可调度标记（uncordon）：`kubectl uncordon <node>`
-2. 移除自定义污点：`kubectl taint nodes <node> node.ops/maintenance=true:NoSchedule-`
-3. 等待 DaemonSet Pod 在该节点重建
+1. 等待 `<duration>` 到期后武装的定时器自动执行 uncordon + 摘除污点；如需提前恢复：
+   ```bash
+   kill $(cat /tmp/blade-restore-ds.pid) 2>/dev/null; rm -f /tmp/blade-restore-ds.pid
+   ```
+2. 使用 kubectl 取消节点不可调度标记（uncordon）：`kubectl uncordon <node>`
+3. 移除自定义污点：`kubectl taint nodes <node> node.ops/maintenance=true:NoSchedule-`
+4. 等待 DaemonSet Pod 在该节点重建
 
 **恢复验证**：
 1. 执行 `kubectl get nodes`，确认目标节点恢复为可调度状态

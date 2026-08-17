@@ -10,8 +10,17 @@
 2. 确认监控系统可观测 Pod 副本数和请求指标
 
 **演练步骤**：
-1. 定位应用 A 的 Deployment/StatefulSet
-2. 使用 kubectl 将 replicas 修改为较小的值，模拟人为误操作导致的意外缩容
+1. 定位应用 A 的 Deployment/StatefulSet，并记录当前副本数
+2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动将 replicas 扩容回
+   原始值，补齐自恢复能力；PID 落盘供提前恢复时终止定时器）：
+   ```bash
+   ORIG_REPLICAS=$(kubectl get <workload-kind> <name> -n <namespace> -o jsonpath='{.spec.replicas}')
+   ( sleep <duration>; kubectl scale <workload-kind> <name> -n <namespace> \
+       --replicas=$ORIG_REPLICAS ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-scale.pid
+   # 再缩容注入
+   kubectl scale <workload-kind> <name> -n <namespace> --replicas=<较小值>
+   ```
 3. 观察 Pod 缩容过程和应用状态变化
 
 **标签选择器提示**：
@@ -25,8 +34,12 @@
 3. （可选，仅当演练方提供了应用访问入口时）确认请求延迟增大/超时或可用性下降；无入口时上述副本数证据成立即可判定
 
 **注入恢复**：
-1. 使用 kubectl 将 replicas 恢复为原来的合理值
-2. 等待 Pod 自动扩容
+1. 等待 `<duration>` 到期后武装的定时器自动将 replicas 扩容回原始值；如需提前恢复，先终止定时器：
+   ```bash
+   kill $(cat /tmp/blade-restore-scale.pid) 2>/dev/null; rm -f /tmp/blade-restore-scale.pid
+   ```
+2. 使用 kubectl 将 replicas 恢复为原来的合理值
+3. 等待 Pod 自动扩容
 
 **恢复验证**：
 1. 执行 `kubectl get pods`，确认 Pod 总数恢复到缩容前的值

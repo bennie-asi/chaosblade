@@ -20,8 +20,13 @@
    kubectl describe node <node-name> | grep -A 5 Taints
    kubectl get pods --field-selector spec.nodeName=<node-name> -A -o wide
    ```
-2. 为节点添加污点（`kubectl taint`），`<effect>` 按演练目标选择：
+2. 为节点添加污点（`kubectl taint`），`<effect>` 按演练目标选择。**先武装定时摘除，再注入**
+   （在运行 kubectl 的机器上后台武装，到期自动摘除污点，补齐自恢复能力）：
    ```bash
+   # 武装定时摘除（PID 落盘，供提前恢复时终止定时器）
+   ( sleep <duration>; kubectl taint nodes <node-name> <key>=<value>:<effect>- ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-taint.pid
+   # 再注入污点
    kubectl taint nodes <node-name> <key>=<value>:<effect>
    ```
    说明：
@@ -44,13 +49,17 @@
 > - 同一事实（如污点是否存在）确认一次即可，不要重复查询。
 
 **注入恢复**：
-1. 移除添加的污点（注意末尾的 `-` 表示删除，`<key>=<value>:<effect>` 须与注入时完全一致）：
+1. 等待 `<duration>` 到期后武装的定时器自动摘除污点；如需提前恢复，手动移除添加的污点
+   （注意末尾的 `-` 表示删除，`<key>=<value>:<effect>` 须与注入时完全一致）：
    ```bash
+   kill $(cat /tmp/blade-restore-taint.pid) 2>/dev/null; rm -f /tmp/blade-restore-taint.pid
    kubectl taint nodes <node-name> <key>=<value>:<effect>-
    ```
 2. 仅当注入的是 `NoExecute` 时：等待调度器重新平衡工作负载
 
-> ⚠️ `kubectl taint` **没有自动恢复机制**（不同于 ChaosBlade 的 `--timeout`）。即使注入请求里带了 `timeout` 参数，污点也会一直留在节点上，必须显式执行上述恢复命令。
+> ⚠️ `kubectl taint` 本身**没有自动恢复机制**（不同于 ChaosBlade 的 `--timeout`），
+> 自恢复完全依赖注入前武装的后台定时器；若武装进程所在 shell 中途被销毁且未到期，
+> 污点会一直留在节点上，必须显式执行上述恢复命令。
 
 **恢复验证**：
 1. 执行 `kubectl describe node <node-name> | grep -A 5 Taints`，确认注入的 `<key>=<value>:<effect>` 已移除

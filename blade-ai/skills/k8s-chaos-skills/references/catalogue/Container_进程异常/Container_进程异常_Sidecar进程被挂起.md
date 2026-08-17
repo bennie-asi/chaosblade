@@ -31,7 +31,7 @@
      --labels "<label-key>=<label-value>" \
      --container-names <sidecar-container-name> \
      --process <进程名> \
-     --timeout 600 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
 5. 观察 Sidecar 容器进程挂起后的行为（是否触发探针重启、主容器是否受影响）

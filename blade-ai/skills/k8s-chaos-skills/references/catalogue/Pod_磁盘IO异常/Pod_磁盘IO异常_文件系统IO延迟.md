@@ -24,10 +24,10 @@
    blade create k8s pod-disk burn \
      --read --write \
      --path / \
-     --size 100 \
+     --size <size> \
      --namespace <namespace> \
      --labels "<label-key>=<label-value>" \
-     --timeout 600 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
    - `--read --write`：同时制造读写 IO 负载
@@ -51,7 +51,7 @@
 
 **注入恢复**：
 1. 销毁 blade 实验：`blade destroy <blade_uid>`
-2. 或等待 `--timeout` 600 秒到期后自动恢复
+2. 或等待 `--timeout`（`<duration>`）到期后自动恢复
 3. 若应用存在连接池超时，可能需等待连接回收或重启 Pod
 
 **恢复验证**：

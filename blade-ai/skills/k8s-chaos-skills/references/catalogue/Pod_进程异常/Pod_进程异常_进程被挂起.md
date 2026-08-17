@@ -27,7 +27,7 @@
      --namespace <namespace> \
      --labels "<label-key>=<label-value>" \
      --process <实际进程名> \
-     --timeout 600 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
    - `--process`：目标进程名，必须与 ps aux 输出一致
@@ -58,7 +58,7 @@
    blade destroy <blade_uid>
    ```
 2. 若 Liveness 探针已触发容器重启，等待新 Pod Ready 即可
-3. 或等待 `--timeout` 600 秒到期后 ChaosBlade 自动发送 SIGCONT 恢复
+3. 或等待 `--timeout`（`<duration>`）到期后 ChaosBlade 自动发送 SIGCONT 恢复
 
 **恢复验证**：
 1. 确认进程恢复正常运行状态：
@@ -93,21 +93,25 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'command -v kill; command -v pgr
 ```
 两者都有输出才走本路径；任一缺失（distroless / scratch 等极简镜像的常态）走路径 B。
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**；到期自动发送 SIGCONT，补齐自恢复能力）：
 ```bash
-# 挂起目标进程（发送 SIGSTOP）
-kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -STOP $(pgrep -f <process-name>)'
+# 武装定时恢复（容器内后台定时器，必须重定向后台化，否则 exec 挂住；
+# grep -vw $$ 排除定时器进程自身——其 cmdline 也包含进程名，不排除会混入 pgrep 结果）
+kubectl exec <pod-name> -n <namespace> -- sh -c \
+  '( sleep <duration>; kill -CONT $(pgrep -f <process-name> | grep -vw $$) ) >/dev/null 2>&1 &' &&
+# 挂起目标进程（发送 SIGSTOP；同样排除自身，否则 PID 序不利时 sh 会先冻结自己、目标漏发）
+kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -STOP $(pgrep -f <process-name> | grep -vw $$)'
 ```
 
 恢复命令：
 ```bash
-# 恢复目标进程（发送 SIGCONT）
-kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -CONT $(pgrep -f <process-name>)'
+# 恢复目标进程（发送 SIGCONT；SIGCONT 幂等，武装的定时器后续再触发也无副作用）
+kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -CONT $(pgrep -f <process-name> | grep -vw $$)'
 ```
 
 注意事项：
 - 必须确认实际进程名（通过 `ps aux` 确认），不可凭服务名猜测
-- 无自动超时恢复机制，必须手动发送 SIGCONT 恢复
+- 自恢复基于注入前武装的容器内后台定时器（sleep <duration> + SIGCONT），到期自动恢复；提前恢复仍用上方手动命令
 - 若 Liveness 探针已触发容器重启，进程会自动恢复（新容器中进程正常启动）
 - 效果与 ChaosBlade 完全等价，ChaosBlade 内部也是发送 SIGSTOP/SIGCONT
 

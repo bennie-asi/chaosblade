@@ -11,13 +11,15 @@
 
 **演练步骤**：
 1. 定位应用 A 的 Pod 及其挂载的 Volume 路径
-2. 进入目标节点，在 Volume 的挂载目录下创建一个持续占用文件句柄的进程，模拟 device busy：
+2. 进入目标节点，在 Volume 的挂载目录下创建一个持续占用文件句柄的进程，模拟 device busy
+   （**必须用 `timeout` 自限时**，到期自动释放句柄=自动恢复；裸 `tail -f &` 会无限占用，
+   遗忘后 volume 永久无法卸载）：
    ```bash
    # 在节点上执行（通过 nsenter 或 debug pod）
    # 找到 volume 挂载路径
    mount | grep <pv-name>
-   # 创建持续占用的进程
-   tail -f <挂载路径>/some-file &
+   # 创建限时占用的进程（<duration> 秒后自动结束）
+   timeout <duration> tail -f <挂载路径>/some-file &
    ```
    或使用 chaosblade 对节点注入 IO 负载，锁住磁盘操作：
    ```bash
@@ -25,7 +27,7 @@
      --names <节点名> \
      --path <volume挂载路径> \
      --read --write \
-     --timeout 180 \
+     --timeout <duration> \
      --kubeconfig <路径>
    ```
 3. 删除应用 A 的 Pod，触发 Terminating 流程
@@ -37,7 +39,8 @@
 3. 在节点上确认 volume 挂载路径仍被占用
 
 **注入恢复**：
-1. 终止节点上占用 volume 的进程（kill tail 进程）
+1. 句柄占用进程（`timeout <duration> tail -f`）到期自动结束；如需提前恢复，终止占用进程
+   （kill tail 进程或 `fuser -k <挂载路径>`）
 2. 若使用 chaosblade：销毁 IO 实验 `blade destroy <UID>`
 3. 等待 kubelet 自动重试 unmount 操作
 

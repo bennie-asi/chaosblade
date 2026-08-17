@@ -53,10 +53,21 @@
          storage: 20Gi
      volumeName: archive-vol-chaos
    ```
-3. 修改应用 A 的工作负载模板，添加引用该 PVC 的 volume 和 volumeMount
-4. （Deployment）等待滚动更新完成，确认所有旧 Pod 已被替换；（StatefulSet）删除目标 Pod 触发重建
-5. （仅 Deployment）滚动更新完成后，立即还原 maxUnavailable 为原始值（maxUnavailable 只是使滚动更新完成的手段，不是故障本身，不应泄漏到恢复阶段）
-6. 观察 Pod 的 ContainerCreating 状态
+3. **先武装定时恢复，再修改模板**（在运行 kubectl 的机器上后台武装，到期自动移除注入的
+   volumes/volumeMounts 并清理 PV/PVC，补齐自恢复能力；`<volume-index>`/`<mount-index>` 为注入时
+   新增项在数组中的索引，添加前先记录；PID 落盘供提前恢复时终止定时器）：
+   ```bash
+   ( sleep <duration>; \
+     kubectl patch <workload-kind>/<name> -n <namespace> --type='json' \
+       -p='[{"op":"remove","path":"/spec/template/spec/containers/<container-index>/volumeMounts/<mount-index>"},{"op":"remove","path":"/spec/template/spec/volumes/<volume-index>"}]'; \
+     kubectl delete pvc archive-vol-claim -n <namespace>; \
+     kubectl delete pv archive-vol-chaos ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-csi.pid
+   ```
+4. 修改应用 A 的工作负载模板，添加引用该 PVC 的 volume 和 volumeMount
+5. （Deployment）等待滚动更新完成，确认所有旧 Pod 已被替换；（StatefulSet）删除目标 Pod 触发重建
+6. （仅 Deployment）滚动更新完成后，立即还原 maxUnavailable 为原始值（maxUnavailable 只是使滚动更新完成的手段，不是故障本身，不应泄漏到恢复阶段）
+7. 观察 Pod 的 ContainerCreating 状态
 
 **StatefulSet 目标工作负载**：
 - StatefulSet 没有 maxUnavailable；滚动更新控制参数是 `spec.updateStrategy.rollingUpdate.partition`
@@ -72,11 +83,15 @@
 4. **如果观察到 Pending + FailedScheduling（事件含 `volume node affinity conflict`），说明 PV 带了 nodeAffinity，机制错误——不可判定为 verified，必须删除 PV/PVC 并按本用例模板（无 nodeAffinity）重新注入**
 
 **注入恢复**：
-1. 恢复应用 A 的工作负载模板，移除注入时添加的 volumes 和 volumeMounts（两者都需移除，只移除其中一个会导致配置错误）
-2. 等待 Pod 滚动更新/重建完成，确认 Pod 恢复 Running
-3. （Deployment）还原 maxUnavailable 为演练前记录的原始值
-4. 清理测试 PVC：`kubectl delete pvc archive-vol-claim -n <namespace>`
-5. 清理测试 PV：`kubectl delete pv archive-vol-chaos`
+1. 等待 `<duration>` 到期后武装的定时器自动移除注入的 volumes/volumeMounts 并清理 PV/PVC；如需提前恢复，先终止定时器：
+   ```bash
+   kill $(cat /tmp/blade-restore-csi.pid) 2>/dev/null; rm -f /tmp/blade-restore-csi.pid
+   ```
+2. 恢复应用 A 的工作负载模板，移除注入时添加的 volumes 和 volumeMounts（两者都需移除，只移除其中一个会导致配置错误）
+3. 等待 Pod 滚动更新/重建完成，确认 Pod 恢复 Running
+4. （Deployment）还原 maxUnavailable 为演练前记录的原始值
+5. 清理测试 PVC：`kubectl delete pvc archive-vol-claim -n <namespace>`
+6. 清理测试 PV：`kubectl delete pv archive-vol-chaos`
 
 **恢复验证**：
 1. 执行 `kubectl get pods`，确认 Pod 状态恢复为 Running

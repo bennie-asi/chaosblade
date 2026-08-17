@@ -31,10 +31,14 @@
 
 2. 注入带宽限制，按上一步结论二选一。
 
-   **路径 A —— 容器内确认是 iproute2 tc**（需 NET_ADMIN；`CapEff` 全零的容器会报 EPERM）：
+   **路径 A —— 容器内确认是 iproute2 tc**（需 NET_ADMIN；`CapEff` 全零的容器会报 EPERM）。
+   **先武装定时自删，再注入规则**（后台进程与目标容器同 netns，到期自动移除规则，
+   补齐自恢复能力；必须重定向后台化，否则 exec 挂住）：
    ```bash
+   kubectl exec <pod-name> -n <namespace> -- sh -c \
+     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
    kubectl exec <pod-name> -n <namespace> -- \
-     tc qdisc add dev eth0 root tbf rate 1mbit burst 32kbit latency 400ms
+     tc qdisc add dev eth0 root tbf rate <rate> burst <burst> latency <latency>
    ```
 
    **路径 B —— 容器内没有可用 tc（精简镜像的常态）**：用临时容器注入。临时容器与目标容器
@@ -57,9 +61,11 @@
    kubectl get pod <pod-name> -n <namespace> \
      -o jsonpath='{range .status.ephemeralContainerStatuses[*]}{.name}{"="}{.state}{"\n"}{end}'
 
-   # 3) 经载体注入
+   # 3) 经载体注入。同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）
+   kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- sh -c \
+     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
    kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- \
-     tc qdisc add dev eth0 root tbf rate 1mbit burst 32kbit latency 400ms
+     tc qdisc add dev eth0 root tbf rate <rate> burst <burst> latency <latency>
    ```
    - `<verified-cluster-image>`：必须是当前集群**已验证可拉取**且含 **iproute2**（非 BusyBox）的镜像。
      可靠的找法是看集群里已经在跑的镜像 —— 它们必然可拉取：
@@ -69,10 +75,10 @@
    - `--quiet`：不进入交互附着；**不要加 `-it`**
 
    参数说明（两条路径相同）：
-   - `rate 1mbit`：目标速率。注意单位是 **bit/s** 而非 byte/s —— `1mbit` ≈ 125 KB/s
-   - `burst 32kbit`：令牌桶容量，允许的瞬时突发量。**过小会导致达不到 rate**
-     （包还没攒够令牌就被丢），经验值取 `rate/8` 上下；`rate 1mbit` 配 `burst 32kbit` 是安全组合
-   - `latency 400ms`：包在队列里最长等待时间，超时即丢弃。**过小会变成丢包而非限速**
+   - `rate <rate>`：目标速率，按演练目标确定。注意单位是 **bit/s** 而非 byte/s —— 如 `1mbit` ≈ 125 KB/s
+   - `burst <burst>`：令牌桶容量，允许的瞬时突发量。**过小会导致达不到 rate**
+     （包还没攒够令牌就被丢），经验值取 `rate/8` 上下；如 `rate 1mbit` 配 `burst 32kbit` 是安全组合
+   - `latency <latency>`：包在队列里最长等待时间，超时即丢弃。**过小会变成丢包而非限速**（如 `400ms`）
    - `dev eth0`：通常为 Pod 主网卡，部分环境为 `eth0` 以外名称
    - 只限**出方向**。入方向限速需 `ifb` 重定向（多一层内核模块依赖），不在本用例范围
 
@@ -86,7 +92,7 @@
    # 路径 B（复用注入时创建的临时容器）
    kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc show dev eth0
    ```
-   输出应包含 `qdisc tbf ... rate 1Mbit burst ... lat ...`
+   输出应包含 `qdisc tbf ... rate <注入速率> burst ... lat ...`
 
 2. 测吞吐，用「注入前 vs 注入后」的速率差作为判据。**不要用小请求测** ——
    限速不影响单个小包的时延，几 KB 的请求在 1mbit 下仍是毫秒级返回，看起来「没生效」：
@@ -95,7 +101,7 @@
    kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- \
      curl -s -o /dev/null -w '%{speed_download} bytes/s in %{time_total}s' --max-time 60 <大文件地址>
    ```
-   判据：`speed_download` 应落在 `rate` 附近（`1mbit` ≈ 125000 bytes/s，允许 ±30% 偏差）。
+   判据：`speed_download` 应落在 `rate` 附近（如 `1mbit` ≈ 125000 bytes/s，允许 ±30% 偏差）。
    若与基线相比无明显下降，检查 `burst` 是否过大（相当于没限速）或测试对象太小。
 
 3. 确认**小请求仍然正常** —— 这是区分「限速」与「网络不通」的关键：
@@ -107,7 +113,8 @@
 4. 检查应用日志是否出现传输超时、上传失败、同步滞后等慢速症状
 
 **注入恢复**：
-1. 删除 tc tbf 规则（不使用 blade destroy，这是 kubectl-native 方案）——
+1. 等待 `<duration>` 到期后注入前武装的定时器自动删除规则；如需提前恢复，手动删除 tc tbf 规则
+   （不使用 blade destroy，这是 kubectl-native 方案）——
    **必须用注入时那条路径**：
    ```bash
    # 路径 A
@@ -138,5 +145,5 @@
 
 **基准事实**：
 - **根因**：通过 tc tbf（令牌桶过滤器）在 Pod 网卡限制出方向速率，模拟带宽受限/专线拥塞环境
-- **必现现象**：大对象下载速率被压到 `rate` 附近（1mbit ≈ 125 KB/s）；`tc qdisc show` 显示 tbf 规则；
+- **必现现象**：大对象下载速率被压到 `rate` 附近；`tc qdisc show` 显示 tbf 规则；
   小请求仍正常返回（区别于网络不通）；应用出现数据同步滞后、上传超时等慢速症状

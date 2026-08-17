@@ -5,7 +5,7 @@
 **Blade 命令**：
 
 ```bash
-blade create k8s pod-pod fail --labels <label-selector> --namespace <namespace> --timeout 60 --kubeconfig <path>
+blade create k8s pod-pod fail --labels <label-selector> --namespace <namespace> --timeout <duration> --kubeconfig <path>
 ```
 
 **故障机制**：ChaosBlade 修改容器镜像为 `<原始镜像>-fault-injection` 后缀版本，K8s 尝试拉取新镜像失败，触发 ImagePullBackOff，使 Pod 不可用。
@@ -30,7 +30,7 @@ blade create k8s pod-pod fail --labels <label-selector> --namespace <namespace> 
 3. 使用 ChaosBlade 注入：
 
 ```bash
-blade create k8s pod-pod fail --labels <label-selector> --namespace <namespace> --timeout 60 --kubeconfig <path>
+blade create k8s pod-pod fail --labels <label-selector> --namespace <namespace> --timeout <duration> --kubeconfig <path>
 ```
 
 4. 注：`pod-pod fail` 通过修改容器镜像为不存在的 `-fault-injection` 后缀版本来制造故障，而非直接删除 Pod
@@ -84,14 +84,22 @@ ChaosBlade 会将容器镜像恢复为原始版本。
 
 前提条件：无特殊要求，仅需 kubectl 可访问集群
 
-注入命令：
+注入命令（**先武装定时还原，再注入**；到期自动还原原始镜像，补齐自恢复能力；PID 落盘供提前恢复时终止定时器）：
 ```bash
-# 修改 Deployment 镜像为不存在的版本
+# 记录原始镜像并武装定时还原
+ORIG_IMAGE=$(kubectl get deployment <deployment-name> -n <namespace> \
+  -o jsonpath='{.spec.template.spec.containers[0].image}')
+( sleep <duration>; kubectl set image deployment/<deployment-name> -n <namespace> \
+    <container-name>=$ORIG_IMAGE ) >/dev/null 2>&1 &
+echo $! > /tmp/blade-restore-image.pid
+# 再修改镜像为不存在的版本
 kubectl set image deployment/<deployment-name> -n <namespace> <container-name>=<原始镜像>:non-existent-tag
 ```
 
 恢复命令：
 ```bash
+# 提前恢复时先终止武装的定时器
+kill $(cat /tmp/blade-restore-image.pid) 2>/dev/null; rm -f /tmp/blade-restore-image.pid
 # 恢复为原始镜像版本
 kubectl set image deployment/<deployment-name> -n <namespace> <container-name>=<原始镜像>:<原始标签>
 ```
@@ -99,4 +107,4 @@ kubectl set image deployment/<deployment-name> -n <namespace> <container-name>=<
 注意事项：
 - ChaosBlade `pod-pod fail` 直接修改 Pod spec 中的镜像，kubectl-native 方式通过 Deployment 触发滚动更新
 - 恢复时需记住原始镜像地址和标签
-- 无自动超时恢复机制，必须手动还原镜像
+- 自恢复基于注入前武装的后台定时器（sleep <duration> + set image 还原），到期自动还原原始镜像；提前恢复仍用上方手动命令

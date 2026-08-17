@@ -28,7 +28,7 @@
      --names <node-name> \
      --domain <target-domain> \
      --ip <错误IP地址> \
-     --timeout 300 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
 
@@ -40,7 +40,7 @@
      --channel ssh \
      --ssh-host <node-ip> \
      --ssh-user root \
-     --timeout 300
+     --timeout <duration>
    ```
    - `--domain`：要劫持的域名（必填）
    - `--ip`：劫持后指向的错误 IP（必填）
@@ -87,18 +87,23 @@
 
 前提条件：集群需支持 `kubectl debug node` 功能（K8s 1.18+）；选择已验证可拉取且含 `chroot`/`sh` 的镜像；宿主机变更必须 `--profile=sysadmin`；禁用 `-it`
 
-注入命令：
+注入命令（**先备份、武装定时还原，再注入劫持记录**）：
 ```bash
-# 通过 kubectl debug node 修改宿主机 /etc/hosts 注入 DNS 劫持
+# 通过 kubectl debug node 修改宿主机 /etc/hosts 注入 DNS 劫持。
+# timer 由宿主机 systemd(PID 1) 管理，到期自动用备份还原 hosts；
+# `&&` 串联保证武装失败时不会执行篡改
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'cp /etc/hosts /etc/hosts.bak && echo "<错误IP> <target-domain>" >> /etc/hosts'
+  'cp /etc/hosts /etc/hosts.bak &&
+   systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-hosts \
+     sh -c "cp /etc/hosts.bak /etc/hosts && rm -f /etc/hosts.bak" &&
+   echo "<错误IP> <target-domain>" >> /etc/hosts'
 ```
 
-恢复命令：
+恢复命令（timer 到期前可提前手动恢复）：
 ```bash
-# 还原宿主机 /etc/hosts
+# 提前恢复：还原宿主机 /etc/hosts（同时停掉已武装的 timer）
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'cp /etc/hosts.bak /etc/hosts && rm -f /etc/hosts.bak'
+  'systemctl stop blade-restore-hosts 2>/dev/null; cp /etc/hosts.bak /etc/hosts && rm -f /etc/hosts.bak'
 # 删除 debug Pod
 kubectl delete pod <debug-pod-name> --force --grace-period=0
 ```
@@ -106,4 +111,4 @@ kubectl delete pod <debug-pod-name> --force --grace-period=0
 注意事项：
 - 修改宿主机 /etc/hosts 对所有使用 glibc 的进程立即生效（包括节点上所有容器）
 - 部分应用有 DNS 缓存（如 JVM），修改 hosts 后可能需等待缓存过期
-- 与 ChaosBlade 不同，此方式无自动超时恢复，必须手动还原 hosts 文件
+- 自恢复基于 systemd-run transient timer 到期自动用备份还原 hosts，补齐了 ChaosBlade `--timeout` 的自恢复能力；备份文件 `/etc/hosts.bak` 是还原的唯一依据，注入前必须确认备份成功（`&&` 串联已保证）

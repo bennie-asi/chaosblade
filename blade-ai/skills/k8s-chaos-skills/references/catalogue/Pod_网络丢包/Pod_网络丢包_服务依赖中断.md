@@ -9,19 +9,21 @@
 1. 确认目标应用已正常运行，且有对外网络调用（数据库、缓存、上下游服务等）
 2. 确认监控系统可观测网络请求成功率和延迟指标
 3. 确认目标 Pod 的标签选择器和命名空间
-4. 若走 kubectl-native 降级方案的 tc netem 路径：确认目标节点内核支持 netem（**内核级依赖，路径 A/B 都绕不开**）。netem 由宿主机内核的 sch_netem 模块提供，容器与宿主共享内核，换 Pod / 换临时容器都改变不了。只读探查：`kubectl exec <pod-name> -n <namespace> -- grep sch_netem /proc/modules`——有输出说明已加载；无输出**不能**判定不可行（注入时内核可能自动加载模块），记为待执行验证的假设。**判据以注入输出为准**：注入报 `RTNETLINK answers: Operation not supported` 即为内核不支持 netem 的确证
+4. 若走 kubectl-native 降级方案的 tc netem 路径：确认目标节点内核支持 netem（**内核级依赖，路径 A/B 都绕不开**）。netem 由宿主机内核的 sch_netem 模块提供，容器与宿主共享内核，换 Pod / 换临时容器都改变不了。只读探查：`kubectl exec <pod-name> -n <namespace> -- grep sch_netem /proc/modules`——有输出说明已加载；无输出**不能**判定不可行（注入时内核可能自动加载模块），记为待执行验证的假设。**判据以注入输出为准**：注入报 `RTNETLINK answers: Operation not supported` 或 `RTNETLINK answers: No such file or directory`（后者为节点上 sch_netem 模块文件本身缺失、内核自动加载失败，实测确证）即为内核不支持 netem 的确证
 
 **演练步骤**：
 1. 确认目标 Pod 的标签选择器和命名空间：
    ```bash
    kubectl get pods -n <namespace> -l <label-selector> -o wide
    ```
-2. 使用 ChaosBlade 对目标 Pod 注入网络丢包故障：
+2. 使用 ChaosBlade 对目标 Pod 注入网络丢包故障（**必须带 `--timeout`**，到期实验自动结束并
+   移除丢包规则，补齐自恢复能力；漏掉该参数实验将无限持续，只能靠 blade destroy 手动恢复）：
    ```bash
    blade create k8s pod-network drop \
      --namespace <namespace> \
      --labels "<label-key>=<label-value>" \
      --source-port <port> \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
    - `--source-port`：限定丢包端口（如 3306 丢弃 MySQL 流量、53 丢弃 DNS 流量）
@@ -77,10 +79,13 @@ kubectl exec <pod-name> -n <namespace> -- tc -Version
   精简镜像里 `/bin/tc` 常与 `/bin/sh` 是同一个 BusyBox 二进制，名字在但不支持 netem，
   执行时报 `invalid argument 'root' to 'command'`
 
-注入命令：
+注入命令（**先武装定时自删，再注入规则**——补齐 ChaosBlade `--timeout` 的自恢复能力）：
 
 ```bash
 # ── 路径 A：容器内确认是 iproute2 tc，且有 NET_ADMIN（CapEff 全零的容器会报 EPERM）
+# 先武装定时自删（后台进程与目标容器同 netns，到期自动移除规则；必须重定向后台化）
+kubectl exec <pod-name> -n <namespace> -- sh -c \
+  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
 kubectl exec <pod-name> -n <namespace> -- tc qdisc add dev eth0 root netem loss <percent>%
 
 # ── 路径 B：容器内无可用 tc（精简镜像的常态）。临时容器与目标容器共享网络命名空间，
@@ -102,7 +107,10 @@ kubectl debug <pod-name> -n <namespace> --image=<verified-cluster-image> \
 kubectl get pod <pod-name> -n <namespace> \
   -o jsonpath='{range .status.ephemeralContainerStatuses[*]}{.name}{"="}{.state}{"\n"}{end}'
 
-# 经载体注入：载体与目标容器共享网络命名空间，操作 eth0 即操作目标 Pod 的网卡
+# 经载体注入：载体与目标容器共享网络命名空间，操作 eth0 即操作目标 Pod 的网卡。
+# 同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）
+kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- sh -c \
+  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
 kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev eth0 root netem loss <percent>%
 ```
 - `<verified-cluster-image>`：当前集群**已验证可拉取**且含 iproute2 的镜像。先看集群在用哪些仓库
@@ -111,13 +119,15 @@ kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev et
 - `--quiet`：不进入交互附着；**不要加 `-it`**
 - 载体名形如 `debugger-xxxxx`，注入/验证/恢复三步都要用同一个
 - **内核级依赖（两条路径相同）**：netem 需要宿主机内核支持 sch_netem。若注入报
-  `RTNETLINK answers: Operation not supported`，即内核不支持 netem 的确证 —— 立即停止，
+  `RTNETLINK answers: Operation not supported` 或 `RTNETLINK answers: No such file or directory`（模块文件缺失），即内核不支持 netem 的确证 —— 立即停止，
   **不要重试、不要换 Pod 或重建临时容器**（内核是同一个，重试只是空转），发起 replan
   并附上该报错证据，改选其他可行方案（如 iptables 全丢）或判定不可行
 
 只需要「完全断开某个依赖」而非按比例丢包时，可用 iptables（需容器内真有 `iptables`，
-精简镜像通常没有；节点上一般有，但那要走 node 级用例）：
+精简镜像通常没有；节点上一般有，但那要走 node 级用例）——同样先武装定时 `-D` 再 `-A`：
 ```bash
+kubectl exec <pod-name> -n <namespace> -- sh -c \
+  '( sleep <duration>; iptables -D OUTPUT -p tcp --dport <port> -j DROP ) >/dev/null 2>&1 &' &&
 kubectl exec <pod-name> -n <namespace> -- iptables -A OUTPUT -p tcp --dport <port> -j DROP
 ```
 
@@ -141,7 +151,8 @@ kubectl exec <pod-name> -n <namespace> -- iptables -D OUTPUT -p tcp --dport <por
 - 按百分比丢包只有 `tc netem loss` 能做，`iptables -j DROP` 是二元的，两者不可互相替代
 - 全量丢包（`iptables -A OUTPUT -j DROP` 或 `netem loss 100%`）会切断监控和健康检查，
   可能触发 Pod 重启，建议用端口级或较低百分比
-- 无自动超时恢复，必须手动删除规则；Pod 重启会让 tc 规则自动消失（不持久化）
+- 自恢复基于注入前武装的后台定时器（`sleep <duration>` + 逆操作），到期自动删除规则；
+  提前恢复仍用下方手动命令。Pod 重启也会让 tc 规则自动消失（不持久化）
 - 恢复 iptables 用 `-D` 逐字对应删除，不要用 `iptables -F`——那会清掉容器原有的其他规则
 - 走过路径 B 的话：**临时容器无法从运行中的 Pod 移除**（Kubernetes 既定行为），只能随 Pod 重建消失。
   `tc qdisc del` 成功即代表故障已恢复，残留容器不影响业务容器；如需立即清理须删除该 Pod

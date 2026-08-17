@@ -25,7 +25,14 @@
    kubectl exec <pod-name> -n <namespace> -- df <目录>
    kubectl exec <pod-name> -n <namespace> -- lsblk
    ```
-3. 通过 dmsetup 创建 error 映射表，对目标设备注入 IO 错误（需特权）：
+3. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动移除 error 映射，
+   补齐自恢复能力；PID 落盘供提前恢复时终止定时器；武装失败则不注入）：
+   ```bash
+   ( sleep <duration>; kubectl exec <pod-name> -n <namespace> -- \
+       dmsetup remove error-device ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-dmerr.pid
+   ```
+4. 通过 dmsetup 创建 error 映射表，对目标设备注入 IO 错误（需特权）：
    ```bash
    # 获取设备大小（sectors）
    kubectl exec <pod-name> -n <namespace> -- blockdev --getsz /dev/<device>
@@ -38,7 +45,7 @@
    ```
    - 原理：device-mapper 的 `error` target 会对所有落入该区间的 IO 请求返回 EIO
    - 注意：此操作会影响块设备上半区数据可用性，仅适用于演练环境
-4. 将应用的写入路径指向 error-device（或直接在已挂载的文件系统分区上操作）
+5. 将应用的写入路径指向 error-device（或直接在已挂载的文件系统分区上操作）
 
 **替代方案（更安全，推荐用于非特权环境）**：
 使用 `pod-disk burn` 制造高 IO 负载，间接导致 IO 超时和错误：
@@ -46,10 +53,10 @@
 blade create k8s pod-disk burn \
   --read --write \
   --path / \
-  --size 100 \
+  --size <size> \
   --namespace <namespace> \
   --labels "<label-key>=<label-value>" \
-  --timeout 600 \
+  --timeout <duration> \
   --kubeconfig <kubeconfig-path>
 ```
 - `--path`：必须使用 `/`（容器根文件系统）。不要使用 EmptyDir、hostPath 等子目录挂载路径，这些路径在 ChaosBlade nsexec 模式下校验会失败
@@ -65,12 +72,16 @@ blade create k8s pod-disk burn \
 4. 查看 Pod Events：`kubectl get events -n <namespace> --field-selector involvedObject.name=<pod-name>`
 
 **注入恢复**：
-1. 移除 dmsetup error 设备映射：
+1. 等待 `<duration>` 到期后武装的定时器自动移除 error 映射；如需提前恢复，先终止定时器：
+   ```bash
+   kill $(cat /tmp/blade-restore-dmerr.pid) 2>/dev/null; rm -f /tmp/blade-restore-dmerr.pid
+   ```
+2. 移除 dmsetup error 设备映射：
    ```bash
    kubectl exec <pod-name> -n <namespace> -- dmsetup remove error-device
    ```
-2. 若使用替代方案（pod-disk burn），销毁 blade 实验：`blade destroy <blade_uid>`
-3. 若应用未自动恢复，可重启 Pod 清除残留影响
+3. 若使用替代方案（pod-disk burn），销毁 blade 实验：`blade destroy <blade_uid>`
+4. 若应用未自动恢复，可重启 Pod 清除残留影响
 
 **恢复验证**：
 1. 在 Pod 内重新写入文件，确认成功无报错：

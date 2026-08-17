@@ -17,7 +17,7 @@
    blade create k8s node-process stop \
      --names <节点名> \
      --process containerd \
-     --timeout 120 \
+     --timeout <duration> \
      --kubeconfig <路径>
    ```
 3. 删除应用 A 在目标节点上的 Pod，触发重建
@@ -29,7 +29,7 @@
 3. 确认目标节点状态可能变为 NotReady（RuntimeNotReady condition）
 
 **注入恢复**：
-1. 等待 chaosblade 实验自动超时恢复（120 秒内），containerd 进程自动恢复
+1. 等待 chaosblade 实验自动超时恢复（`<duration>` 内），containerd 进程自动恢复
 2. 如超时后仍未恢复，通过 `blade destroy <UID>` 强制恢复
 3. 等待容器运行时恢复正常，Pod 自动完成创建
 

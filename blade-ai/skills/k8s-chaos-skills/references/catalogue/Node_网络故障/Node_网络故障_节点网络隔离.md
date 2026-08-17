@@ -25,7 +25,7 @@
      --names <node-name> \
      --destination-port <port> \
      --network-traffic out \
-     --timeout 60 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
 
@@ -37,7 +37,7 @@
      --channel ssh \
      --ssh-host <node-ip> \
      --ssh-user root \
-     --timeout 60
+     --timeout <duration>
    ```
    - `--destination-port`/`--source-port`：限定屏蔽端口范围（不指定则全量屏蔽，慎用）
    - `--network-traffic`：`in`（入站）或 `out`（出站）
@@ -123,7 +123,7 @@
 注入命令：
 ```bash
 # 1. 创建有权限的非交互 debug Pod，并等待工具确认 Ready
-kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep 900
+kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep <duration>
 
 # 2. 使用上一步返回的 <debug-pod> 和 <debug-namespace> 注入。
 #    ⚠️ 关键顺序：必须先用 systemd-run 武装定时恢复（此刻只登记闹钟、不删任何规则），
@@ -172,7 +172,7 @@ ssh root@<node-ip> 'iptables -D OUTPUT -p tcp --dport <port> -j DROP'
 
 注入命令：
 ```bash
-kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep 900
+kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep <duration>
 kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
   systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-netfull sh -c "iptables -D OUTPUT -j DROP; iptables -D INPUT -j DROP" &&
   iptables -I OUTPUT -j DROP && iptables -I INPUT -j DROP

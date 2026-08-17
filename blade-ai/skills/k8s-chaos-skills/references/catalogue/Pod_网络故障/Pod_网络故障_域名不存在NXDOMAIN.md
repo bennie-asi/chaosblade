@@ -20,18 +20,32 @@
    ```bash
    kubectl get configmap coredns -n kube-system -o jsonpath='{.data.Corefile}'
    ```
-3. 使用 kubectl patch 向 Corefile 中添加 template 插件，对目标域名返回 NXDOMAIN：
+3. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动将 Corefile
+   还原为原始值，补齐自恢复能力；PID 落盘供提前恢复时终止定时器）。
+   注意：**不要用备份文件 apply 还原** —— 备份中的 resourceVersion 会与集群现状冲突
+   （实测 `error when applying patch: the object has been modified`），必须用
+   注入前提取的原始 Corefile 文本做 json patch 还原：
+   ```bash
+   ORIG_COREFILE=$(kubectl get configmap coredns -n kube-system -o jsonpath='{.data.Corefile}')
+   ( sleep <duration>; \
+     printf '%s' "$ORIG_COREFILE" | jq -Rs '{data:{Corefile:.}}' > /tmp/coredns-restore.json && \
+     kubectl patch configmap coredns -n kube-system --type=merge \
+       --patch-file=/tmp/coredns-restore.json && \
+     kubectl rollout restart deployment coredns -n kube-system ) >/dev/null 2>&1 &
+   echo $! > /tmp/blade-restore-nxdomain.pid
+   ```
+4. 使用 kubectl patch 向 Corefile 中添加 template 插件，对目标域名返回 NXDOMAIN：
    ```bash
    kubectl get configmap coredns -n kube-system -o json | \
      jq '.data.Corefile |= sub("ready"; "template IN A <target-domain> {\n    rcode NXDOMAIN\n  }\n  ready")' | \
      kubectl apply -f -
    ```
    说明：在 `ready` 插件前插入 template 块，使 CoreDNS 对 `<target-domain>` 的 A 记录查询返回 NXDOMAIN
-4. 重启 CoreDNS 使配置生效：
+5. 重启 CoreDNS 使配置生效：
    ```bash
    kubectl rollout restart deployment coredns -n kube-system
    ```
-5. 等待 CoreDNS Pod 重新就绪
+6. 等待 CoreDNS Pod 重新就绪
 
 **注入验证**：
 1. 确认 CoreDNS Pod 已重启且 Running：
@@ -50,15 +64,27 @@
 4. 检查应用日志出现 DNS 解析失败相关错误
 
 **注入恢复**：
-1. 恢复 CoreDNS ConfigMap 备份：
+1. 等待 `<duration>` 到期后武装的定时器自动还原 Corefile 并重启 CoreDNS；如需提前恢复，
+   先终止定时器：
    ```bash
-   kubectl apply -f /tmp/coredns-backup.yaml
+   kill $(cat /tmp/blade-restore-nxdomain.pid) 2>/dev/null; rm -f /tmp/blade-restore-nxdomain.pid
    ```
-2. 重启 CoreDNS 使恢复的配置生效：
+2. 用注入前提取的原始 Corefile 做 json patch 还原（**不要 `kubectl apply` 备份文件**，
+   resourceVersion 冲突会直接失败）：
+   ```bash
+   printf '%s' "$ORIG_COREFILE" | jq -Rs '{data:{Corefile:.}}' > /tmp/coredns-restore.json
+   kubectl patch configmap coredns -n kube-system --type=merge \
+     --patch-file=/tmp/coredns-restore.json
+   ```
+   若 `$ORIG_COREFILE` 变量已丢失（如换了 shell），从备份文件中提取 data 字段重建：
+   ```bash
+   yq '.data' /tmp/coredns-backup.yaml -o=json > /tmp/coredns-restore.json   # 无 yq 时手工取 Corefile 文本
+   ```
+3. 重启 CoreDNS 使恢复的配置生效：
    ```bash
    kubectl rollout restart deployment coredns -n kube-system
    ```
-3. 等待 CoreDNS Pod 重新就绪
+4. 等待 CoreDNS Pod 重新就绪
 
 **恢复验证**：
 1. 在应用 Pod 内验证目标域名恢复解析：

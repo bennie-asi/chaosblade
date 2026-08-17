@@ -27,7 +27,7 @@
      --labels "<label-key>=<label-value>" \
      --container-names <sidecar-container-name> \
      --cpu-percent 100 \
-     --timeout 600 \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
 4. 观察 Sidecar 容器 CPU 飙升后对主容器和整体服务的影响

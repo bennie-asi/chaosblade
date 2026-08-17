@@ -21,8 +21,8 @@
      --namespace <namespace> \
      --labels "<label-key>=<label-value>" \
      --path / \
-     --percent 90 \
-     --timeout 300 \
+     --percent <percent> \
+     --timeout <duration> \
      --kubeconfig <kubeconfig-path>
    ```
    - `--path`：填充目标路径，使用 `/` 填充容器根文件系统
@@ -91,20 +91,23 @@ kubectl exec <pod-name> -n <namespace> -- df -h <目标目录>
 
 # 1) 填充量 = 文件系统总容量 × 目标使用率 − 当前已用量（或：可用量 − 少量保留，达到打满效果）
 
-# 2) 使用 fallocate 快速填充磁盘
+# 2) 先武装定时清理（容器内后台定时器，到期自动删除填充文件），再填充
+kubectl exec <pod-name> -n <namespace> -- sh -c \
+  '( sleep <duration>; rm -f <目标目录>/fill_file ) >/dev/null 2>&1 &' &&
+# 使用 fallocate 快速填充磁盘
 kubectl exec <pod-name> -n <namespace> -- fallocate -l <算出的填充量>G <目标目录>/fill_file
 # 或使用 dd：
 kubectl exec <pod-name> -n <namespace> -- dd if=/dev/zero of=<目标目录>/fill_file bs=1M count=<填充量换算的MB数>
 ```
 
-恢复命令：
+恢复命令（提前恢复）：
 ```bash
 kubectl exec <pod-name> -n <namespace> -- rm -f <目标目录>/fill_file
 ```
 
 注意事项：
 - `fallocate` 分配速度快（仅分配元数据），`dd` 实际写入数据速度较慢但更真实
-- 无自动超时恢复机制，必须手动删除填充文件
+- 自恢复基于注入前武装的容器内后台定时器（sleep <duration> + rm 填充文件），到期自动清理；提前恢复仍用上方手动命令
 - 需按**增量**计算填充大小以确保磁盘使用率达到预期值（填充量 = 文件系统总容量 × 目标使用率 − 当前已用量，先用 `df -h <目标目录>` 查看）；量太小达不到阈值，量太大触发 ENOSPC 后无法观察应用写入失败之外的行为
 
 ---
