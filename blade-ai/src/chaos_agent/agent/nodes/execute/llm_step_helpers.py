@@ -10,6 +10,7 @@ import re
 from langchain_core.messages import HumanMessage
 
 from chaos_agent.agent.nodes.execute.react_helpers import summarize_llm_response
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.config.settings import settings
 
 # Marker embedded in a persisted corrective hint so its repeat count can be read
@@ -136,7 +137,10 @@ def persist_corrective_hint(
         )
     # The marker is written literally rather than derived from ``_REPEAT_RE``, so
     # a future change to the pattern cannot silently produce an unparseable stamp.
-    stamped = f"{body}\n<!--hint-repeat:{count}-->"
+    # The stamp stays INSIDE the reminder tag: tag binding (see prompts.reminder)
+    # marks the message as a harness correction, and ``_REPEAT_RE`` still parses
+    # the count out of the wrapped content.
+    stamped = wrap_system_reminder(f"{body}\n<!--hint-repeat:{count}-->")
 
     escalated = escalate_after is not None and count > escalate_after
     msg_id = f"{_hint_id(kind, key)}#{count}" if escalated else _hint_id(kind, key)
@@ -165,7 +169,7 @@ def persist_replaceable_hint(
     already carries the number that matters, and these notices are not a record
     of ignored warnings.
     """
-    stamped = text.rstrip()
+    stamped = wrap_system_reminder(text)
     injections.append(HumanMessage(content=stamped, id=_hint_id(kind, key)))
     # Turn-local copy carries no id, so the reducer cannot collapse the two when
     # a node folds both into the same update.

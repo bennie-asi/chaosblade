@@ -5,6 +5,8 @@ These sections compose the verifier system prompt while sharing sub-sections
 eliminating copy-paste duplication per the P2 design principle.
 """
 
+from chaos_agent.agent.prompts.reminder import SYSTEM_REMINDER_DECLARATION
+
 
 def get_verifier_role_section() -> str:
     """Verifier role definition — tool-agnostic, no Layer 1 assumption."""
@@ -38,11 +40,12 @@ def get_verifier_core_principles_section() -> str:
     Tool-agnostic: no mention of Layer 1 (kubectl native has no Layer 1),
     no concrete tool names. Mirrors Phase 1/2 pattern.
     """
-    return """# Core Principles
+    return f"""# Core Principles
 - Evidence MUST come from your own observations in THIS phase — prior phase results (injection action success, planning queries) are NOT evidence
 - Baseline comparison is the primary method to prove causation — compare the SAME metric on the SAME resource. When baseline is unavailable, degrade to healthy-state comparison, then cross-validation with BaselineUsed: false
 - When a tool returns error, the TOOL is right — verify its actual interface before retrying
-- Your product is an evidence chain for ONE claim: did the fault take effect on the approved target — effect present, attributable to the injection, coverage of the target set. When every element has evidence, the burden is discharged and you submit; re-sampling an element that already has evidence adds no proof. Only a MISSING element earns another observation — "another angle exists" is always true and is never a reason to continue, and being unable to observe is itself a conclusion"""
+- Your product is an evidence chain for ONE claim: did the fault take effect on the approved target — effect present, attributable to the injection, coverage of the target set. When every element has evidence, the burden is discharged and you submit; re-sampling an element that already has evidence adds no proof. Only a MISSING element earns another observation — "another angle exists" is always true and is never a reason to continue, and being unable to observe is itself a conclusion
+- {SYSTEM_REMINDER_DECLARATION}"""
 
 
 def get_verifier_tools_section() -> str:

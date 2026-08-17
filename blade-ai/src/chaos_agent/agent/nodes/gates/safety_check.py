@@ -8,6 +8,7 @@ from chaos_agent.agent.nodes.side_effect._conflict_check import check_blade_conf
 from chaos_agent.agent.nodes.execute._kubeconfig_inject import _resolve_kubeconfig, sync_kubewiz_runtime
 from chaos_agent.agent.nodes.store._store_sync import sync_to_store, sync_node_status_to_session
 from chaos_agent.agent.dispatch import dispatch_node_message
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.spec.safety_score import (
     compute_safety_score,
     maybe_escalate_status,
@@ -194,7 +195,7 @@ async def safety_check(state: AgentState) -> dict:
         sync_node_status_to_session(state, "safety_check",
             "Safety check: no skill activated — returning to planner",
             detail={"safety_status": "retry", "reason": "no_skill"})
-        retry_msg = HumanMessage(content=(
+        retry_msg = HumanMessage(content=wrap_system_reminder(
             "No skill activated. Select the most appropriate skill from "
             "the Skill Index in your system prompt and call `activate_skill` now."
         ))

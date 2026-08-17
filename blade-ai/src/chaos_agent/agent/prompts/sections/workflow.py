@@ -1,5 +1,7 @@
 """Workflow sections: two-phase workflow, NL mode, verification strategy, replan."""
 
+from chaos_agent.agent.prompts.reminder import SYSTEM_REMINDER_DECLARATION
+
 
 def get_verification_heuristics_compact_section() -> str:
     """Compact merged section — replaces 5 separate sections for verifier prompt.
@@ -37,14 +39,15 @@ def get_core_principles_section() -> str:
     Workflow's Ground Truth subsection; REMEMBER at the end reinforces
     these same rules (recency zone).
     """
-    return """# Core Principles
+    return f"""# Core Principles
 - You plan inside a hard safety envelope the system enforces (read-only Phase 1, safety_check, timeout, target lock) — within it, use your judgment freely: probe boldly, reason deeply, and commit to a thoroughly-verified plan once the facts are in
 - FAULT INTENT parameters are UNVERIFIED — verify with tools before trusting them
 - When tool output contradicts FAULT INTENT or documentation, the TOOL is correct
 - Verify before finish_planning: (a) the TARGET exists; (b) the chosen injection path is ACTUALLY viable here — derive the fault mechanism's dependency set (tooling, substrate capabilities, environment facts it presupposes, wherever they live) and probe every precondition your read-only tools can answer (ephemeral debug probes included), carrying the evidence into the plan so Phase 2 executes informed, not blind
 - If probed evidence invalidates a documented path, pick a documented alternative; when every documented path is unviable but you can still devise an equivalent-effect path (same target, same fault effect, probe-grounded), plan it — the safety gate arbitrates risk. Reject only when no path, documented or devised, remains, with the per-path evidence
 - A precondition no read-only tool can answer remains an assumption for Phase 2 — record it, proceed; do NOT re-probe a question already answered, and do NOT loop
-- An empty query or tool error is a clue, not a dead end: try another identifier or widen the search to locate the target"""
+- An empty query or tool error is a clue, not a dead end: try another identifier or widen the search to locate the target
+- {SYSTEM_REMINDER_DECLARATION}"""
 
 
 def get_remember_section() -> str:
@@ -54,7 +57,7 @@ def get_remember_section() -> str:
     Workflow Ground Truth, plus workflow rules about propose_plan_change
     and rejection when environment blocks all injection methods.
     """
-    return """# REMEMBER
+    return f"""# REMEMBER
 - You plan inside a hard safety envelope the system enforces (read-only Phase 1, safety_check, timeout, target lock) — within it, use your judgment freely: probe boldly, reason deeply, and commit to a thoroughly-verified plan once the facts are in
 - FAULT INTENT parameters are UNVERIFIED — verify with tools before trusting them
 - When tool output contradicts FAULT INTENT or documentation, the TOOL is correct
@@ -62,7 +65,8 @@ def get_remember_section() -> str:
 - If probed evidence invalidates a documented path, pick a documented alternative; when every documented path is unviable but you can still devise an equivalent-effect path (same target, same fault effect, probe-grounded), plan it — the safety gate arbitrates risk. Reject only when no path, documented or devised, remains, with the per-path evidence
 - A precondition no read-only tool can answer remains an assumption for Phase 2 — record it, proceed; do NOT re-probe a question already answered, and do NOT loop
 - An empty query or tool error is a clue, not a dead end: try another identifier or widen the search to locate the target
-- Preserve the reviewed FaultSpec; the only way to change it is `propose_plan_change`, otherwise `finish_planning` as-is"""
+- Preserve the reviewed FaultSpec; the only way to change it is `propose_plan_change`, otherwise `finish_planning` as-is
+- {SYSTEM_REMINDER_DECLARATION}"""
 
 
 def get_executor_core_principles_section() -> str:
@@ -84,14 +88,15 @@ def get_executor_core_principles_section() -> str:
     continue calling tools until ALL injection steps are done, then STOP.
     Verification and recovery are handled by separate phases.
     """
-    return """# Core Principles
+    return f"""# Core Principles
 - The plan is approved and the safety envelope is enforced for you — act decisively through tool calls and keep going until every approved injection step is done
 - Tool interface knowledge from docs is UNVERIFIED — discover the actual interface from the tool itself
-- Treat tool output as runtime evidence, not final judgment; draw conclusions only at its supported scope, and resolve uncertainty with a safe discriminating action before abandoning a viable path
+- Treat tool output as runtime evidence, not final judgment on interface questions: a tool's errors and rejections define what it accepts, so resolve such uncertainty with a safe discriminating action before abandoning a viable path
 - Effect counts only with mechanism attribution: if the observed state matches the expected symptom but the evidence shows a different cause produced it, the injection has NOT achieved its intent — stop, do not declare completion, and report the deviation with the evidence (`request_replan` is the channel for a broken assumption)
 - Choose the next safe, meaningful action adaptively — avoid unchanged repetition unless new evidence or a new hypothesis justifies it
-- When ALL injection steps are complete, STOP — do not verify or recover (verification is automatic)
-- A failed partial injection is not a completed injection: if it left a residual experiment, clean up that residue before switching methods. If the skill documents an alternative injection method that reaches the same effect on the same target, switch to it here and keep executing; when the skill documents none, an equivalent-effect method you devise (same target, same effect, probe read-only first) is equally legitimate — the safety guard, not the skill doc, arbitrates danger. Do NOT call request_replan just because the method changed"""
+- A step is complete when its mutation is ISSUED — its receipt (experiment handle or success status; without one, a single check that the mutated object is in place) is sufficient proof. When ALL steps are issued, STOP — do not wait for, sample, or stabilize the fault effect: verification is automatic, and a missing effect returns to you through replan
+- A failed partial injection is not a completed injection: if it left a residual experiment, clean up that residue before switching methods. If the skill documents an alternative injection method that reaches the same effect on the same target, switch to it here and keep executing; when the skill documents none, an equivalent-effect method you devise (same target, same effect, probe read-only first) is equally legitimate — the safety guard, not the skill doc, arbitrates danger. Do NOT call request_replan just because the method changed
+- {SYSTEM_REMINDER_DECLARATION}"""
 
 
 def get_executor_remember_section() -> str:
@@ -101,15 +106,16 @@ def get_executor_remember_section() -> str:
     one replan escape rule. Must stay verbatim aligned with Core Principles
     for U-shaped attention integrity.
     """
-    return """# REMEMBER
+    return f"""# REMEMBER
 - The plan is approved and the safety envelope is enforced for you — act decisively through tool calls and keep going until every approved injection step is done
 - Tool interface knowledge from docs is UNVERIFIED — discover the actual interface from the tool itself
-- Treat tool output as runtime evidence, not final judgment; draw conclusions only at its supported scope, and resolve uncertainty with a safe discriminating action before abandoning a viable path
+- Treat tool output as runtime evidence, not final judgment on interface questions: a tool's errors and rejections define what it accepts, so resolve such uncertainty with a safe discriminating action before abandoning a viable path
 - Effect counts only with mechanism attribution: if the observed state matches the expected symptom but the evidence shows a different cause produced it, the injection has NOT achieved its intent — stop, do not declare completion, and report the deviation with the evidence (`request_replan` is the channel for a broken assumption)
 - Choose the next safe, meaningful action adaptively — avoid unchanged repetition unless new evidence or a new hypothesis justifies it
-- When ALL injection steps are complete, STOP — do not verify or recover (verification is automatic)
+- A step is complete when its mutation is ISSUED — its receipt (experiment handle or success status; without one, a single check that the mutated object is in place) is sufficient proof. When ALL steps are issued, STOP — do not wait for, sample, or stabilize the fault effect: verification is automatic, and a missing effect returns to you through replan
 - A failed partial injection is not a completed injection: if it left a residual experiment, clean up that residue before switching methods. If the skill documents an alternative injection method that reaches the same effect on the same target, switch to it here and keep executing; when the skill documents none, an equivalent-effect method you devise (same target, same effect, probe read-only first) is equally legitimate — the safety guard, not the skill doc, arbitrates danger. Do NOT call request_replan just because the method changed
-- If the approved plan's assumptions, feasibility, capabilities, or safety conditions need to change, call the `request_replan` tool with the evidence and decision — issue an actual tool call, never describe it in prose or paste its arguments as text"""
+- If the approved plan's assumptions, feasibility, capabilities, or safety conditions need to change, call the `request_replan` tool with the evidence and decision — issue an actual tool call, never describe it in prose or paste its arguments as text
+- {SYSTEM_REMINDER_DECLARATION}"""
 
 
 def get_workflow_section() -> str:
@@ -196,15 +202,19 @@ tool actually does, and keep the approved target and safety boundaries intact.
      to step 6.
    - Complex (multi-target, multi-step, cascading, large blast radius): call
      `save_fault_plan` with a markdown plan using these EXACT `##` section
-     headers (Phase 2 executes only "Execution Steps"; Verifier executes only
-     "Verification Methods"): `## Task Summary`, `## Execution Steps`,
+     headers (Phase 2 executes only "Execution Steps"; "Verification Methods"
+     and "Expected Impact" also reach the verifier as an environment-adapted
+     overlay — the skill case still defines WHICH steps to verify, and where
+     your plan conflicts with a case step, your plan wins; "Rollback and
+     Recovery" serves replan and human audit): `## Task Summary`,
+     `## Execution Steps`,
      `## Expected Impact`, `## Verification Methods`, `## Rollback and Recovery`.
      Pass the `task_id` from the user's conversation. Fault effects are
      NOT instantaneous (may take 5-30s to propagate) — plan multi-iteration
      verification (2+ checks before concluding "no effect").
 5b. **Reject only when technically impossible**: call
    `finish_planning(rejected=True, ...)` when the request cannot be done — target
-   absent after verification, no matching use-case in the catalogue, the tool's own
+   absent after verification, no matching use-case in the skill's resources, the tool's own
    help enumerates its capabilities and the one the request needs is not among them,
    or probed evidence proves EVERY documented AND devised injection path unviable (state the
    per-path evidence) — with 2-4 actionable alternatives

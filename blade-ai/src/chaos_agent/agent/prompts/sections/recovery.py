@@ -15,6 +15,7 @@ Design rationale (from first-principles audit of task-d0f0f506 recovery):
   with low-priority information in the middle.
 """
 
+from chaos_agent.agent.prompts.reminder import SYSTEM_REMINDER_DECLARATION
 from chaos_agent.agent.prompts.sections.experience_section import get_experience_section
 from chaos_agent.agent.prompts.sections.knowledge_sections import get_knowledge_summary_section
 from chaos_agent.transports import PROFILE_K8S
@@ -58,11 +59,12 @@ def get_recover_core_principles_section() -> str:
     Mirrors Phase 1/2 and injection verifier pattern: 3 principles.
     Uses three-level degradation: baseline > healthy state > cross-validation.
     """
-    return """# Core Principles
+    return f"""# Core Principles
 - Evidence MUST come from CURRENT post-recovery observations — stale baseline/injection data is NOT evidence
 - Recovery = fault effect ABSENT. Prove by comparing CURRENT state to pre-injection BASELINE for the SAME metric on the SAME resource. When baseline is unavailable, confirm healthy state, then cross-validate with BaselineUsed: false
 - When a tool returns error, the TOOL is right — verify its actual interface before retrying
-- If an observation repeatedly fails or returns the same unexpected result, suspect your METHOD (wrong filter/command/assumption), not the target — switch to structured status (conditions/events/resource state) instead of retrying the same command. If still unobservable, mark the step skipped with the reason; never silently omit"""
+- If an observation repeatedly fails or returns the same unexpected result, suspect your METHOD (wrong filter/command/assumption), not the target — switch to structured status (conditions/events/resource state) instead of retrying the same command. If still unobservable, mark the step skipped with the reason; never silently omit
+- {SYSTEM_REMINDER_DECLARATION}"""
 
 
 def get_recover_tools_section() -> str:
