@@ -208,6 +208,12 @@ def test_raw_verification_field_reads_are_limited_to_boundaries_and_payloads():
             "src/chaos_agent/cli/client.py",
             '"verification": data.get("verification"),',
         ),
+        # Display consumer: ``blade-ai metric`` text rendering reads the
+        # already-materialized metric envelope (TaskStore), not graph state.
+        (
+            "src/chaos_agent/cli/metrics_render.py",
+            'verif = data.get("verification")',
+        ),
     }
 
     search_roots = [
