@@ -16,6 +16,7 @@ from chaos_agent.agent.nodes.baseline.baseline_capture import make_baseline_capt
 from chaos_agent.agent.nodes.batch.batch_next import batch_next
 from chaos_agent.agent.nodes.batch.batch_setup import batch_setup
 from chaos_agent.agent.nodes.gates.confirmation_gate import confirmation_gate
+from chaos_agent.agent.nodes.gates.preplan_probe import preplan_probe
 from chaos_agent.agent.nodes.execute.direct_execute import direct_execute
 from chaos_agent.agent.nodes.execute.direct_setup import make_direct_setup
 from chaos_agent.agent.nodes.execute.execute_loop import make_execute_loop
@@ -442,6 +443,12 @@ def build_pipeline_graph(
 
     # Entry
     graph.add_node("pipeline_init", pipeline_init)
+    # Fresh pre-task probes (operator status, target health, headroom,
+    # conflicts, ...) collected once at task start and injected into the
+    # Phase 1 prompt so the planner reuses them instead of re-probing.
+    # Deterministic, read-only, never blocks; the Phase 2 safety_check gate
+    # re-runs the same probes authoritatively (verdicts stay there).
+    graph.add_node("preplan_probe", with_phase_events("preplan_probe", "inject", preplan_probe))
 
     # Plan builder (TUI /plan)
     graph.add_node("plan_builder", with_phase_events("plan_builder", "intent", plan_builder_node))
@@ -532,9 +539,14 @@ def build_pipeline_graph(
     graph.add_node("reject", reject)
 
     # --- Entry routing ---
+    # pipeline_init → preplan_probe → the four-way pipeline routing. The
+    # probe node sits on EVERY entry path but skips itself when there is
+    # nothing to probe for (direct mode / no spec); replan re-entries into
+    # agent_loop deliberately bypass it — probes run once at task start.
     graph.set_entry_point("pipeline_init")
+    graph.add_edge("pipeline_init", "preplan_probe")
     graph.add_conditional_edges(
-        "pipeline_init",
+        "preplan_probe",
         route_pipeline_start,
         {
             "agent_loop": "agent_loop",

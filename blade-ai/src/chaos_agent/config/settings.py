@@ -650,6 +650,16 @@ class Settings(BaseSettings):
     feasibility_check_enabled: bool = True               # BLADE_AI_FEASIBILITY_CHECK_ENABLED
     feasibility_check_block_on_impossible: bool = False   # BLADE_AI_FEASIBILITY_CHECK_BLOCK_ON_IMPOSSIBLE
 
+    # Pre-task probes (preplan_probe node)
+    # 任务开跑时（pipeline_init 之后、规划首轮 LLM 之前）新鲜并行探测最小
+    # 探测集（operator 状态含 tool-pod 备选路径、metrics-server 可用性），
+    # 结果作为一条观测消息追加进对话历史，供规划模型直接复用、避免多轮自行
+    # 探路。探测严格只读且永不阻塞：单项失败写 unknown 继续流转；Phase 2
+    # safety_check 门禁原样重跑并保留权威裁决。``preplan_probe_timeout``
+    # 是单项探测的超时秒数。
+    preplan_probes_enabled: bool = True                  # BLADE_AI_PREPLAN_PROBES_ENABLED
+    preplan_probe_timeout: float = 10.0                  # BLADE_AI_PREPLAN_PROBE_TIMEOUT
+
     # Retry配置
     retry_max_retries: int = 2               # BLADE_AI_RETRY_MAX_RETRIES (LLM 调用失败退避重试次数；2=重试2次后第3次直接抛出原始错误)
     retry_base_delay: float = 1.0            # BLADE_AI_RETRY_BASE_DELAY

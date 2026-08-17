@@ -46,6 +46,7 @@ class TestBuildPipelineGraph:
         node_names = set(graph.nodes.keys())
         expected = {
             "pipeline_init",
+            "preplan_probe",
             "plan_builder",
             "batch_setup",
             "batch_next",
@@ -91,6 +92,23 @@ class TestBuildPipelineGraph:
         graph = build_pipeline_graph(phase1_tools=[], phase2_tools=[])
         branch = graph.branches["finalize_verification"]["route_after_finalize"]
         assert branch.ends["replan"] == "agent_loop"
+
+    def test_preplan_probe_entry_wiring(self):
+        """pipeline_init → preplan_probe → the four-way pipeline routing.
+
+        The probe node sits between entry init and routing; the routing
+        targets themselves are unchanged (regression guard for the
+        preplan_probe insertion).
+        """
+        graph = build_pipeline_graph(phase1_tools=[], phase2_tools=[])
+        assert ("pipeline_init", "preplan_probe") in set(graph.edges)
+        branch = graph.branches["preplan_probe"]
+        assert set(branch) == {"route_pipeline_start"}
+        ends = branch["route_pipeline_start"].ends
+        assert set(ends) == {"agent_loop", "direct_setup", "plan_builder", "batch_setup"}
+        # Replan re-entries keep bypassing the probe node (direct edges).
+        assert ("batch_setup", "agent_loop") in set(graph.edges)
+        assert ("plan_change_confirm", "agent_loop") in set(graph.edges)
 
     def test_terminal_funnel_edges(self):
         """task-349ccf5d: every experiment terminal path funnels through

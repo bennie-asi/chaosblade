@@ -360,6 +360,7 @@ def _conn_to_state_patch(conn: dict) -> dict:
 _PHASE_STEP_MAP: dict[str, str] = {
     "intent_clarification": "planning",
     "plan_builder": "planning",
+    "preplan_probe": "planning",
     "agent_loop": "planning",
     "safety_check": "safety_check",
     "confirmation_gate": "approval_gate",

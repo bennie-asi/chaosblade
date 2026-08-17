@@ -268,24 +268,35 @@ def _parse_all_ns_pods(output: str) -> list[tuple[str, str]]:
     return result
 
 
-def _parse_all_ns_pods_wide(output: str) -> list[tuple[str, str, str]]:
-    """Parse kubectl get pods -A --no-headers -o wide output.
+# Explicit-field jsonpath for tool-pod listing. NEVER use ``-o wide`` +
+# positional column parsing here: RESTARTS may carry an annotation like
+# ``1 (14d ago)`` whose spaces shift every column after it — a wide parse
+# then reads the AGE token as the node name (observed live: pods with
+# restarts attributed to node ``123d``, and the target-node carrier went
+# unreported by the preplan probe).
+_TOOL_POD_JSONPATH = (
+    "jsonpath={range .items[*]}{.metadata.namespace}|{.metadata.name}"
+    "|{.status.phase}|{.spec.nodeName}{'\\n'}{end}"
+)
 
-    Wide format columns: NAMESPACE  NAME  READY  STATUS  RESTARTS  AGE  IP  NODE  ...
+
+def _parse_tool_pod_rows(output: str) -> list[tuple[str, str, str]]:
+    """Parse explicit-field jsonpath rows: ``ns|name|phase|node`` per line.
+
+    Fields are delimiter-separated (not column positions), so restart
+    annotations or any whitespace in unrelated columns cannot shift them.
     Returns: List of (pod_name, namespace, node_name) tuples for Running pods.
     """
     if not output or not isinstance(output, str):
         return []
     result: list[tuple[str, str, str]] = []
     for line in output.strip().splitlines():
-        parts = line.split()
-        if len(parts) >= 8:  # Wide format has at least 8 columns
-            namespace = parts[0]
-            pod_name = parts[1]
-            status = parts[3]
-            node_name = parts[7]
-            if status == "Running":
-                result.append((pod_name, namespace, node_name))
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 4:
+            continue
+        ns, name, phase, node = parts[0], parts[1], parts[2], parts[3]
+        if phase == "Running" and name:
+            result.append((name, ns, node))
     return result
 
 
@@ -294,8 +305,8 @@ async def discover_tool_pod_on_node(
 ) -> tuple[str, str] | None:
     """Find a Running ChaosBlade tool pod on the specified node (cluster-wide).
 
-    Tries known label selectors in order with -A (all-namespaces) and -o wide
-    to match pods by their hosting node.
+    Tries known label selectors in order with -A (all-namespaces) and an
+    explicit-field jsonpath (restart annotations cannot shift columns).
 
     Returns:
         (pod_name, namespace) tuple if found, None otherwise.
@@ -311,7 +322,7 @@ async def discover_tool_pod_on_node(
     _target = TransportTarget.from_state({})
     for label in _TOOL_POD_LABEL_CANDIDATES:
         cmd = build_kubectl_cmd("get", [
-            "pods", "-A", "-l", label, "--no-headers", "-o", "wide",
+            "pods", "-A", "-l", label, "--no-headers", "-o", _TOOL_POD_JSONPATH,
         ], kubeconfig=kubeconfig)
         try:
             result = await execute_via_transport(
@@ -327,7 +338,7 @@ async def discover_tool_pod_on_node(
                 node_name, label, e,
             )
             continue
-        pods = _parse_all_ns_pods_wide(result.stdout)
+        pods = _parse_tool_pod_rows(result.stdout)
         for pod_name, ns, node in pods:
             if node == node_name:
                 return (pod_name, ns)
@@ -377,7 +388,8 @@ async def discover_tool_pods_cluster_wide_with_nodes(
     """Discover ChaosBlade tool pods across all namespaces with node info.
 
     Tries known label selectors in order, returns on first success.
-    Uses -A (all-namespaces) and -o wide to include node placement.
+    Uses -A (all-namespaces) and an explicit-field jsonpath so restart
+    annotations cannot shift the node column (see ``_TOOL_POD_JSONPATH``).
 
     Returns:
         List of (pod_name, namespace, node_name) tuples for Running pods.
@@ -393,7 +405,7 @@ async def discover_tool_pods_cluster_wide_with_nodes(
     _target = TransportTarget.from_state({})
     for label in _TOOL_POD_LABEL_CANDIDATES:
         cmd = build_kubectl_cmd("get", [
-            "pods", "-A", "-l", label, "--no-headers", "-o", "wide",
+            "pods", "-A", "-l", label, "--no-headers", "-o", _TOOL_POD_JSONPATH,
         ], kubeconfig=kubeconfig)
         try:
             result = await execute_via_transport(
@@ -406,7 +418,7 @@ async def discover_tool_pods_cluster_wide_with_nodes(
         except Exception as e:
             logger.warning("Failed to discover tool pods with label %s: %s", label, e)
             continue
-        pods = _parse_all_ns_pods_wide(result.stdout)
+        pods = _parse_tool_pod_rows(result.stdout)
         if pods:
             return pods
     return []
@@ -472,28 +484,48 @@ def _extract_kubectl_exec_pod_name(messages: list) -> str | None:
 # Pod name pattern: lowercase alphanumeric with hyphens (Kubernetes naming)
 _POD_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
+# kubectl exec flags that consume a following value. Anything else starting
+# with '-' is treated as a boolean flag (-i/-t/-q/--stdin/--tty/...).
+_EXEC_FLAGS_WITH_VALUE = frozenset({
+    "-n", "--namespace", "-c", "--container", "--profile", "--context",
+    "--kubeconfig", "--pod-running-timeout",
+})
+
 
 def _parse_pod_name_from_v_args(v_args: str) -> str | None:
     """Extract the pod name from kubectl exec v_args.
 
-    v_args format: "<pod-name> -n <namespace> -- <command>"
-    The pod name is the first positional token (not starting with '-').
+    kubectl accepts the pod name either before or after exec flags —
+    ``<pod> -n <ns> -- cmd`` and ``-n <ns> <pod> -- cmd`` are both valid —
+    so scan for the first positional token before the ``--`` separator
+    instead of assuming it comes first. Task-2d612caa: an ``-n``-prefixed
+    call escaped extraction, Layer 1 lost the original injection pod and
+    read an unrelated tool pod's empty local DB as experiment failure.
 
     Returns:
-        Pod name if valid, None if v_args is empty or first token is a flag.
+        Pod name if valid, None if v_args is empty or no positional pod
+        token appears before ``--``.
     """
     if not v_args:
         return None
     tokens = v_args.strip().split()
-    if not tokens:
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--":
+            break
+        if tok.startswith("-"):
+            # --flag=value carries its own value; the flags in
+            # _EXEC_FLAGS_WITH_VALUE consume the following token.
+            if "=" not in tok and tok in _EXEC_FLAGS_WITH_VALUE:
+                i += 1
+            i += 1
+            continue
+        # First positional token is the pod slot — accept it only if it
+        # looks like a pod name.
+        if _POD_NAME_RE.match(tok):
+            return tok
         return None
-    first = tokens[0]
-    # Reject if the first token looks like a flag
-    if first.startswith("-"):
-        return None
-    # Validate pod name pattern
-    if _POD_NAME_RE.match(first):
-        return first
     return None
 
 
