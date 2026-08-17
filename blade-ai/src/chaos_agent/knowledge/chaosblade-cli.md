@@ -104,8 +104,16 @@ Impact" section, but note: "actual partition should be verified with
 
 ## Injection Method Switching
 
-When `blade_create` fails on the host (incompatible blade version,
-missing CLI, host firewall, etc.) you have three escalating
+Host-side `blade_create` (`blade create k8s ...`) creates an experiment
+CR for EVERY scope — including node — and blocks until the operator
+reconciles it. The node experiment *runs* inside the tool pod, but the
+host CLI still needs the operator to get it there. Therefore: if the
+operator is unhealthy (not ready / ImagePullBackOff / not deployed per
+preflight or probe), the host path CANNOT succeed — skip it and start
+with Tier 1 directly.
+
+Otherwise, when `blade_create` fails on the host (incompatible blade
+version, missing CLI, host firewall, etc.) you have three escalating
 alternatives. The skill case's "Injection Method Selection" section is
 authoritative for *which* alternatives apply to a given fault — this
 doc only describes the *mechanics*.

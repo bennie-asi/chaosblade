@@ -679,6 +679,46 @@ class TestKubectlDebugOneshot:
         assert "No such file" in result  # logs tail explains the failure
         assert '"cleaned":true' in result
 
+    @pytest.mark.asyncio
+    async def test_oneshot_budget_expiry_points_to_systemd_carrier(self, monkeypatch):
+        """Budget expiry must carry the fix direction (inject-59b289a6): a
+        sustained loop hosted in a one-shot debug pod died at the 120s cap
+        and the model had to self-diagnose the carrier mistake (~150s +
+        fragmented fault window). The error itself must name the carrier."""
+
+        async def fake_run(cmd, *args, **kwargs):
+            command = " ".join(cmd)
+            if " debug " in f" {command} ":
+                return CommandResult(
+                    0,
+                    "Creating debugging pod node-debugger-node-a-x1 "
+                    "with container debugger on node node-a.",
+                    "", 1.0,
+                )
+            if " logs " in f" {command} ":
+                return CommandResult(0, "", "", 1.0)
+            if " delete " in f" {command} ":
+                return CommandResult(0, "pod deleted", "", 1.0)
+            # Pod never terminates — forces the budget-expiry path.
+            return CommandResult(0, self._pod_json("Running"), "", 1.0)
+
+        kubectl_mod = sys.modules["chaos_agent.tools.kubectl"]
+        monkeypatch.setattr(kubectl_mod, "execute_via_transport", fake_run)
+        monkeypatch.setattr(kubectl_mod.settings, "timeout_kubectl_exec", 1)
+
+        result = await kubectl.ainvoke({
+            "subcommand": "debug",
+            "v_args": "node/node-a -n test-ns --image=busybox -- df -h /host",
+            "kubeconfig": "", "context": "", "cluster": "",
+        })
+
+        assert result.startswith("Error:")
+        assert "did not terminate within" in result
+        assert '"cleaned":true' in result
+        # Fix direction: long payloads belong in a host systemd service,
+        # not in a probe pod that the wrapper cleans on budget expiry.
+        assert "systemd" in result
+
     def test_sleep_placeholder_stays_interactive(self):
         """``-- sleep N`` is the documented keep-alive convention: the pod
         must go through the Ready wait, never the terminal poll."""
@@ -1134,6 +1174,81 @@ class TestSplitArgs:
         args = "pods -n default -l app=nginx -o wide"
         assert _split_args(args) == args.split()
 
+    def test_jsonpath_range_with_spaces_single_token(self):
+        """Task inject-c8cdd105: a {range}…{end} template containing spaces
+        was word-split into fragments, and kubectl reported ``error parsing
+        jsonpath {range, unclosed action``. The whole template must survive
+        as ONE token (block-keyword pairing terminates the merge, so the
+        trailing flag is not swallowed)."""
+        result = _split_args(
+            "get node n1 -o jsonpath={range .status.conditions[*]}"
+            "{.type}={.status} {end} -n cms"
+        )
+        assert result == [
+            "get", "node", "n1", "-o",
+            "jsonpath={range .status.conditions[*]}{.type}={.status} {end}",
+            "-n", "cms",
+        ]
+
+    def test_jsonpath_nested_quotes_preserved(self):
+        """Task inject-c8cdd105: shlex stripped the inner quotes of
+        ``[?(@.type=='MemoryPressure')]`` and kubectl reported
+        ``unrecognized identifier MemoryPressure``. The OUTER delimiter
+        pair is dropped (shell semantics) but inner quotes must survive."""
+        result = _split_args(
+            "get node n1 -o jsonpath='{.status.conditions"
+            "[?(@.type=='MemoryPressure')].status}'"
+        )
+        assert result == [
+            "get", "node", "n1", "-o",
+            "jsonpath={.status.conditions[?(@.type=='MemoryPressure')].status}",
+        ]
+
+    def test_jsonpath_nested_quotes_unquoted_form(self):
+        """Same template without the outer delimiter pair."""
+        result = _split_args(
+            "get node n1 -o jsonpath={.status.conditions"
+            "[?(@.type=='MemoryPressure')].status}"
+        )
+        assert result == [
+            "get", "node", "n1", "-o",
+            "jsonpath={.status.conditions[?(@.type=='MemoryPressure')].status}",
+        ]
+
+    def test_go_template_range_single_token(self):
+        """go-template block forms merge the same way."""
+        result = _split_args(
+            "get pods -o go-template={{range .items}}"
+            "{{.metadata.name}}\n{{end}}"
+        )
+        assert result == [
+            "get", "pods", "-o",
+            "go-template={{range .items}}{{.metadata.name}}\n{{end}}",
+        ]
+
+    def test_template_output_flag_forms_untouched(self):
+        """Non-template -o values and other key=value flags are unaffected."""
+        assert _split_args("get node n1 -o=jsonpath={.metadata.name}") == [
+            "get", "node", "n1", "-o=jsonpath={.metadata.name}",
+        ]
+        assert _split_args("get pods -o custom-columns=NAME:.metadata.name") == [
+            "get", "pods", "-o", "custom-columns=NAME:.metadata.name",
+        ]
+        assert _split_args("get pods --field-selector=status.phase=Running") == [
+            "get", "pods", "--field-selector=status.phase=Running",
+        ]
+
+    def test_unterminated_template_consumes_rest(self):
+        """Fail-open: a truncated template is passed through whole so
+        kubectl reports the real template error, not a fragment artifact."""
+        result = _split_args(
+            "get node n1 -o jsonpath={range .status.conditions[*]}{.type}"
+        )
+        assert result == [
+            "get", "node", "n1", "-o",
+            "jsonpath={range .status.conditions[*]}{.type}",
+        ]
+
 
 class TestKubectlJsonpathQuoting:
     """Test that kubectl tool correctly passes jsonpath args with shell quoting."""
@@ -1576,3 +1691,35 @@ class TestExecBladeCreateTimeoutGuard:
         )
         assert cmd.count("--timeout") == 1
         assert self._timeout_pair(cmd) == "900"
+
+
+class TestErrorOutputMergesBothStreams:
+    """On non-zero exit both stdout and stderr carry evidence; an ``or``
+    drops one side. task-inject-774ecd39's jsonpath call rendered a
+    half-baked template on stdout while the real error sat on stderr —
+    the model saw only the template and had to self-repair blind."""
+
+    @pytest.mark.asyncio
+    async def test_stdout_and_stderr_both_survive(self, monkeypatch):
+        async def fake_run(cmd, *a, **kw):
+            return CommandResult(
+                1, "capacity={.status.capacity}",
+                'error: error parsing jsonpath: unterminated "', 1.0,
+            )
+
+        kubectl_mod = sys.modules["chaos_agent.tools.kubectl"]
+        monkeypatch.setattr(kubectl_mod, "execute_via_transport", fake_run)
+        out = await kubectl.ainvoke({"subcommand": "get", "v_args": "node n1"})
+        assert "exit 1" in out
+        assert "capacity={.status.capacity}" in out      # stdout kept
+        assert "error parsing jsonpath" in out            # stderr kept
+
+    @pytest.mark.asyncio
+    async def test_empty_streams_report_no_output(self, monkeypatch):
+        async def fake_run(cmd, *a, **kw):
+            return CommandResult(1, "", "", 1.0)
+
+        kubectl_mod = sys.modules["chaos_agent.tools.kubectl"]
+        monkeypatch.setattr(kubectl_mod, "execute_via_transport", fake_run)
+        out = await kubectl.ainvoke({"subcommand": "get", "v_args": "node n1"})
+        assert "(no output)" in out

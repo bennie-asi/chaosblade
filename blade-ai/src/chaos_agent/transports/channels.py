@@ -112,6 +112,62 @@ def strip_execution_location(shown: str) -> str:
     return _LOCATION_SUFFIX_RE.sub("", shown)
 
 
+def _wiz_preserve_stderr(cmd: list[str]) -> str:
+    """Build a wiz ``--command`` payload whose remote stderr survives the relay.
+
+    Probed live against the platform: when the inner command exits non-zero
+    with BOTH streams non-empty (e.g. kubectl renders a half-baked jsonpath
+    on stdout while the real parse error sits on stderr), wiz relays stdout
+    only — the stderr evidence is dropped before it ever reaches
+    ``parse_wiz_output``, and the model is left self-repairing blind
+    (incident inject-774ecd39). Stderr-only failures DO come through.
+
+    Probed live as well: the platform word-splits ``--command`` and execs
+    directly — shell metacharacters (``;`` ``|`` ``(...)`` ``$VAR``) are NOT
+    interpreted, they break task submission. The only reliable vehicle for
+    shell logic is an explicit ``sh -c '<script>'``.
+
+    The script runs the payload in a SUBSHELL (so an inner ``exit`` cannot
+    skip the cleanup), tees stderr to a pid-scoped temp file and appends it
+    to stdout ONLY on non-zero exit (preceded by a newline so a stdout that
+    ended mid-line doesn't fuse with the first stderr line), so success-path
+    output stays byte-identical (no deprecation-warning contamination of
+    parseable stdout).
+    """
+    cmd_str = " ".join(shlex.quote(p) for p in cmd)
+    script = (
+        f'E="/tmp/.wiz_err_$$"; '
+        f'( {cmd_str} ) 2>"$E"; rc=$?; '
+        '[ $rc -ne 0 ] && { printf "\\n"; cat "$E"; }; '
+        'rm -f "$E"; exit $rc'
+    )
+    return f"sh -c {shlex.quote(script)}"
+
+
+def _wiz_unwrap_for_display(cmd_str: str) -> str:
+    """Recover the semantic command from a ``sh -c`` wrapped payload."""
+    if not cmd_str.startswith("sh -c "):
+        return cmd_str
+    try:
+        script = shlex.split(cmd_str)[2]
+    except (IndexError, ValueError):
+        return cmd_str
+    prefix = 'E="/tmp/.wiz_err_$$"; '
+    if not script.startswith(prefix):
+        return cmd_str
+    inner = script[len(prefix):]
+    inner = re.sub(
+        r' 2>"\$E"; rc=\$\?; \[ \$rc -ne 0 \] && \{ printf "\\n"; '
+        r'cat "\$E"; \}; '
+        r'rm -f "\$E"; exit \$rc$',
+        "",
+        inner,
+    )
+    if inner.startswith("( ") and inner.endswith(" )"):
+        inner = inner[2:-2]
+    return inner
+
+
 def embed_stdin_in_command(cmd: list[str], stdin_data: str) -> list[str]:
     """Fold ``stdin_data`` into ``cmd`` as a base64 pipeline prefix.
 
@@ -212,12 +268,11 @@ class KubewizK8sChannel:
     def wrap_command(self, cmd: list[str], target: TransportTarget, timeout: float | None = None, stdin_data: str = "") -> list[str]:
         if stdin_data:
             cmd = embed_stdin_in_command(cmd, stdin_data)
-        cmd_str = " ".join(shlex.quote(p) for p in cmd)
         wait_timeout = str(_wiz_timeout_seconds(timeout))
         task_timeout = str(_wiz_task_timeout_seconds())
         return [
             settings.wiz_path, "task", "exec",
-            "--command", cmd_str,
+            "--command", _wiz_preserve_stderr(cmd),
             "--cluster-uuid", target.kubewiz_cluster_uuid,
             "--profile", target.kubewiz_profile,
             "--timeout", task_timeout,
@@ -250,7 +305,7 @@ class KubewizK8sChannel:
         inner = " ".join(cmd)
         if len(cmd) >= 5 and cmd[1:3] == ["task", "exec"]:
             try:
-                inner = cmd[cmd.index("--command") + 1]
+                inner = _wiz_unwrap_for_display(cmd[cmd.index("--command") + 1])
             except (ValueError, IndexError):
                 pass
         return inner + _where(self.name, f"cluster {detail}" if detail else "")
@@ -281,12 +336,11 @@ class KubewizHostChannel:
     def wrap_command(self, cmd: list[str], target: TransportTarget, timeout: float | None = None, stdin_data: str = "") -> list[str]:
         if stdin_data:
             cmd = embed_stdin_in_command(cmd, stdin_data)
-        cmd_str = " ".join(shlex.quote(p) for p in cmd)
         wait_timeout = str(_wiz_timeout_seconds(timeout))
         task_timeout = str(_wiz_task_timeout_seconds())
         return [
             settings.wiz_path, "task", "exec",
-            "--command", cmd_str,
+            "--command", _wiz_preserve_stderr(cmd),
             "--cluster-uuid", "kubewiz-host-channel",
             "--name", target.host_name,
             "--profile", target.kubewiz_profile,
@@ -317,7 +371,7 @@ class KubewizHostChannel:
         inner = " ".join(cmd)
         if len(cmd) >= 5 and cmd[1:3] == ["task", "exec"]:
             try:
-                inner = cmd[cmd.index("--command") + 1]
+                inner = _wiz_unwrap_for_display(cmd[cmd.index("--command") + 1])
             except (ValueError, IndexError):
                 pass
         return inner + _where(self.name, detail)

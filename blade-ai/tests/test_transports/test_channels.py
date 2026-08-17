@@ -597,3 +597,81 @@ class TestAnomalyAnnotationDoesNotChangeControlFlow:
         out = parse_wiz_output(CommandResult(exit_code=1, stdout="", stderr=raw))
         assert raw in out.stderr
         assert out.stderr.endswith(raw), "the raw reply must come last, unaltered"
+
+
+# ── wiz stderr-preservation wrapper ──────────────────────────
+
+class TestWizStderrPreservation:
+    """Probed live: the wiz platform drops the remote command's stderr when
+    stdout is non-empty (incident inject-774ecd39: kubectl half-rendered a
+    jsonpath on stdout, the real parse error sat on stderr and never arrived,
+    leaving the model self-repairing blind). The wrapper tees stderr to a
+    temp file and appends it to stdout ONLY on non-zero exit."""
+
+    def test_wrapper_shape(self):
+        from chaos_agent.transports.channels import _wiz_preserve_stderr
+
+        wrapped = _wiz_preserve_stderr(["kubectl", "get", "pods"])
+        # Platform word-splits --command and execs directly (probed live);
+        # shell logic only survives inside an explicit sh -c.
+        assert wrapped.startswith("sh -c '")
+        assert "( kubectl get pods ) 2>\"$E\"" in wrapped
+        assert '[ $rc -ne 0 ] && { printf "\\n"; cat "$E"; }' in wrapped
+        assert wrapped.rstrip("'").endswith("exit $rc")
+
+    def test_wrapper_quotes_inner_args(self):
+        from chaos_agent.transports.channels import _wiz_preserve_stderr
+
+        wrapped = _wiz_preserve_stderr(
+            ["kubectl", "patch", "deploy/x", "-p", '{"spec":{"replicas":1}}']
+        )
+        assert "'{\"spec\":{\"replicas\":1}}'" in wrapped
+
+    def test_unwrap_roundtrip(self):
+        from chaos_agent.transports.channels import (
+            _wiz_preserve_stderr,
+            _wiz_unwrap_for_display,
+        )
+
+        cmd = ["kubectl", "patch", "deploy/x", "-p", '{"spec":{"replicas":1}}']
+        inner = _wiz_unwrap_for_display(_wiz_preserve_stderr(cmd))
+        assert inner == "kubectl patch deploy/x -p '{\"spec\":{\"replicas\":1}}'"
+
+    @pytest.mark.parametrize("inner_cmd, expect_out, rc", [
+        # failure with BOTH streams → stderr appended after a newline
+        # separator (a mid-line stdout must not fuse with the first stderr line)
+        (["sh", "-c", "printf partial; printf real-error >&2; exit 3"],
+         "partial\nreal-error", 3),
+        # failure with stderr only → still surfaces (leading blank line is
+        # the separator; stdout was empty)
+        (["sh", "-c", "printf only-err >&2; exit 1"], "\nonly-err", 1),
+        # success with stderr noise → stdout stays byte-identical
+        (["sh", "-c", "printf clean-ok; printf warn >&2"], "clean-ok", 0),
+    ])
+    def test_wrapper_semantics_via_local_shell(self, inner_cmd, expect_out, rc):
+        import subprocess
+
+        from chaos_agent.transports.channels import _wiz_preserve_stderr
+
+        p = subprocess.run(
+            ["sh", "-c", _wiz_preserve_stderr(inner_cmd)],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert p.returncode == rc
+        assert p.stdout == expect_out
+
+    @patch("chaos_agent.transports.channels.settings")
+    def test_k8s_channel_wraps_command(self, mock_settings):
+        mock_settings.wiz_path = "wiz"
+        target = TransportTarget(kubewiz_cluster_uuid="u", kubewiz_profile="p")
+        wrapped = KubewizK8sChannel().wrap_command(["kubectl", "get", "pods"], target)
+        cmd_str = wrapped[wrapped.index("--command") + 1]
+        assert cmd_str.startswith("sh -c ")
+
+    @patch("chaos_agent.transports.channels.settings")
+    def test_host_channel_wraps_command(self, mock_settings):
+        mock_settings.wiz_path = "wiz"
+        target = TransportTarget(host_name="h1", kubewiz_profile="p")
+        wrapped = KubewizHostChannel().wrap_command(["df", "-h"], target)
+        cmd_str = wrapped[wrapped.index("--command") + 1]
+        assert cmd_str.startswith("sh -c ")

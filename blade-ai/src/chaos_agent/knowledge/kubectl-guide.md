@@ -152,6 +152,13 @@ kubectl get nodes --field-selector spec.unschedulable=false
 
 **Verification examples (fault-drill scenarios)**:
 
+> **Quoting pitfall**: single-quote the WHOLE `-o jsonpath=...` template.
+> Unquoted literal text such as `capacity={...}` gets word-split by the
+> remote shell — kubectl then echoes a half-rendered template on stdout
+> while the real parse error sits on stderr, which reads like silent
+> success. Wrong: `-o jsonpath=capacity={.status.capacity}` —
+> right: `-o 'jsonpath=capacity={.status.capacity}'`.
+
 ```bash
 # Verify Pod OOM: inspect the container exit code and restart count
 kubectl get pod <pod> -n <ns> -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'

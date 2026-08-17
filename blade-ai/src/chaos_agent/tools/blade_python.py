@@ -332,9 +332,11 @@ async def blade_python_prepare(
     if result.exit_code != 0:
         stderr = result.stderr.strip() if result.stderr else ""
         stdout = result.stdout.strip() if result.stdout else ""
+        # Merge when both carry content — `or` drops one side's evidence.
+        _detail = "\n".join(p for p in (stdout, stderr) if p) or "(no output)"
         return (
             f"Error: blade prepare python failed (exit {result.exit_code}): "
-            f"{stderr or stdout or '(no output)'}"
+            f"{_detail}"
         )
     return result.stdout
 
@@ -387,9 +389,11 @@ async def blade_python_revoke(uid: str, task_id: str = "") -> str:
     if result.exit_code != 0:
         stderr = result.stderr.strip() if result.stderr else ""
         stdout = result.stdout.strip() if result.stdout else ""
+        # Merge when both carry content — `or` drops one side's evidence.
+        _detail = "\n".join(p for p in (stdout, stderr) if p) or "(no output)"
         return (
             f"Error: blade revoke failed (exit {result.exit_code}): "
-            f"{stderr or stdout or '(no output)'}"
+            f"{_detail}"
         )
     return result.stdout
 

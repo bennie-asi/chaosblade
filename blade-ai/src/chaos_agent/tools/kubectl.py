@@ -41,21 +41,191 @@ logger = logging.getLogger(__name__)
 
 _K8S_NAMESPACE_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
+# Output-format keys whose VALUE is a go template. Templates routinely
+# contain spaces, single quotes (jsonpath string literals such as
+# ``[?(@.type=='MemoryPressure')]``) and self-balanced actions
+# (``{range}``/``{end}``), so they need template-aware tokenization
+# instead of plain shell word splitting.
+_TEMPLATE_OUTPUT_KEYS = ("jsonpath=", "go-template=")
+# Locates a template KEY inside a word: at the word start (``jsonpath=...``)
+# or after a flag's ``=`` (``-o=jsonpath=...`` / ``--output=go-template=...``).
+_TEMPLATE_KEY_RE = re.compile(r"(?:^|=)(jsonpath|go-template)=")
+# go-template block keywords: ``{range`` / ``{if`` / ``{with`` open a block
+# closed by ``{end}``. Every action is brace-balanced on its own, so brace
+# counting can NOT locate the end of a template — keyword pairing can.
+_BLOCK_OPEN_RE = re.compile(r"\{(range|if|with)(?:\s|\)|$|\})")
+_BLOCK_END_RE = re.compile(r"\{end\}")
 
-def _split_args(args: str) -> list[str]:
-    """Split args string respecting shell quoting.
 
-    Uses shlex.split to properly handle quoted arguments like
-    jsonpath='{.spec.replicas}' or -p '{"key":"value"}'.
-    Falls back to str.split() if shlex encounters unmatched quotes
-    (e.g. LLM-generated malformed args).
+def _template_word_depths(word: str) -> tuple[int, int]:
+    """Net ``({, })`` and block ``(open, close)`` counts of one word."""
+    return (
+        word.count("{") - word.count("}"),
+        len(_BLOCK_OPEN_RE.findall(word)) - len(_BLOCK_END_RE.findall(word)),
+    )
+
+
+def _split_args(args: str) -> list[str]:  # noqa: C901 — state machine
+    """Split args string respecting shell quoting and go templates.
+
+    Shell-like word splitting with two template-aware extensions, both
+    verified live against a real cluster (task inject-c8cdd105):
+
+    1. Quoted regions keep their content VERBATIM — nested quotes are not
+       re-parsed. shlex consumes ``'[?(@.type=='X')]'`` as close/reopen
+       pairs and strips the inner quotes kubectl's jsonpath needs
+       (observed: ``unrecognized identifier MemoryPressure``).
+    2. A ``jsonpath=`` / ``go-template=`` value is consumed as ONE token
+       until its block keywords pair up (``{range}``…``{end}``) and braces
+       balance — even when it contains spaces (observed: ``error parsing
+       jsonpath {range, unclosed action`` from word splitting). An
+       unmatched quote or an unterminated template consumes the rest of
+       the input, so kubectl reports the REAL template error instead of a
+       fragmentation artifact (fail-open; no silent misjoin — merge only
+       starts right after a template key).
     """
     if not args:
         return []
-    try:
-        return shlex.split(args)
-    except ValueError:
-        return args.split()
+    tokens: list[str] = []
+    buf = ""
+    i, n = 0, len(args)
+
+    def flush() -> None:
+        nonlocal buf
+        if buf:
+            tokens.append(buf)
+            buf = ""
+
+    def buf_ends_template_key() -> bool:
+        return bool(re.search(r"(?:^|=)(jsonpath|go-template)=$", buf))
+
+    def consume_template(
+        start: int,
+        keep_quotes: bool,
+        skip_space: bool = False,
+        prior: tuple[int, int] = (0, 0),
+    ) -> int:
+        """Consume the template value starting at ``start`` into buf.
+
+        Returns the index just past the template. Characters are taken
+        VERBATIM — inner quotes stay (kubectl's jsonpath needs its string
+        literals: ``[?(@.type=='MemoryPressure')]``). Termination is
+        decided at word boundaries OUTSIDE quotes, once braces balance
+        and the block keywords (``{range}``/``{if}``/``{with}`` vs
+        ``{end}``) pair up; on truncation, consumes to end of input so
+        kubectl reports the REAL template error, not a fragmentation
+        artifact. One matching pair of OUTER delimiter quotes is stripped
+        (shell semantics — the form verified live against the cluster).
+        ``skip_space`` continues a value already unbalanced inside buf
+        across the following whitespace (``jsonpath={range .items}``),
+        preserving the whitespace; ``prior`` is the (brace, block) depth
+        the partial already in buf contributes.
+        """
+        nonlocal buf
+        j = start
+        out: list[str] = []
+        if skip_space:
+            # Preserve the whitespace: ``{range .items}`` needs the space.
+            while j < n and args[j].isspace():
+                out.append(args[j])
+                j += 1
+        bd, kd = prior
+        quote: str | None = None
+        first_quote = -1
+        last_quote = -1
+        consumed_word = False
+        while j < n:
+            c = args[j]
+            if quote is not None:
+                out.append(c)
+                if c == quote:
+                    last_quote = len(out) - 1
+                    quote = None
+                j += 1
+                continue
+            if c in ("'", '"'):
+                quote = c
+                out.append(c)
+                if first_quote < 0:
+                    first_quote = len(out) - 1
+                j += 1
+                continue
+            if c.isspace():
+                if consumed_word and bd == 0 and kd == 0:
+                    break
+                out.append(c)
+                j += 1
+                continue
+            if _BLOCK_END_RE.match(args, j):
+                kd -= 1
+            elif _BLOCK_OPEN_RE.match(args, j):
+                kd += 1
+            if c == "{":
+                bd += 1
+            elif c == "}":
+                bd -= 1
+            out.append(c)
+            consumed_word = True
+            j += 1
+        text = "".join(out)
+        if (
+            not keep_quotes
+            and first_quote >= 0
+            and first_quote < last_quote == len(text) - 1
+            and text[first_quote] == text[last_quote]
+            and text[:first_quote].strip() == ""
+        ):
+            # Drop the OUTER delimiter pair only; inner quotes survive.
+            text = text[:first_quote] + text[first_quote + 1:last_quote]
+        buf += text
+        return j
+
+    while i < n:
+        ch = args[i]
+        if ch.isspace():
+            flush()
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            if buf_ends_template_key():
+                # Template value, quote opens here: keep inner quotes.
+                i = consume_template(i, keep_quotes=True)
+                continue
+            # Plain quoted region: content verbatim until the matching
+            # quote; an unmatched quote runs to end of input (never raise,
+            # never fall back to whitespace-splitting quoted content).
+            i += 1
+            part: list[str] = []
+            while i < n and args[i] != ch:
+                part.append(args[i])
+                i += 1
+            i += 1  # skip closing quote (or step past EOF when unmatched)
+            buf += "".join(part)
+            continue
+        start = i
+        while i < n and not args[i].isspace() and args[i] not in ("'", '"'):
+            i += 1
+        word = args[start:i]
+        buf += word
+        m = _TEMPLATE_KEY_RE.search(word)
+        if m:
+            # Key and (maybe partial) template in one word. Bare key
+            # (``jsonpath=`` with the value following) or an unbalanced
+            # value: consume the template continuation as one token. An
+            # unbalanced partial inside the word continues across the
+            # following space (``jsonpath={range .items}``).
+            partial = word[m.end():]
+            bd, kd = _template_word_depths(partial)
+            unbalanced = bd > 0 or kd > 0
+            if not partial or unbalanced:
+                i = consume_template(
+                    i,
+                    keep_quotes=False,
+                    skip_space=bool(partial) and unbalanced,
+                    prior=(bd, kd),
+                )
+    flush()
+    return tokens
 
 
 def _namespace_from_args(args: list[str]) -> str:
@@ -722,6 +892,8 @@ async def kubectl(
       - `debug node/<node>`: MUST append `-- sleep 3600`; never `-it`;
         host paths under `/host/...`; host mutation needs
         `--profile=sysadmin` + pullable image (recipes).
+      - One-shot debug CMD (`-- CMD`, no sleep) is PROBE-only: HARD 120s
+        cap, then auto-cleaned. Sustained loops → host systemd-run service.
       - `exec ... blade create` auto-injects/boosts `--timeout` (may
         lengthen, not shorten).
       - `drain` refuses `--force`/`--disable-eviction`; recover via
@@ -849,8 +1021,13 @@ async def _kubectl_impl(
         return f"Error: kubectl {subcommand}: {e}"
 
     if result.exit_code != 0:
-        # kubewiz 模式下错误信息在 stdout，直接模式在 stderr
-        error_detail = result.stderr or result.stdout
+        # kubewiz 模式下错误信息在 stdout，直接模式在 stderr；两者都非空时
+        # （如 jsonpath 半截渲染占 stdout、真实报错在 stderr）必须合并，
+        # or 语义会把 kubectl 的实际错误解释丢掉，模型只能盲猜自修复。
+        _err_parts = [s.strip() for s in (result.stdout, result.stderr) if s and s.strip()]
+        error_detail = "\n".join(_err_parts) if _err_parts else "(no output)"
+        if len(error_detail) > 1500:
+            error_detail = error_detail[:1500] + "\n...(truncated)"
         # Report the exit code + raw output verbatim; no "failed" verdict word.
         return f"Error: kubectl {subcommand} (exit {result.exit_code}): {error_detail}"
 
@@ -1049,6 +1226,13 @@ async def _kubectl_impl(
                     if cleaned
                     else f"Cleanup failed; delete pod {_debug_pod} -n {_debug_ns} when done."
                 )
+                # Budget-expiry fix direction: without it the model must
+                # self-diagnose the carrier mistake (inject-59b289a6 burned
+                # ~150s + a fragmented fault window before re-arming).
+                + "\nOne-shot debug pods are probes (120s hard cap), not loop "
+                "carriers: a long-running/sustained payload must be hosted "
+                "as a systemd transient service on the host (systemd-run), "
+                "armed via a short one-shot command that returns immediately."
             )
 
         # ---- INTERACTIVE mode (`debug ... -- sleep N` style, or no `--`):
@@ -1148,37 +1332,36 @@ async def kubectl_read(
     context: str = "",
     cluster: str = "",
 ) -> str:
-    """READ-ONLY kubectl — the observation tool for every read-only phase
-    (intent/planning/verification).
+    """READ-ONLY kubectl — the observation tool for every read-only phase.
 
-    Read-only BY ENFORCEMENT: read verbs always; ``exec``/``debug`` only
-    for read-only probes; mutating inner commands are REJECTED — fault
-    INJECTION is Phase 2.
+    Read-only BY ENFORCEMENT: read verbs always; ``exec``/``debug``
+    probes only; mutating inner commands are REJECTED — fault INJECTION
+    is Phase 2.
 
     When to use:
       - Read-only inspection: `get`/`describe`/`top`/`logs`/
         `api-resources`/`explain`/`auth can-i`.
-      - Read-only probes inside a pod (`exec`); pipes via read-only
-        ``sh -c``.
+      - Read-only probes inside a pod (``exec``): ONE single command
+        after ``--`` (e.g. ``-- which stress-ng``, ``-- df -h``).
       - Node host fs/kernel: ``debug node/<node> --image=<cluster-image>
-        -- sleep 60`` then exec into it (paths ``/host/...``); allowed in
-        EVERY read-only phase, auto-cleaned at phase end. In PLANNING,
+        -- sleep 60`` then exec into it (paths ``/host/...``). In PLANNING,
         verify the image carries your plan's binaries BEFORE committing.
 
     Inputs:
-      - subcommand: Literal-enforced (see signature).
-      - v_args: same shape as ``kubectl``; single-quote args with spaces or
-        double quotes (jsonpath).
+      - subcommand: Literal-enforced.
+      - v_args: same shape as ``kubectl``; single-quote any arg containing
+        spaces — especially a whole ``-o jsonpath=...`` template (unquoted
+        literal text like ``capacity={...}`` gets word-split remotely).
       - kubeconfig/context/cluster: optional overrides.
 
     Output: same as the full ``kubectl`` tool (stdout / "Error: ...").
 
-    Side effects: none on cluster state; `debug` creates an ephemeral
-        probe Pod, auto-cleaned at phase end.
+    Side effects: none on cluster state (`debug`'s probe Pod auto-cleaned).
 
     Constraints:
-      - No bare shell operators (shell=False); ``>``, ``;``, ``&&``, ``&``
-        rejected.
+      - exec inner: a SINGLE read-only command — shell operators
+        (``;``/``&&``/``||``/``>``/``&``) and multi-statement ``sh -c`` are
+        rejected (fail closed); one probe per call.
       - exec: no ``-l/--selector`` (resolve the pod via `get`); no
         ``-it``; SHORT keep-alive for debug (``-- sleep 60``).
       - Unknown-flag error → ``--help`` in v_args rather than guessing.
@@ -1197,22 +1380,18 @@ async def kubectl_read(
     # classifier judges it (same vocabulary the guard-scope screeners use), and
     # a rejection carries the SPECIFIC reason so the model can self-correct.
     if subcommand in ("exec", "debug"):
-        from chaos_agent.tools.readonly import kubectl_exec_rejection_reason
+        from chaos_agent.tools.readonly import (
+            READONLY_PROBE_FIX_HINT,
+            kubectl_exec_rejection_reason,
+        )
 
         reason = kubectl_exec_rejection_reason(v_args)
         if reason is not None:
             return (
                 f"Error: kubectl_read rejected this {subcommand} — its inner "
                 f"command is not read-only: {reason}.\n"
-                f"kubectl_read only runs read-only probes. To fix:\n"
-                f"- To CHECK a binary/file exists, use "
-                f"`{subcommand} ... -- ls <absolute-path>` "
-                f"(e.g. `-- ls /usr/bin/stress-ng`).\n"
-                f"- To READ rules/state, use a read form "
-                f"(`-- iptables -L`, `-- ip addr show`, `-- systemctl status`, "
-                f"`-- cat <path>`).\n"
-                f"- If this is genuinely a FAULT-INJECTION command, it belongs "
-                f"to Phase 2 (execution), not to a read-only phase."
+                f"kubectl_read only runs read-only probes. "
+                f"{READONLY_PROBE_FIX_HINT}"
             )
     # Call the shared implementation directly — NOT kubectl.ainvoke(), which
     # would emit a nested on_tool_start event (duplicate TUI tool card).

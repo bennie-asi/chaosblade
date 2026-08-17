@@ -214,7 +214,9 @@ async def host_inject(command: str, timeout: int = 60, task_id: str = "") -> str
     if result.exit_code != 0:
         stderr = (result.stderr or "").strip()
         stdout = (result.stdout or "").strip()
-        return f"Error: host_inject failed (exit {result.exit_code}): {stderr or stdout or '(no output)'}"
+        # Merge when both carry content — `or` drops one side's evidence.
+        _detail = "\n".join(p for p in (stdout, stderr) if p) or "(no output)"
+        return f"Error: host_inject failed (exit {result.exit_code}): {_detail}"
 
     return result.stdout or "(command completed, no output)"
 

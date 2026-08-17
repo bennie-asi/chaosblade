@@ -1,8 +1,8 @@
 """Time wait tool — allows the LLM to pause between operations.
 
 STRICT CONSTRAINT: Cannot be called consecutively. The LLM MUST call
-at least one other tool (e.g., kubectl) between two time_wait calls.
-This prevents idle spinning.
+at least one other tool (any observation/status check) between two
+time_wait calls. This prevents idle spinning.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
 
-MAX_WAIT_SECONDS = 180
+MAX_WAIT_SECONDS = 60
 MAX_CALLS_PER_TASK = 50
 
 # Track state to enforce no-consecutive rule and max call limit.
@@ -65,24 +65,23 @@ def check_and_reset_wait_guard(messages: list) -> None:
 
 @tool
 async def time_wait(seconds: int = 10) -> str:
-    """Pause execution for a specified number of seconds.
+    """Pause execution for the given seconds.
 
     When to use:
-      - After blade_create reports an error with a UID, wait for the
-        ChaosBlade operator to retry before checking cluster state.
-      - Between polling checks when observing fault propagation.
+      - After an action whose effect propagates asynchronously, wait before
+        re-checking state.
+      - Between polling checks while observing a slow change.
 
     STRICT RULES:
-      - Cannot be called twice in a row. You MUST call at least one
-        other tool (e.g., kubectl get) between two time_wait calls.
-      - If you call time_wait consecutively, it will be rejected.
+      - Never twice in a row: run at least one observation or status-check
+        tool between waits, or the call is rejected.
+      - For longer pauses, request the TOTAL in one call (max 60s) instead
+        of chaining waits.
 
     Inputs:
-      - seconds: How long to wait (1-180, default 10). Clamped to max 180s.
+      - seconds: Wait length (1-60, default 10). Clamped to 60.
 
-    Output: Confirmation of how long was waited.
-
-    Side effects: None (only delays execution).
+    Output: Confirmation of how long was waited. Side effects: None.
     """
     global _last_tool_was_wait, _call_count
 
@@ -94,8 +93,12 @@ async def time_wait(seconds: int = 10) -> str:
 
     if _last_tool_was_wait:
         return (
-            "Error: time_wait REJECTED — cannot call time_wait consecutively. "
-            "You MUST call another tool between waits."
+            "Error: time_wait REJECTED — cannot call time_wait consecutively; "
+            "NO waiting happened. Run ONE observation or status check that "
+            "advances your current goal first — after any non-wait tool "
+            "completes, time_wait is accepted again. If you simply need a "
+            "longer pause, ask for the TOTAL seconds in a single call "
+            "(max 60) instead of chaining waits."
         )
 
     clamped = max(1, min(seconds, MAX_WAIT_SECONDS))

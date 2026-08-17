@@ -388,7 +388,9 @@ async def blade_destroy(uid: str, kubeconfig: str = "") -> str:
     if result.exit_code != 0:
         stderr = result.stderr.strip() if result.stderr else ""
         stdout = result.stdout.strip() if result.stdout else ""
-        return f"Error: blade destroy failed (exit {result.exit_code}): {stderr or stdout}"
+        # Merge when both carry content — `or` drops one side's evidence.
+        _detail = "\n".join(p for p in (stdout, stderr) if p) or "(no output)"
+        return f"Error: blade destroy failed (exit {result.exit_code}): {_detail}"
 
     return result.stdout
 
