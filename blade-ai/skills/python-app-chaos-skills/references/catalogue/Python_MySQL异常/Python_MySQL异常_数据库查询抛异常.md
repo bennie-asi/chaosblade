@@ -6,7 +6,7 @@
 3. 若应用缺少异常捕获/重试/降级，故障沿调用链向上扩散
 
 **资源准备**：
-1. 已生成 Agent hook:`blade prepare python --port 9526 --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
+1. 已生成 Agent hook:`blade prepare python --port <port> --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
 2. 目标 Python 应用已以 `PYTHONPATH=<hook 目录>:$PYTHONPATH` **重启**,Agent 才在应用进程内监听;且使用 `mysql-connector` 或 `PyMySQL` 客户端
 3. 已记录注入前该接口的成功率/错误率基线
 4. 确认应用日志可见异常堆栈
@@ -20,8 +20,8 @@
    blade create python mysql throwCustomException \
      --exception ConnectionError \
      --exception-message "chaos drill: mysql unavailable" \
-     --sqltype select \
-     --timeout 600
+     --sqltype <sqltype> \
+     --timeout <duration>
    ```
    - `--exception`:异常类名,支持内置名(`ConnectionError`/`TimeoutError`)或全限定路径(如 `pymysql.err.OperationalError`)
    - `--exception-message`:含空格时必须加引号
@@ -39,7 +39,7 @@
    ```bash
    blade status --uid <uid>
    ```
-4. 确认未匹配的 SQL 类型(如注入 select 时执行 insert)仍正常——matcher 生效的证据
+4. 确认未匹配的 SQL 类型(如注入 `--sqltype` 限定的类型时执行其他类型 SQL)仍正常——matcher 生效的证据
 
 **注入恢复**：
 1. 销毁实验：

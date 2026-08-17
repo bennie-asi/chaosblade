@@ -6,7 +6,7 @@
 3. 缓存穿透导致数据库负载骤升，暴露「缓存不可用时缺少熔断/限流/本地兜底」的问题
 
 **资源准备**：
-1. 已生成 Agent hook:`blade prepare python --port 9526 --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
+1. 已生成 Agent hook:`blade prepare python --port <port> --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
 2. 目标 Python 应用已以 `PYTHONPATH=<hook 目录>:$PYTHONPATH` **重启**,Agent 才在应用进程内监听;且应用使用 `redis` 客户端库
 3. 已记录注入前该接口的成功率基线,以及**数据库的 QPS/负载基线**(用于观测穿透)
 4. 确认应用日志可见异常堆栈
@@ -17,7 +17,7 @@
 1. 记录注入前基线:调用一次依赖缓存的接口,确认命中缓存且正常返回;记录数据库 QPS
 2. 对指定 Redis 命令注入异常:
    ```bash
-   blade create python redis throwCustomException --exception redis.exceptions.ConnectionError --exception-message "chaos drill: redis unavailable" --cmd GET --timeout 600
+   blade create python redis throwCustomException --exception redis.exceptions.ConnectionError --exception-message "chaos drill: redis unavailable" --cmd <cmd> --timeout <duration>
    ```
    - `--exception`:异常类名。支持内置名(`ConnectionError`/`TimeoutError` 等)或全限定路径(如 `redis.exceptions.ConnectionError`)
    - `--exception-message`:异常消息,含空格时必须加引号
@@ -37,7 +37,7 @@
    ```bash
    blade status --uid <uid>
    ```
-5. 确认未匹配的命令(如注入 GET 时执行 SET)仍正常——matcher 生效的证据
+5. 确认未匹配的命令(如注入 `--cmd` 限定的命令时执行其他命令)仍正常——matcher 生效的证据
 
 **注入恢复**：
 1. 销毁实验：

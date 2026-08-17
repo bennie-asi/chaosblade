@@ -6,7 +6,7 @@
 3. 依赖数据库的接口整体变慢，暴露「无查询超时 / 连接池过小 / 缺少降级」的问题
 
 **资源准备**：
-1. 已生成 Agent hook:`blade prepare python --port 9526 --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
+1. 已生成 Agent hook:`blade prepare python --port <port> --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
 2. 目标 Python 应用已以 `PYTHONPATH=<hook 目录>:$PYTHONPATH` **重启**,Agent 才在应用进程内监听;且应用使用 `mysql-connector` 或 `PyMySQL` 客户端(若走 SQLAlchemy ORM 请改用 target=sqlalchemy)
 3. 已记录注入前该接口/该查询的耗时基线,以及**连接池使用率基线**
 4. 确认应用侧可观测:接口耗时指标、连接池指标或应用日志
@@ -17,7 +17,7 @@
 1. 记录注入前基线:调用一次依赖该查询的接口,记录耗时与连接池使用率
 2. 对指定 SQL 类型注入延迟:
    ```bash
-   blade create python mysql delay --time 3000 --sqltype select --timeout 600
+   blade create python mysql delay --time <time> --sqltype <sqltype> --timeout <duration>
    ```
    - `--time`:延迟毫秒数(**必填**)
    - `--sqltype` / `--sql` / `--database`:收窄影响面,只影响某类 SQL(如 select)、匹配的 SQL 或某个库;**全部省略则影响所有 SQL 执行**(含写操作,爆炸半径显著更大)
@@ -32,7 +32,7 @@
    ```bash
    blade status --uid <uid>
    ```
-4. 确认未匹配的 SQL 类型(如注入 select 时执行 insert)耗时正常——matcher 生效的证据
+4. 确认未匹配的 SQL 类型(如注入 `--sqltype` 限定的类型时执行其他类型 SQL)耗时正常——matcher 生效的证据
 5. 若耗时无变化且实验状态正常,说明应用未走到被拦截的调用(或 matcher 不匹配),按 matcher 重新收敛,而不是重复注入
 
 **注入恢复**：

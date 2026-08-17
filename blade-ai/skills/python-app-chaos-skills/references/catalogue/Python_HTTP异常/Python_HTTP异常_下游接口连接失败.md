@@ -6,7 +6,7 @@
 3. 若应用缺少异常捕获/重试/熔断，故障沿调用链向上扩散；若重试无退避，反而放大请求量
 
 **资源准备**：
-1. 已生成 Agent hook:`blade prepare python --port 9526 --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
+1. 已生成 Agent hook:`blade prepare python --port <port> --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
 2. 目标 Python 应用已以 `PYTHONPATH=<hook 目录>:$PYTHONPATH` **重启**,Agent 才在应用进程内监听;且应用使用 `requests` 客户端库
 3. 已记录注入前该接口的成功率/错误率基线
 4. 确认应用日志可见异常堆栈,且可观测下游调用的重试次数
@@ -17,7 +17,7 @@
 1. 记录注入前基线:调用一次依赖该下游的接口,确认正常返回
 2. 对指定下游请求注入异常:
    ```bash
-   blade create python http throwCustomException --exception requests.exceptions.ConnectionError --exception-message "chaos drill: downstream unreachable" --url /api/users --timeout 600
+   blade create python http throwCustomException --exception requests.exceptions.ConnectionError --exception-message "chaos drill: downstream unreachable" --url <url> --timeout <duration>
    ```
    - `--exception`:异常类名。支持内置名(`ConnectionError`/`TimeoutError`/`RuntimeError` 等)或全限定路径(如 `requests.exceptions.ConnectionError`)
    - `--exception-message`:异常消息,含空格时必须加引号
@@ -36,7 +36,7 @@
    ```bash
    blade status --uid <uid>
    ```
-4. 确认未匹配的请求(如注入 `/api/users` 时调用 `/api/orders`)仍正常——matcher 生效的证据
+4. 确认未匹配的请求(如限定 `--url` 后调用其他路径)仍正常——matcher 生效的证据
 5. 观察重试行为:确认重试次数有上限且带退避,而非无限重试放大流量
 
 **注入恢复**：

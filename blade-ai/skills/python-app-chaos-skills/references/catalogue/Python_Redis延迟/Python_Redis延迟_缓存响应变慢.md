@@ -6,7 +6,7 @@
 3. 上游接口可能出现排队、超时甚至雪崩，暴露缺失降级逻辑的问题
 
 **资源准备**：
-1. 已生成 Agent hook:`blade prepare python --port 9526 --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
+1. 已生成 Agent hook:`blade prepare python --port <port> --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
 2. 目标 Python 应用已以 `PYTHONPATH=<hook 目录>:$PYTHONPATH` **重启**,Agent 才在应用进程内监听;且应用使用 `redis` 客户端库
 3. 已记录注入前该接口/该 Redis 命令的耗时基线(用于对比)
 4. 确认应用侧可观测:接口耗时指标或应用日志
@@ -17,7 +17,7 @@
 1. 记录注入前基线:调用一次依赖 Redis 的接口,记录耗时
 2. 对指定 Redis 命令注入延迟:
    ```bash
-   blade create python redis delay --time 500 --cmd GET --timeout 600
+   blade create python redis delay --time <time> --cmd <cmd> --timeout <duration>
    ```
    - `--time`:延迟毫秒数(**必填**)
    - `--cmd` / `--key`:收窄影响面,只影响该命令 / 该 key;**省略则影响所有 Redis 命令**
@@ -31,7 +31,7 @@
    ```bash
    blade status --uid <uid>
    ```
-3. 确认未匹配的命令(如注入 GET 时执行 SET)耗时正常——这是 matcher 生效的证据
+3. 确认未匹配的命令(如注入 `--cmd` 限定的命令时执行其他命令)耗时正常——这是 matcher 生效的证据
 4. 若耗时无变化且实验状态正常,说明应用未走到被拦截的调用(或 matcher 不匹配),按 matcher 重新收敛,而不是重复注入
 
 **注入恢复**：

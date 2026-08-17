@@ -6,7 +6,7 @@
 3. 延迟沿调用链向上传播，上游接口出现排队、超时甚至雪崩，暴露缺失超时/降级配置的问题
 
 **资源准备**：
-1. 已生成 Agent hook:`blade prepare python --port 9526 --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
+1. 已生成 Agent hook:`blade prepare python --port <port> --python-path <解释器> --target-script <应用入口脚本>`(两参数均必填,hook 文件 `sitecustomize.py` 落在入口脚本所在目录;blade 自带 agent 库,无需 pip install;端口须空闲)
 2. 目标 Python 应用已以 `PYTHONPATH=<hook 目录>:$PYTHONPATH` **重启**,Agent 才在应用进程内监听;且应用使用 `requests` 客户端库(异步 `httpx` 请改用 target=httpx)
 3. 已记录注入前该接口的耗时基线(用于对比)
 4. 确认应用侧可观测:接口耗时指标或应用日志
@@ -17,7 +17,7 @@
 1. 记录注入前基线:调用一次依赖该下游的接口,记录耗时
 2. 对指定下游请求注入延迟:
    ```bash
-   blade create python http delay --time 2000 --url /api/users --method GET --timeout 600
+   blade create python http delay --time <time> --url <url> --method <method> --timeout <duration>
    ```
    - `--time`:延迟毫秒数(**必填**)
    - `--url` / `--method` / `--host`:收窄影响面,只影响匹配的请求;**全部省略则影响该应用发出的所有 requests 请求**
@@ -32,7 +32,7 @@
    blade status --uid <uid>
    ```
 3. 若应用配置的 `timeout` 小于注入延迟,预期看到应用侧抛出 `requests.exceptions.Timeout` 或走降级分支——这本身就是超时配置生效的正向证据
-4. 确认未匹配的请求(如注入 `/api/users` 时调用 `/api/orders`)耗时正常——这是 matcher 生效的证据
+4. 确认未匹配的请求(如限定 `--url` 后调用其他路径)耗时正常——这是 matcher 生效的证据
 5. 若耗时无变化且实验状态正常,说明应用未走到被拦截的调用(或 matcher 不匹配,注意 `--url` 是按请求 URL 匹配),按 matcher 重新收敛,而不是重复注入
 
 **注入恢复**：
