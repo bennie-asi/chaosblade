@@ -960,18 +960,25 @@ def _operator_replicas_ready(stdout_text: str) -> bool:
     return True
 
 
-def _parse_operator_jsonpath(stdout_text: str) -> tuple[list[str], list[str]]:
+# A scanned Deployment row: (name, available-replica token, image refs).
+# The replica token is normalized to "0" when the API omits
+# ``availableReplicas`` (it is omitempty, so absence MEANS zero) — an
+# unavailable workload must drag the verdict down, never vanish from it.
+_DeployRow = tuple[str, str, list[str]]
+
+
+def _scan_deployments_jsonpath(stdout_text: str) -> list[_DeployRow]:
     """Split the combined name+replicas+images jsonpath output.
 
     Format produced by the kubectl jsonpath in ``check_chaosblade_operator``:
 
         <name>|<replicas>|<image>[,<image>]*\\n
 
-    Only deployments whose name contains "chaosblade" are included.
-    Returns ``(replica_tokens, image_tokens)``.
+    Pure scan: NO name filtering here — identification is the selector's
+    job (``_is_operator_deployment``). Returns all rows as
+    ``(name, replicas, images)``.
     """
-    replicas: list[str] = []
-    images: list[str] = []
+    rows: list[_DeployRow] = []
     for line in stdout_text.splitlines():
         line = line.strip()
         if not line:
@@ -980,43 +987,53 @@ def _parse_operator_jsonpath(stdout_text: str) -> tuple[list[str], list[str]]:
         if len(parts) < 3:
             continue
         name, rep, img_csv = parts[0].strip(), parts[1].strip(), parts[2].strip()
-        if "chaosblade" not in name:
-            continue
-        if rep:
-            replicas.append(rep)
-        if img_csv:
-            for img in img_csv.split(","):
-                img = img.strip()
-                if img:
-                    images.append(img)
-    return replicas, images
+        images = [img.strip() for img in img_csv.split(",") if img.strip()]
+        rows.append((name, rep or "0", images))
+    return rows
 
 
-def _parse_operator_json(stdout_text: str) -> tuple[list[str], list[str]]:
-    """Parse ``kubectl get deploy -A -o json`` output for operator check.
+def _scan_deployments_json(stdout_text: str) -> list[_DeployRow]:
+    """Parse ``kubectl get deploy -A -o json`` output for the operator check.
 
-    Searches all namespaces for deployments whose name contains
-    "chaosblade" — the operator may be installed in any namespace.
+    Pure scan across all namespaces — the operator may be installed in any
+    of them, and identification happens downstream. Missing
+    ``availableReplicas`` is normalized to ``"0"`` (omitempty field).
     """
     import json as _json
-    replicas: list[str] = []
-    images: list[str] = []
+    rows: list[_DeployRow] = []
     try:
         data = _json.loads(stdout_text)
         items = data.get("items", [])
         for item in items:
             name = item.get("metadata", {}).get("name", "")
-            if "chaosblade" not in name:
-                continue
             avail = item.get("status", {}).get("availableReplicas", 0)
-            replicas.append(str(avail or 0))
-            for container in item.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
-                img = container.get("image", "")
-                if img:
-                    images.append(img)
+            images = [
+                c.get("image", "")
+                for c in item.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+                if c.get("image", "")
+            ]
+            rows.append((name, str(avail or 0), images))
     except (ValueError, KeyError, TypeError, AttributeError):
         pass
-    return replicas, images
+    return rows
+
+
+def _is_operator_deployment(name: str, images: list[str]) -> bool:
+    """Positive identification of the ChaosBlade Operator workload.
+
+    The decisive signal is the image: every supported install form (Helm
+    chart, raw YAML) ships a container image whose ref contains
+    ``chaosblade-operator``, whatever the namespace. An exact deployment
+    name match is the secondary signal (covers renamed-image installs).
+
+    Deliberately NOT sufficient: a mere ``"chaosblade" in name`` substring
+    — ChaosBlade Box and unrelated apps can carry it, and letting them
+    satisfy the readiness check produced a false ``passed`` with no real
+    operator present (chaosblade-io/chaosblade#1339).
+    """
+    if any("chaosblade-operator" in img for img in images):
+        return True
+    return name == "chaosblade-operator"
 
 
 def _extract_operator_image_version(images: list[str]) -> str:
@@ -1031,13 +1048,14 @@ def _extract_operator_image_version(images: list[str]) -> str:
     """
     if not images:
         return ""
-    # Pick the operator's own image when multiple containers exist
-    # (sidecars share the deployment). Match ``chaosblade-operator``
-    # by name; fall back to the first image if no match.
-    chosen = next(
-        (img for img in images if "chaosblade-operator" in img),
-        images[0],
-    )
+    # Only the operator's own image may supply the version. There is NO
+    # fallback to images[0]: a ready-but-unrelated deployment must never
+    # donate its tag (issue #1339 reported an unrelated image as
+    # "v20260529"). Sidecars in the operator Deployment also match by
+    # name here, which is the intended behaviour.
+    chosen = next((img for img in images if "chaosblade-operator" in img), "")
+    if not chosen:
+        return ""
     # Drop the registry/repo prefix.
     tag_part = chosen.rsplit(":", 1)[-1] if ":" in chosen.split("/")[-1] else ""
     if not tag_part:
@@ -1086,17 +1104,32 @@ async def check_chaosblade_operator() -> CheckResult:
     if result.exit_code == 0:
         stdout_text = result.stdout.strip()
         if _is_kubewiz_channel():
-            replica_tokens, image_tokens = _parse_operator_json(stdout_text)
+            rows = _scan_deployments_json(stdout_text)
         else:
-            replica_tokens, image_tokens = _parse_operator_jsonpath(stdout_text)
+            rows = _scan_deployments_jsonpath(stdout_text)
+        # Identify FIRST, evaluate readiness only for the identified
+        # workload — unrelated ready Deployments can no longer satisfy
+        # this check (issue #1339).
+        op_rows = [r for r in rows if _is_operator_deployment(r[0], r[2])]
+        if not op_rows:
+            return CheckResult(
+                name="chaosblade_operator", severity="warning", passed=False,
+                message="ChaosBlade Operator not deployed",
+                fix="Install ChaosBlade Operator:\n"
+                    "  helm repo add chaosblade https://chaosblade-io.github.io/charts\n"
+                    "  helm install chaosblade-operator chaosblade/chaosblade-operator -n chaosblade --create-namespace\n"
+                    "Or: /doctor for guided installation",
+            )
+        replica_tokens = [rep for _, rep, _ in op_rows]
         if _operator_replicas_ready(" ".join(replica_tokens)):
+            image_tokens = [img for _, _, imgs in op_rows for img in imgs]
             version = _extract_operator_image_version(image_tokens)
             msg = f"v{version}" if version else "ready"
             return CheckResult(name="chaosblade_operator", severity="warning", passed=True, message=msg)
         return CheckResult(
             name="chaosblade_operator", severity="warning", passed=False,
             message="ChaosBlade Operator not ready (no available replicas)",
-            fix="Check Operator status: kubectl get deploy -A | grep chaosblade",
+            fix="Check Operator status: kubectl get deploy -A | grep chaosblade-operator",
         )
 
     return CheckResult(
