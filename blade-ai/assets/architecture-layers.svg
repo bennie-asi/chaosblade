@@ -1,0 +1,489 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 2160" font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#546e7a"/>
+    </marker>
+  </defs>
+
+  <text x="700" y="38" text-anchor="middle" font-size="24" font-weight="bold" fill="#263238">blade-ai 功能架构大图</text>
+  <text x="700" y="60" text-anchor="middle" font-size="12" fill="#78909c">每个盒子 = 一个功能模块 · 盒内文字仅为解释 · 模块职责取自源码 docstring · 蓝色加粗「ReAct 循环」= LLM ⇄ ToolNode 回边且边挂 screener 守卫</text>
+
+  <!-- ===================== ① 交互界面功能域 ===================== -->
+  <rect x="40" y="84" width="1320" height="26" rx="6" fill="#1565c0"/>
+  <text x="52" y="102" font-size="14" font-weight="bold" fill="#ffffff">① 交互界面域 —— 用户与外部系统的入口（共享同一编排内核）</text>
+
+  <rect x="40" y="120" width="310" height="80" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+  <text x="195" y="144" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#0d47a1">结构化 CLI</text>
+  <text x="195" y="163" text-anchor="middle" font-size="10.5" fill="#37474f">13 命令 · 面向程序与 CI</text>
+  <text x="195" y="180" text-anchor="middle" font-size="10.5" fill="#37474f">Local 模式可直跑内核（无 server）</text>
+
+  <rect x="370" y="120" width="310" height="80" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+  <text x="525" y="144" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#0d47a1">对话式 TUI</text>
+  <text x="525" y="163" text-anchor="middle" font-size="10.5" fill="#37474f">常驻工作台 · 流式渲染</text>
+  <text x="525" y="180" text-anchor="middle" font-size="10.5" fill="#37474f">SSE 事件镜像 · 向导/卡片/斜杠命令</text>
+
+  <rect x="700" y="120" width="310" height="80" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+  <text x="855" y="144" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#0d47a1">HTTP API Server</text>
+  <text x="855" y="163" text-anchor="middle" font-size="10.5" fill="#37474f">25 路由 · /turn 统一 SSE 端点</text>
+  <text x="855" y="180" text-anchor="middle" font-size="10.5" fill="#37474f">Bearer 鉴权 · 配置后热重建图</text>
+
+  <rect x="1030" y="120" width="310" height="80" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+  <text x="1185" y="144" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#0d47a1">L4 Agent SDK 适配</text>
+  <text x="1185" y="163" text-anchor="middle" font-size="10.5" fill="#37474f">把内核封装为 L4ResilienceAgent</text>
+  <text x="1185" y="180" text-anchor="middle" font-size="10.5" fill="#37474f">TestTask↔State · 事件/卡片/交互/恢复</text>
+
+  <line x1="700" y1="202" x2="700" y2="226" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ===================== ② 编排引擎域 ===================== -->
+  <rect x="40" y="230" width="1320" height="26" rx="6" fill="#00695c"/>
+  <text x="52" y="248" font-size="14" font-weight="bold" fill="#ffffff">② 编排引擎域 —— 三张状态机（inject / recover / status）+ 编排支撑子系统</text>
+
+  <!-- inject 主流程 -->
+  <rect x="40" y="266" width="1000" height="330" rx="10" fill="#f1f8f6" stroke="#26a69a" stroke-width="1.5"/>
+  <text x="56" y="288" font-size="13" font-weight="bold" fill="#00695c">inject 主流程：意图 → 安全 → 注入 → 验证 → 报告</text>
+
+  <rect x="60" y="306" width="300" height="62" rx="8" fill="#2196f3" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="210" y="328" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">intent_clarification ↻</text>
+  <text x="210" y="346" text-anchor="middle" font-size="11" font-weight="bold" fill="#fff59d">ReAct 循环 · 对话意图收敛</text>
+  <text x="210" y="360" text-anchor="middle" font-size="9.5" fill="#e3f2fd">⇄ clarification_tools</text>
+
+  <line x1="360" y1="337" x2="376" y2="337" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="380" y="306" width="300" height="62" rx="8" fill="#2196f3" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="530" y="328" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">plan_builder ↻</text>
+  <text x="530" y="346" text-anchor="middle" font-size="11" font-weight="bold" fill="#fff59d">ReAct 循环 · 引导式方案构建</text>
+  <text x="530" y="360" text-anchor="middle" font-size="9.5" fill="#e3f2fd">interrupt() 多轮 ⇄ 探测工具</text>
+
+  <line x1="680" y1="337" x2="696" y2="337" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="700" y="306" width="300" height="62" rx="8" fill="#2196f3" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="850" y="328" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">agent_loop ↻</text>
+  <text x="850" y="346" text-anchor="middle" font-size="11" font-weight="bold" fill="#fff59d">ReAct 循环 · Phase 1 只读规划</text>
+  <text x="850" y="360" text-anchor="middle" font-size="9.5" fill="#e3f2fd">技能激活 / 目标核实 ⇄ phase1_tools</text>
+
+  <line x1="850" y1="368" x2="850" y2="386" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="60" y="390" width="230" height="62" rx="8" fill="#ff6b6b" stroke="#d32f2f" stroke-width="1.5"/>
+  <text x="175" y="414" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">safety_check</text>
+  <text x="175" y="434" text-anchor="middle" font-size="10.5" fill="#ffebee">规则为主 + LLM 辅助评估</text>
+
+  <line x1="290" y1="421" x2="302" y2="421" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="306" y="390" width="230" height="62" rx="8" fill="#ff6b6b" stroke="#d32f2f" stroke-width="1.5"/>
+  <text x="421" y="414" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">confirmation_gate</text>
+  <text x="421" y="434" text-anchor="middle" font-size="10.5" fill="#ffebee">人机确认 / reject</text>
+
+  <line x1="536" y1="421" x2="548" y2="421" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="552" y="390" width="230" height="62" rx="8" fill="#e0f2f1" stroke="#00897b" stroke-width="1.5"/>
+  <text x="667" y="414" text-anchor="middle" font-size="13" font-weight="bold" fill="#004d40">baseline_capture</text>
+  <text x="667" y="434" text-anchor="middle" font-size="10.5" fill="#37474f">注入前基线（profiles 组装）</text>
+
+  <line x1="782" y1="421" x2="794" y2="421" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="798" y="390" width="230" height="62" rx="8" fill="#e0f2f1" stroke="#00897b" stroke-width="1.5"/>
+  <text x="913" y="414" text-anchor="middle" font-size="13" font-weight="bold" fill="#004d40">se_snapshot</text>
+  <text x="913" y="434" text-anchor="middle" font-size="10.5" fill="#37474f">注入前快照 + 冲突检查</text>
+
+  <path d="M 913 452 L 913 470 L 152 470 L 152 478" fill="none" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="60" y="482" width="184" height="62" rx="8" fill="#1565c0" stroke="#0d47a1" stroke-width="2"/>
+  <text x="152" y="504" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">execute_loop ↻</text>
+  <text x="152" y="521" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#fff59d">ReAct 循环 · Phase 2</text>
+  <text x="152" y="536" text-anchor="middle" font-size="9.5" fill="#bbdefb">唯一可变更 ⇄ phase2_tools</text>
+
+  <line x1="244" y1="513" x2="254" y2="513" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="258" y="482" width="184" height="62" rx="8" fill="#2196f3" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="350" y="504" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">verifier ↻</text>
+  <text x="350" y="521" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#fff59d">ReAct 循环 · 两层验证</text>
+  <text x="350" y="536" text-anchor="middle" font-size="9.5" fill="#e3f2fd">L1 规则 + L2 LLM ⇄ tools</text>
+
+  <line x1="442" y1="513" x2="452" y2="513" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="456" y="482" width="184" height="62" rx="8" fill="#e0f2f1" stroke="#00897b" stroke-width="1.5"/>
+  <text x="548" y="508" text-anchor="middle" font-size="13" font-weight="bold" fill="#004d40">se_detect</text>
+  <text x="548" y="528" text-anchor="middle" font-size="10.5" fill="#37474f">快照差分 · 爆炸半径</text>
+
+  <line x1="640" y1="513" x2="650" y2="513" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="654" y="482" width="184" height="62" rx="8" fill="#e0f2f1" stroke="#00897b" stroke-width="1.5"/>
+  <text x="746" y="508" text-anchor="middle" font-size="13" font-weight="bold" fill="#004d40">terminal_reports</text>
+  <text x="746" y="528" text-anchor="middle" font-size="10.5" fill="#37474f">复盘 + 缺陷报告</text>
+
+  <line x1="838" y1="513" x2="848" y2="513" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="852" y="482" width="184" height="62" rx="8" fill="#eceff1" stroke="#78909c" stroke-width="1.5"/>
+  <text x="944" y="508" text-anchor="middle" font-size="13" font-weight="bold" fill="#37474f">save_memory</text>
+  <text x="944" y="528" text-anchor="middle" font-size="10.5" fill="#546e7a">三层记忆沉淀</text>
+
+  <rect x="60" y="552" width="964" height="18" rx="5" fill="#ffebee" stroke="#ef9a9a" stroke-width="1"/>
+  <text x="542" y="565" text-anchor="middle" font-size="10" fill="#b71c1c">每个 ReAct 回边挂 screener 守卫：intent / plan_builder / phase1 / tool / verifier / recover（统一筛查范式）</text>
+  <text x="60" y="588" font-size="10.5" fill="#455a64">旁路：direct（无 LLM 确定性注入）· batch（批量演练）· plan_change_confirm（重大变更确认）</text>
+
+  <!-- recover / status -->
+  <rect x="1060" y="266" width="300" height="210" rx="10" fill="#fdf2f2" stroke="#ef5350" stroke-width="1.5"/>
+  <text x="1076" y="288" font-size="13" font-weight="bold" fill="#c62828">recover 状态机</text>
+  <rect x="1080" y="300" width="260" height="42" rx="7" fill="#e0f2f1" stroke="#00897b" stroke-width="1.5"/>
+  <text x="1210" y="326" text-anchor="middle" font-size="12" font-weight="bold" fill="#004d40">recover_handler 桥接</text>
+  <line x1="1210" y1="342" x2="1210" y2="354" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="1080" y="358" width="260" height="46" rx="7" fill="#2196f3" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="1210" y="377" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">recover_verifier_loop ↻</text>
+  <text x="1210" y="394" text-anchor="middle" font-size="9.5" font-weight="bold" fill="#fff59d">ReAct 循环 · 成功/重试/丢失三分支</text>
+  <line x1="1210" y1="404" x2="1210" y2="416" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="1080" y="420" width="260" height="42" rx="7" fill="#e0f2f1" stroke="#00897b" stroke-width="1.5"/>
+  <text x="1210" y="446" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#004d40">finalize_recover_verification</text>
+
+  <rect x="1060" y="492" width="300" height="104" rx="10" fill="#eceff1" stroke="#90a4ae" stroke-width="1.5"/>
+  <text x="1076" y="516" font-size="13" font-weight="bold" fill="#455a64">status 状态机</text>
+  <text x="1076" y="538" font-size="11" fill="#546e7a">状态查询图</text>
+  <text x="1076" y="558" font-size="11" fill="#546e7a">router：条件边路由</text>
+  <text x="1076" y="578" font-size="11" fill="#546e7a">factory：带 checkpointer 图工厂</text>
+
+  <!-- 编排支撑子系统（盒子网格） -->
+  <text x="40" y="610" font-size="12" font-weight="bold" fill="#00695c">编排支撑子系统（每个盒子一个功能模块）：</text>
+  <g font-size="10.5">
+    <rect x="40" y="618" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="130" y="635" text-anchor="middle" font-weight="bold" fill="#1b5e20">state（AgentState）</text><text x="130" y="651" text-anchor="middle" fill="#33691e">图状态定义</text>
+    <rect x="230" y="618" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="320" y="635" text-anchor="middle" font-weight="bold" fill="#1b5e20">state_mgmt</text><text x="320" y="651" text-anchor="middle" fill="#33691e">状态契约/生命周期</text>
+    <rect x="420" y="618" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="510" y="635" text-anchor="middle" font-weight="bold" fill="#1b5e20">streaming</text><text x="510" y="651" text-anchor="middle" fill="#33691e">SSE 事件模型</text>
+    <rect x="610" y="618" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="700" y="635" text-anchor="middle" font-weight="bold" fill="#1b5e20">dispatch</text><text x="700" y="651" text-anchor="middle" fill="#33691e">领域事件分发</text>
+    <rect x="800" y="618" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="890" y="635" text-anchor="middle" font-weight="bold" fill="#1b5e20">replan</text><text x="890" y="651" text-anchor="middle" fill="#33691e">执行→规划契约</text>
+    <rect x="990" y="618" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="1080" y="635" text-anchor="middle" font-weight="bold" fill="#1b5e20">evidence</text><text x="1080" y="651" text-anchor="middle" fill="#33691e">证据覆盖契约</text>
+    <rect x="1180" y="618" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="1270" y="635" text-anchor="middle" font-weight="bold" fill="#1b5e20">progress_ledger</text><text x="1270" y="651" text-anchor="middle" fill="#33691e">三层工作笔记</text>
+
+    <rect x="40" y="668" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="130" y="685" text-anchor="middle" font-weight="bold" fill="#1b5e20">attempt_tracker</text><text x="130" y="701" text-anchor="middle" fill="#33691e">尝试计数追踪</text>
+    <rect x="230" y="668" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="320" y="685" text-anchor="middle" font-weight="bold" fill="#1b5e20">target_health</text><text x="320" y="701" text-anchor="middle" fill="#33691e">目标健康检查</text>
+    <rect x="420" y="668" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="510" y="685" text-anchor="middle" font-weight="bold" fill="#1b5e20">experience</text><text x="510" y="701" text-anchor="middle" fill="#33691e">经验积累</text>
+    <rect x="610" y="668" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="700" y="685" text-anchor="middle" font-weight="bold" fill="#1b5e20">env_info</text><text x="700" y="701" text-anchor="middle" fill="#33691e">环境信息采集</text>
+    <rect x="800" y="668" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="890" y="685" text-anchor="middle" font-weight="bold" fill="#1b5e20">execution_artifacts</text><text x="890" y="701" text-anchor="middle" fill="#33691e">副作用工件提取</text>
+    <rect x="990" y="668" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="1080" y="685" text-anchor="middle" font-weight="bold" fill="#1b5e20">experiment_display</text><text x="1080" y="701" text-anchor="middle" fill="#33691e">实验消歧展示</text>
+    <rect x="1180" y="668" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="1270" y="685" text-anchor="middle" font-weight="bold" fill="#1b5e20">intent_handoff</text><text x="1270" y="701" text-anchor="middle" fill="#33691e">意图→管线交接</text>
+
+    <rect x="40" y="718" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="130" y="735" text-anchor="middle" font-weight="bold" fill="#1b5e20">planning</text><text x="130" y="751" text-anchor="middle" fill="#33691e">计划模式/资源预取</text>
+    <rect x="230" y="718" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="320" y="735" text-anchor="middle" font-weight="bold" fill="#1b5e20">environment_profiles</text><text x="320" y="751" text-anchor="middle" fill="#33691e">环境能力 profile</text>
+    <rect x="420" y="718" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="510" y="735" text-anchor="middle" font-weight="bold" fill="#1b5e20">capabilities context</text><text x="510" y="751" text-anchor="middle" fill="#33691e">当轮能力上下文</text>
+    <rect x="610" y="718" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="700" y="735" text-anchor="middle" font-weight="bold" fill="#1b5e20">baseline_extractors</text><text x="700" y="751" text-anchor="middle" fill="#33691e">基线字段提取器</text>
+    <rect x="800" y="718" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="890" y="735" text-anchor="middle" font-weight="bold" fill="#1b5e20">node_names</text><text x="890" y="751" text-anchor="middle" fill="#33691e">节点名常量</text>
+    <rect x="990" y="718" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="1080" y="735" text-anchor="middle" font-weight="bold" fill="#1b5e20">result 契约</text><text x="1080" y="751" text-anchor="middle" fill="#33691e">verdict/summary/snapshot</text>
+    <rect x="1180" y="718" width="180" height="42" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/><text x="1270" y="735" text-anchor="middle" font-weight="bold" fill="#1b5e20">postmortem + issue</text><text x="1270" y="751" text-anchor="middle" fill="#33691e">复盘/缺陷报告生成</text>
+  </g>
+
+  <line x1="700" y1="762" x2="700" y2="780" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ===================== ③ 安全守卫域 ===================== -->
+  <rect x="40" y="784" width="1320" height="26" rx="6" fill="#c62828"/>
+  <text x="52" y="802" font-size="14" font-weight="bold" fill="#ffffff">③ 安全守卫域 —— 纵深防御，全部是代码强制执行点（不依赖提示词自觉）</text>
+
+  <rect x="40" y="820" width="176" height="88" rx="8" fill="#ffebee" stroke="#d32f2f" stroke-width="1.5"/>
+  <text x="128" y="842" text-anchor="middle" font-size="12" font-weight="bold" fill="#b71c1c">ToolGuard 命令守卫</text>
+  <text x="128" y="860" text-anchor="middle" font-size="9.5" fill="#880e4f">guard / gateway / parser</text>
+  <text x="128" y="875" text-anchor="middle" font-size="9.5" fill="#880e4f">/ feedback 四件套</text>
+  <text x="128" y="892" text-anchor="middle" font-size="9.5" fill="#880e4f">AST 解析 · 双漏斗 · 反馈回灌</text>
+
+  <rect x="228" y="820" width="176" height="88" rx="8" fill="#ffebee" stroke="#d32f2f" stroke-width="1.5"/>
+  <text x="316" y="842" text-anchor="middle" font-size="12" font-weight="bold" fill="#b71c1c">screener 边守卫</text>
+  <text x="316" y="860" text-anchor="middle" font-size="9.5" fill="#880e4f">6 个筛查节点挂在</text>
+  <text x="316" y="875" text-anchor="middle" font-size="9.5" fill="#880e4f">每个 ReAct 回边上</text>
+  <text x="316" y="892" text-anchor="middle" font-size="9.5" fill="#880e4f">phase1 拒绝变更工具</text>
+
+  <rect x="416" y="820" width="176" height="88" rx="8" fill="#ffebee" stroke="#d32f2f" stroke-width="1.5"/>
+  <text x="504" y="842" text-anchor="middle" font-size="12" font-weight="bold" fill="#b71c1c">target_guard 目标守卫</text>
+  <text x="504" y="860" text-anchor="middle" font-size="9.5" fill="#880e4f">载体回溯 / tool_call 分类</text>
+  <text x="504" y="875" text-anchor="middle" font-size="9.5" fill="#880e4f">漂移策略 / 冻结</text>
+  <text x="504" y="892" text-anchor="middle" font-size="9.5" fill="#880e4f">可恢复性 / 目标协议插件</text>
+
+  <rect x="604" y="820" width="176" height="88" rx="8" fill="#ffebee" stroke="#d32f2f" stroke-width="1.5"/>
+  <text x="692" y="842" text-anchor="middle" font-size="12" font-weight="bold" fill="#b71c1c">preflight 启动自检</text>
+  <text x="692" y="860" text-anchor="middle" font-size="9.5" fill="#880e4f">环境四项检查</text>
+  <text x="692" y="875" text-anchor="middle" font-size="9.5" fill="#880e4f">单一事实源框架</text>
+  <text x="692" y="892" text-anchor="middle" font-size="9.5" fill="#880e4f">结果注入提示词</text>
+
+  <rect x="792" y="820" width="176" height="88" rx="8" fill="#ffebee" stroke="#d32f2f" stroke-width="1.5"/>
+  <text x="880" y="842" text-anchor="middle" font-size="12" font-weight="bold" fill="#b71c1c">Feasibility &amp; Safety Score</text>
+  <text x="880" y="860" text-anchor="middle" font-size="9.5" fill="#880e4f">feasibility 注入前余量</text>
+  <text x="880" y="875" text-anchor="middle" font-size="9.5" fill="#880e4f">k8s/host 双检查器</text>
+  <text x="880" y="892" text-anchor="middle" font-size="9.5" fill="#880e4f">safety_score 多维评分</text>
+
+  <rect x="980" y="820" width="176" height="88" rx="8" fill="#ffebee" stroke="#d32f2f" stroke-width="1.5"/>
+  <text x="1068" y="842" text-anchor="middle" font-size="12" font-weight="bold" fill="#b71c1c">LoopMax &amp; Timeout</text>
+  <text x="1068" y="860" text-anchor="middle" font-size="9.5" fill="#880e4f">循环上限</text>
+  <text x="1068" y="875" text-anchor="middle" font-size="9.5" fill="#880e4f">超时自动恢复</text>
+  <text x="1068" y="892" text-anchor="middle" font-size="9.5" fill="#880e4f">stall 预算/截断处理</text>
+
+  <rect x="1168" y="820" width="176" height="88" rx="8" fill="#ffebee" stroke="#d32f2f" stroke-width="1.5"/>
+  <text x="1256" y="842" text-anchor="middle" font-size="12" font-weight="bold" fill="#b71c1c">Readonly 分类器</text>
+  <text x="1256" y="860" text-anchor="middle" font-size="9.5" fill="#880e4f">readonly 单一事实源</text>
+  <text x="1256" y="875" text-anchor="middle" font-size="9.5" fill="#880e4f">支撑只读阶段筛查</text>
+  <text x="1256" y="892" text-anchor="middle" font-size="9.5" fill="#880e4f">与 Layer-2 只读筛查共用</text>
+
+  <line x1="700" y1="910" x2="700" y2="934" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ===================== ④ 领域语义域 ===================== -->
+  <rect x="40" y="938" width="1320" height="26" rx="6" fill="#ef6c00"/>
+  <text x="52" y="956" font-size="14" font-weight="bold" fill="#ffffff">④ 领域语义域 —— 意图 ↔ 命令的结构化翻译与知识供给</text>
+
+  <rect x="40" y="974" width="210" height="110" rx="8" fill="#fff3e0" stroke="#fb8c00" stroke-width="1.5"/>
+  <text x="145" y="996" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#e65100">FaultSpec 契约</text>
+  <text x="145" y="1015" text-anchor="middle" font-size="10" fill="#37474f">注入意图单一事实源</text>
+  <text x="145" y="1031" text-anchor="middle" font-size="10" fill="#37474f">FaultFamily 注册表</text>
+  <text x="145" y="1047" text-anchor="middle" font-size="10" fill="#37474f">计划生成器</text>
+  <text x="145" y="1063" text-anchor="middle" font-size="10" fill="#37474f">技能身份访问器</text>
+
+  <rect x="262" y="974" width="210" height="110" rx="8" fill="#fff3e0" stroke="#fb8c00" stroke-width="1.5"/>
+  <text x="367" y="996" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#e65100">Skill 渐进加载</text>
+  <text x="367" y="1015" text-anchor="middle" font-size="10" fill="#37474f">① capabilities 目录（意图期）</text>
+  <text x="367" y="1031" text-anchor="middle" font-size="10" fill="#37474f">② SKILL.md（确认后）</text>
+  <text x="367" y="1047" text-anchor="middle" font-size="10" fill="#37474f">③ 资源/脚本（执行期）</text>
+  <text x="367" y="1063" text-anchor="middle" font-size="10" fill="#37474f">注册/热更/安装/校验</text>
+
+  <rect x="484" y="974" width="210" height="110" rx="8" fill="#fff3e0" stroke="#fb8c00" stroke-width="1.5"/>
+  <text x="589" y="996" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#e65100">Knowledge 知识库</text>
+  <text x="589" y="1015" text-anchor="middle" font-size="10" fill="#37474f">10 篇权威文档</text>
+  <text x="589" y="1031" text-anchor="middle" font-size="10" fill="#37474f">verification-heuristics = 权威源</text>
+  <text x="589" y="1047" text-anchor="middle" font-size="10" fill="#37474f">frontmatter 元数据注册</text>
+  <text x="589" y="1063" text-anchor="middle" font-size="10" fill="#37474f">变更热更新</text>
+
+  <rect x="706" y="974" width="210" height="110" rx="8" fill="#fff3e0" stroke="#fb8c00" stroke-width="1.5"/>
+  <text x="811" y="996" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#e65100">Capabilities 目录</text>
+  <text x="811" y="1015" text-anchor="middle" font-size="10" fill="#37474f">88 场景 zh/en 编译产物</text>
+  <text x="811" y="1031" text-anchor="middle" font-size="10" fill="#37474f">LLM 蒸馏用例同步</text>
+  <text x="811" y="1047" text-anchor="middle" font-size="10" fill="#37474f">指纹校验防过期</text>
+  <text x="811" y="1063" text-anchor="middle" font-size="10" fill="#37474f">目录生成器（带缓存）</text>
+
+  <rect x="928" y="974" width="210" height="110" rx="8" fill="#fff3e0" stroke="#fb8c00" stroke-width="1.5"/>
+  <text x="1033" y="996" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#e65100">Environment Profile</text>
+  <text x="1033" y="1015" text-anchor="middle" font-size="10" fill="#37474f">k8s / host profile 注册</text>
+  <text x="1033" y="1031" text-anchor="middle" font-size="10" fill="#37474f">驱动提示词片段</text>
+  <text x="1033" y="1047" text-anchor="middle" font-size="10" fill="#37474f">驱动工具装配</text>
+  <text x="1033" y="1063" text-anchor="middle" font-size="10" fill="#37474f">驱动基线/验证分流</text>
+
+  <rect x="1150" y="974" width="210" height="110" rx="8" fill="#fff3e0" stroke="#fb8c00" stroke-width="1.5"/>
+  <text x="1255" y="996" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#e65100">Prompt 子系统</text>
+  <text x="1255" y="1015" text-anchor="middle" font-size="10" fill="#37474f">10 组语义 section</text>
+  <text x="1255" y="1031" text-anchor="middle" font-size="10" fill="#37474f">5 种 PromptMode</text>
+  <text x="1255" y="1047" text-anchor="middle" font-size="10" fill="#37474f">6 个 builder 入口</text>
+  <text x="1255" y="1063" text-anchor="middle" font-size="10" fill="#37474f">优先级+预算装配</text>
+
+  <line x1="700" y1="1086" x2="700" y2="1110" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ===================== ⑤ 执行能力域 ===================== -->
+  <rect x="40" y="1114" width="1320" height="26" rx="6" fill="#1565c0"/>
+  <text x="52" y="1132" font-size="14" font-weight="bold" fill="#ffffff">⑤ 执行能力域 —— 把意图翻译为对真实故障面的受控操作</text>
+
+  <rect x="40" y="1150" width="310" height="110" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+  <text x="195" y="1172" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#0d47a1">注入后端 Provider</text>
+  <text x="195" y="1191" text-anchor="middle" font-size="10" fill="#37474f">ChaosBlade / ChaosBlade-Python</text>
+  <text x="195" y="1207" text-anchor="middle" font-size="10" fill="#37474f">host-shell（debug pod+chroot）</text>
+  <text x="195" y="1223" text-anchor="middle" font-size="10" fill="#37474f">k8s-native（kubectl 原生）</text>
+  <text x="195" y="1239" text-anchor="middle" font-size="10" fill="#37474f">注册表按故障域分发 + 注入检测</text>
+
+  <rect x="370" y="1150" width="310" height="110" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+  <text x="525" y="1172" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#0d47a1">LLM Tools 工具集</text>
+  <text x="525" y="1191" text-anchor="middle" font-size="10" fill="#37474f">blade / kubectl / host / shell</text>
+  <text x="525" y="1207" text-anchor="middle" font-size="10" fill="#37474f">只读诊断 / 重试 / 等待 / 进度</text>
+  <text x="525" y="1223" text-anchor="middle" font-size="10" fill="#37474f">文件读写搜 / 联网搜索</text>
+  <text x="525" y="1239" text-anchor="middle" font-size="10" fill="#37474f">知识按需读取 · 严格参数拒绝</text>
+
+  <rect x="700" y="1150" width="310" height="110" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+  <text x="855" y="1172" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#0d47a1">Transport 通道</text>
+  <text x="855" y="1191" text-anchor="middle" font-size="10" fill="#37474f">kubeconfig 直连</text>
+  <text x="855" y="1207" text-anchor="middle" font-size="10" fill="#37474f">kubewiz_k8s / kubewiz_host</text>
+  <text x="855" y="1223" text-anchor="middle" font-size="10" fill="#37474f">ssh 主机通道</text>
+  <text x="855" y="1239" text-anchor="middle" font-size="10" fill="#37474f">统一执行器（Guard+审计）</text>
+
+  <rect x="1030" y="1150" width="310" height="110" rx="8" fill="#e8eaf6" stroke="#5c6bc0" stroke-width="1.5"/>
+  <text x="1185" y="1172" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#283593">外部 MCP 工具接入</text>
+  <text x="1185" y="1191" text-anchor="middle" font-size="10" fill="#37474f">MCP Client（stdio/http）</text>
+  <text x="1185" y="1207" text-anchor="middle" font-size="10" fill="#37474f">外部工具 → 内部工具适配</text>
+  <text x="1185" y="1223" text-anchor="middle" font-size="10" fill="#37474f">多 server 生命周期管理</text>
+  <text x="1185" y="1239" text-anchor="middle" font-size="10" fill="#37474f">按 4 个阶段白名单投放</text>
+
+  <line x1="700" y1="1262" x2="700" y2="1286" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ===================== ⑥ 上下文与记忆域 ===================== -->
+  <rect x="40" y="1290" width="1320" height="26" rx="6" fill="#6a1b9a"/>
+  <text x="52" y="1308" font-size="14" font-weight="bold" fill="#ffffff">⑥ 上下文与记忆域 —— 三层渐进记忆 + 多级压缩</text>
+
+  <rect x="40" y="1326" width="210" height="96" rx="8" fill="#f3e5f5" stroke="#ab47bc" stroke-width="1.5"/>
+  <text x="145" y="1348" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a148c">Working Memory</text>
+  <text x="145" y="1367" text-anchor="middle" font-size="10" fill="#37474f">当轮上下文 token 感知</text>
+  <text x="145" y="1383" text-anchor="middle" font-size="10" fill="#37474f">按轮分组/对完整性</text>
+  <text x="145" y="1399" text-anchor="middle" font-size="10" fill="#37474f">自动压缩阈值调度</text>
+
+  <rect x="262" y="1326" width="210" height="96" rx="8" fill="#f3e5f5" stroke="#ab47bc" stroke-width="1.5"/>
+  <text x="367" y="1348" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a148c">Session Memory</text>
+  <text x="367" y="1367" text-anchor="middle" font-size="10" fill="#37474f">LLM 结构化压缩</text>
+  <text x="367" y="1383" text-anchor="middle" font-size="10" fill="#37474f">关键上下文重注入</text>
+  <text x="367" y="1399" text-anchor="middle" font-size="10" fill="#37474f">技能内容预算</text>
+
+  <rect x="484" y="1326" width="210" height="96" rx="8" fill="#f3e5f5" stroke="#ab47bc" stroke-width="1.5"/>
+  <text x="589" y="1348" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a148c">Operational Memory</text>
+  <text x="589" y="1367" text-anchor="middle" font-size="10" fill="#37474f">MEMORY.md 长期经验</text>
+  <text x="589" y="1383" text-anchor="middle" font-size="10" fill="#37474f">跨会话读写</text>
+  <text x="589" y="1399" text-anchor="middle" font-size="10" fill="#37474f">会话终局摘要沉淀</text>
+
+  <rect x="706" y="1326" width="210" height="96" rx="8" fill="#f3e5f5" stroke="#ab47bc" stroke-width="1.5"/>
+  <text x="811" y="1348" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a148c">Token 计量</text>
+  <text x="811" y="1367" text-anchor="middle" font-size="10" fill="#37474f">四级回退链</text>
+  <text x="811" y="1383" text-anchor="middle" font-size="10" fill="#37474f">tiktoken→HF→启发式</text>
+  <text x="811" y="1399" text-anchor="middle" font-size="10" fill="#37474f">provider 实测值优先</text>
+
+  <rect x="928" y="1326" width="210" height="96" rx="8" fill="#f3e5f5" stroke="#ab47bc" stroke-width="1.5"/>
+  <text x="1033" y="1348" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a148c">Tool 输出压缩</text>
+  <text x="1033" y="1367" text-anchor="middle" font-size="10" fill="#37474f">时间过期微压缩</text>
+  <text x="1033" y="1383" text-anchor="middle" font-size="10" fill="#37474f">k8s JSON 字段剥离</text>
+  <text x="1033" y="1399" text-anchor="middle" font-size="10" fill="#37474f">边界截断+缓存恢复</text>
+
+  <rect x="1150" y="1326" width="210" height="96" rx="8" fill="#f3e5f5" stroke="#ab47bc" stroke-width="1.5"/>
+  <text x="1255" y="1348" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a148c">Session 持久化</text>
+  <text x="1255" y="1367" text-anchor="middle" font-size="10" fill="#37474f">任务/TUI 双会话存储</text>
+  <text x="1255" y="1383" text-anchor="middle" font-size="10" fill="#37474f">消息去重/handoff 切分</text>
+  <text x="1255" y="1399" text-anchor="middle" font-size="10" fill="#37474f">推理前统一 hook</text>
+
+  <line x1="700" y1="1424" x2="700" y2="1448" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ===================== ⑦ 模型连接域 ===================== -->
+  <rect x="40" y="1452" width="1320" height="26" rx="6" fill="#283593"/>
+  <text x="52" y="1470" font-size="14" font-weight="bold" fill="#ffffff">⑦ 模型连接域 —— 多厂商 LLM 的统一接入</text>
+
+  <rect x="40" y="1488" width="210" height="96" rx="8" fill="#e8eaf6" stroke="#7986cb" stroke-width="1.5"/>
+  <text x="145" y="1510" text-anchor="middle" font-size="12" font-weight="bold" fill="#1a237e">Model Family 知识</text>
+  <text x="145" y="1529" text-anchor="middle" font-size="10" fill="#37474f">模型名→线缆行为</text>
+  <text x="145" y="1545" text-anchor="middle" font-size="10" fill="#37474f">分层族匹配</text>
+
+  <rect x="262" y="1488" width="210" height="96" rx="8" fill="#e8eaf6" stroke="#7986cb" stroke-width="1.5"/>
+  <text x="367" y="1510" text-anchor="middle" font-size="12" font-weight="bold" fill="#1a237e">Dialect 兼容</text>
+  <text x="367" y="1529" text-anchor="middle" font-size="10" fill="#37474f">8 种 thinking 方言</text>
+  <text x="367" y="1545" text-anchor="middle" font-size="10" fill="#37474f">声明式兼容规格</text>
+
+  <rect x="484" y="1488" width="210" height="96" rx="8" fill="#e8eaf6" stroke="#7986cb" stroke-width="1.5"/>
+  <text x="589" y="1510" text-anchor="middle" font-size="12" font-weight="bold" fill="#1a237e">Endpoint 探测</text>
+  <text x="589" y="1529" text-anchor="middle" font-size="10" fill="#37474f">base URL→兼容规格</text>
+  <text x="589" y="1545" text-anchor="middle" font-size="10" fill="#37474f">厂商 host 识别</text>
+
+  <rect x="706" y="1488" width="210" height="96" rx="8" fill="#e8eaf6" stroke="#7986cb" stroke-width="1.5"/>
+  <text x="811" y="1510" text-anchor="middle" font-size="12" font-weight="bold" fill="#1a237e">thinking 翻译</text>
+  <text x="811" y="1529" text-anchor="middle" font-size="10" fill="#37474f">语义开关→厂商 payload</text>
+  <text x="811" y="1545" text-anchor="middle" font-size="10" fill="#37474f">reasoning 回放事实源</text>
+
+  <rect x="928" y="1488" width="210" height="96" rx="8" fill="#e8eaf6" stroke="#7986cb" stroke-width="1.5"/>
+  <text x="1033" y="1510" text-anchor="middle" font-size="12" font-weight="bold" fill="#1a237e">Context Budget 表</text>
+  <text x="1033" y="1529" text-anchor="middle" font-size="10" fill="#37474f">纯数据知识表</text>
+  <text x="1033" y="1545" text-anchor="middle" font-size="10" fill="#37474f">最长前缀匹配</text>
+
+  <rect x="1150" y="1488" width="210" height="96" rx="8" fill="#e8eaf6" stroke="#7986cb" stroke-width="1.5"/>
+  <text x="1255" y="1510" text-anchor="middle" font-size="12" font-weight="bold" fill="#1a237e">Resilient LLM 调用</text>
+  <text x="1255" y="1529" text-anchor="middle" font-size="10" fill="#37474f">有限重试包装</text>
+  <text x="1255" y="1545" text-anchor="middle" font-size="10" fill="#37474f">截断响应处理</text>
+
+  <line x1="700" y1="1586" x2="700" y2="1610" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ===================== ⑧ 可观测域 ===================== -->
+  <rect x="40" y="1614" width="1320" height="26" rx="6" fill="#37474f"/>
+  <text x="52" y="1632" font-size="14" font-weight="bold" fill="#ffffff">⑧ 可观测域 —— 追踪 / 指标 / 实时状态</text>
+
+  <rect x="40" y="1650" width="310" height="88" rx="8" fill="#eceff1" stroke="#90a4ae" stroke-width="1.5"/>
+  <text x="195" y="1674" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#37474f">Tracer 执行追踪</text>
+  <text x="195" y="1693" text-anchor="middle" font-size="10" fill="#546e7a">图节点执行 + token 消耗</text>
+  <text x="195" y="1710" text-anchor="middle" font-size="10" fill="#546e7a">结构化 trace</text>
+
+  <rect x="370" y="1650" width="310" height="88" rx="8" fill="#eceff1" stroke="#90a4ae" stroke-width="1.5"/>
+  <text x="525" y="1674" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#37474f">OTel GenAI 导出</text>
+  <text x="525" y="1693" text-anchor="middle" font-size="10" fill="#546e7a">GenAI 语义约定</text>
+  <text x="525" y="1710" text-anchor="middle" font-size="10" fill="#546e7a">并行导出层</text>
+
+  <rect x="700" y="1650" width="310" height="88" rx="8" fill="#eceff1" stroke="#90a4ae" stroke-width="1.5"/>
+  <text x="855" y="1674" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#37474f">Status Tracker pub/sub</text>
+  <text x="855" y="1693" text-anchor="middle" font-size="10" fill="#546e7a">CLI 与 Server 共用</text>
+  <text x="855" y="1710" text-anchor="middle" font-size="10" fill="#546e7a">status-stream SSE</text>
+
+  <rect x="1030" y="1650" width="310" height="88" rx="8" fill="#eceff1" stroke="#90a4ae" stroke-width="1.5"/>
+  <text x="1185" y="1674" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#37474f">Prometheus 指标</text>
+  <text x="1185" y="1693" text-anchor="middle" font-size="10" fill="#546e7a">/metrics 抓取端点</text>
+  <text x="1185" y="1710" text-anchor="middle" font-size="10" fill="#546e7a">任务执行指标查询</text>
+
+  <line x1="700" y1="1740" x2="700" y2="1764" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ===================== ⑨ 持久化与配置域 ===================== -->
+  <rect x="40" y="1768" width="1320" height="26" rx="6" fill="#616161"/>
+  <text x="52" y="1786" font-size="14" font-weight="bold" fill="#ffffff">⑨ 持久化与配置域 —— 状态落盘 / 配置 / 共享契约</text>
+
+  <rect x="40" y="1804" width="156" height="96" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="118" y="1826" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#424242">TaskStore</text>
+  <text x="118" y="1845" text-anchor="middle" font-size="9.5" fill="#616161">可插后端协议</text>
+  <text x="118" y="1861" text-anchor="middle" font-size="9.5" fill="#616161">sqlite / postgres</text>
+
+  <rect x="206" y="1804" width="156" height="96" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="284" y="1826" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#424242">Task Identity</text>
+  <text x="284" y="1845" text-anchor="middle" font-size="9.5" fill="#616161">task_id 事实源</text>
+  <text x="284" y="1861" text-anchor="middle" font-size="9.5" fill="#616161">前缀体系</text>
+
+  <rect x="372" y="1804" width="156" height="96" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="450" y="1826" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#424242">Settings 配置中心</text>
+  <text x="450" y="1845" text-anchor="middle" font-size="9.5" fill="#616161">pydantic-settings</text>
+  <text x="450" y="1861" text-anchor="middle" font-size="9.5" fill="#616161">三级优先级</text>
+
+  <rect x="538" y="1804" width="156" height="96" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="616" y="1826" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#424242">Config Store</text>
+  <text x="616" y="1845" text-anchor="middle" font-size="9.5" fill="#616161">config.json 写半</text>
+  <text x="616" y="1861" text-anchor="middle" font-size="9.5" fill="#616161">向导校验器</text>
+
+  <rect x="704" y="1804" width="156" height="96" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="782" y="1826" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#424242">Shared Models</text>
+  <text x="782" y="1845" text-anchor="middle" font-size="9.5" fill="#616161">CommandResult</text>
+  <text x="782" y="1861" text-anchor="middle" font-size="9.5" fill="#616161">JSONEnvelope 契约</text>
+
+  <rect x="870" y="1804" width="156" height="96" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="948" y="1826" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#424242">Utils 工具库</text>
+  <text x="948" y="1845" text-anchor="middle" font-size="9.5" fill="#616161">FCAT 上下文适配</text>
+  <text x="948" y="1861" text-anchor="middle" font-size="9.5" fill="#616161">UID/路径/时间等</text>
+
+  <rect x="1036" y="1804" width="156" height="96" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="1114" y="1826" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#424242">Errors 分类体系</text>
+  <text x="1114" y="1845" text-anchor="middle" font-size="9.5" fill="#616161">分类层级</text>
+  <text x="1114" y="1861" text-anchor="middle" font-size="9.5" fill="#616161">L4 错误映射</text>
+
+  <rect x="1202" y="1804" width="156" height="96" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="1280" y="1826" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#424242">Installer 运行时安装</text>
+  <text x="1280" y="1845" text-anchor="middle" font-size="9.5" fill="#616161">ChaosBlade 首用下载</text>
+  <text x="1280" y="1861" text-anchor="middle" font-size="9.5" fill="#616161">自更新/卸载</text>
+
+  <line x1="700" y1="1902" x2="700" y2="1926" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ===================== ⑩ 真实故障面 ===================== -->
+  <rect x="40" y="1930" width="1320" height="26" rx="6" fill="#4e342e"/>
+  <text x="52" y="1948" font-size="14" font-weight="bold" fill="#ffffff">⑩ 真实故障面（系统边界外）—— 注入效果即真理：L1 工具输出 + L2 LLM 语义双层验证</text>
+
+  <rect x="40" y="1966" width="310" height="76" rx="8" fill="#efebe9" stroke="#795548" stroke-width="1.5"/>
+  <text x="195" y="1992" text-anchor="middle" font-size="13" font-weight="bold" fill="#3e2723">ChaosBlade</text>
+  <text x="195" y="2012" text-anchor="middle" font-size="10.5" fill="#4e342e">CLI 直调 / Operator CRD</text>
+  <text x="195" y="2028" text-anchor="middle" font-size="10.5" fill="#4e342e">blade create / destroy</text>
+
+  <rect x="370" y="1966" width="310" height="76" rx="8" fill="#efebe9" stroke="#795548" stroke-width="1.5"/>
+  <text x="525" y="1992" text-anchor="middle" font-size="13" font-weight="bold" fill="#3e2723">Kubernetes</text>
+  <text x="525" y="2012" text-anchor="middle" font-size="10.5" fill="#4e342e">kubectl 原生注入</text>
+  <text x="525" y="2028" text-anchor="middle" font-size="10.5" fill="#4e342e">Pod / Node / 工作负载</text>
+
+  <rect x="700" y="1966" width="310" height="76" rx="8" fill="#efebe9" stroke="#795548" stroke-width="1.5"/>
+  <text x="855" y="1992" text-anchor="middle" font-size="13" font-weight="bold" fill="#3e2723">宿主机</text>
+  <text x="855" y="2012" text-anchor="middle" font-size="10.5" fill="#4e342e">debug pod + chroot /host</text>
+  <text x="855" y="2028" text-anchor="middle" font-size="10.5" fill="#4e342e">SSH · systemd 自恢复</text>
+
+  <rect x="1030" y="1966" width="310" height="76" rx="8" fill="#efebe9" stroke="#795548" stroke-width="1.5"/>
+  <text x="1185" y="1992" text-anchor="middle" font-size="13" font-weight="bold" fill="#3e2723">Python 应用</text>
+  <text x="1185" y="2012" text-anchor="middle" font-size="10.5" fill="#4e342e">进程内 agent 注入</text>
+  <text x="1185" y="2028" text-anchor="middle" font-size="10.5" fill="#4e342e">应用级故障场景</text>
+
+  <!-- ===================== 图例 ===================== -->
+  <rect x="40" y="2062" width="1320" height="84" rx="8" fill="#fafafa" stroke="#cfd8dc" stroke-width="1"/>
+  <rect x="60" y="2080" width="26" height="18" rx="4" fill="#2196f3"/>
+  <text x="96" y="2094" font-size="11.5" fill="#37474f">「ReAct 循环」6 个：intent_clarification / plan_builder / agent_loop / execute_loop / verifier / recover_verifier_loop（LLM ⇄ ToolNode，边挂 screener）</text>
+  <rect x="60" y="2110" width="26" height="16" rx="4" fill="#ff6b6b"/>
+  <text x="96" y="2123" font-size="11.5" fill="#37474f">安全守卫（代码强制执行点，不依赖提示词）</text>
+  <rect x="480" y="2110" width="26" height="16" rx="4" fill="#e0f2f1" stroke="#00897b"/>
+  <text x="516" y="2123" font-size="11.5" fill="#37474f">确定性节点（无 LLM 循环）</text>
+  <rect x="760" y="2110" width="26" height="16" rx="4" fill="#f5f5f5" stroke="#9e9e9e"/>
+  <text x="796" y="2123" font-size="11.5" fill="#37474f">平台支撑能力</text>
+  <text x="950" y="2123" font-size="11" fill="#78909c">模块职责取自源码 docstring</text>
+</svg>

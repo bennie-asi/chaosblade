@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 560" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="aDown" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <!-- ===== Entry layer ===== -->
+  <rect x="30" y="30" width="1020" height="110" rx="14" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="52" y="56" font-size="14" font-weight="700" fill="#475569">Entry</text>
+  <rect x="70" y="66" width="200" height="58" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.4"/>
+  <text x="170" y="90" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1d4ed8">CLI (Typer)</text>
+  <text x="170" y="110" text-anchor="middle" font-size="11.5" fill="#3b82f6">inject · recover · list · metric</text>
+  <rect x="290" y="66" width="200" height="58" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.4"/>
+  <text x="390" y="90" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1d4ed8">TUI (Ink + React)</text>
+  <text x="390" y="110" text-anchor="middle" font-size="11.5" fill="#3b82f6">Interactive terminal · SSE</text>
+  <rect x="510" y="66" width="200" height="58" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.4"/>
+  <text x="610" y="90" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1d4ed8">HTTP API</text>
+  <text x="610" y="110" text-anchor="middle" font-size="11.5" fill="#3b82f6">FastAPI REST + SSE</text>
+  <rect x="730" y="66" width="200" height="58" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.4"/>
+  <text x="830" y="90" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1d4ed8">Python SDK</text>
+  <text x="830" y="110" text-anchor="middle" font-size="11.5" fill="#3b82f6">L4ResilienceAgent</text>
+  <text x="1030" y="56" text-anchor="end" font-size="11" fill="#94a3b8">Local direct / Server remote</text>
+
+  <path d="M540,140 L540,166" fill="none" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#aDown)"/>
+
+  <!-- ===== Orchestration layer ===== -->
+  <rect x="30" y="168" width="1020" height="128" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="1.8"/>
+  <text x="52" y="194" font-size="14" font-weight="700" fill="#1e40af">Orchestration — LangGraph StateGraph</text>
+  <rect x="70" y="206" width="170" height="72" rx="9" fill="#2563eb"/>
+  <text x="155" y="238" text-anchor="middle" font-size="13.5" font-weight="700" fill="#fff">Phase 1 Plan</text>
+  <text x="155" y="258" text-anchor="middle" font-size="11.5" fill="#dbeafe">ReAct planning</text>
+  <rect x="258" y="206" width="170" height="72" rx="9" fill="#d97706"/>
+  <text x="343" y="238" text-anchor="middle" font-size="13.5" font-weight="700" fill="#fff">Safety + Confirm</text>
+  <text x="343" y="258" text-anchor="middle" font-size="11.5" fill="#ffedd5">Rule engine + gate</text>
+  <rect x="446" y="206" width="170" height="72" rx="9" fill="#0d9488"/>
+  <text x="531" y="238" text-anchor="middle" font-size="13.5" font-weight="700" fill="#fff">Phase 2 Execute</text>
+  <text x="531" y="258" text-anchor="middle" font-size="11.5" fill="#ccfbf1">Injection</text>
+  <rect x="634" y="206" width="170" height="72" rx="9" fill="#16a34a"/>
+  <text x="719" y="238" text-anchor="middle" font-size="13.5" font-weight="700" fill="#fff">Phase 3 Verify</text>
+  <text x="719" y="258" text-anchor="middle" font-size="11.5" fill="#dcfce7">Two-layer verification</text>
+  <rect x="822" y="206" width="170" height="72" rx="9" fill="#dc2626"/>
+  <text x="907" y="238" text-anchor="middle" font-size="13.5" font-weight="700" fill="#fff">Recover subgraph</text>
+  <text x="907" y="258" text-anchor="middle" font-size="11.5" fill="#fee2e2">Independent recovery path</text>
+
+  <path d="M540,296 L540,322" fill="none" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#aDown)"/>
+
+  <!-- ===== Capabilities layer ===== -->
+  <rect x="30" y="324" width="1020" height="104" rx="14" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.6"/>
+  <text x="52" y="350" font-size="14" font-weight="700" fill="#0f766e">Capabilities</text>
+  <rect x="70" y="360" width="290" height="54" rx="9" fill="#ccfbf1" stroke="#0d9488" stroke-width="1.3"/>
+  <text x="215" y="382" text-anchor="middle" font-size="13" font-weight="600" fill="#0f766e">Tools</text>
+  <text x="215" y="401" text-anchor="middle" font-size="11.5" fill="#0d9488">blade · kubectl · shell + ToolGuard</text>
+  <rect x="380" y="360" width="290" height="54" rx="9" fill="#ccfbf1" stroke="#0d9488" stroke-width="1.3"/>
+  <text x="525" y="382" text-anchor="middle" font-size="13" font-weight="600" fill="#0f766e">Skills</text>
+  <text x="525" y="401" text-anchor="middle" font-size="11.5" fill="#0d9488">Tier 1→2→3 progressive + hot reload</text>
+  <rect x="690" y="360" width="300" height="54" rx="9" fill="#ccfbf1" stroke="#0d9488" stroke-width="1.3"/>
+  <text x="840" y="382" text-anchor="middle" font-size="13" font-weight="600" fill="#0f766e">Memory</text>
+  <text x="840" y="401" text-anchor="middle" font-size="11.5" fill="#0d9488">Working / Session / Operational</text>
+
+  <path d="M540,428 L540,454" fill="none" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#aDown)"/>
+
+  <!-- ===== Infrastructure layer ===== -->
+  <rect x="30" y="456" width="1020" height="90" rx="14" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="52" y="482" font-size="14" font-weight="700" fill="#475569">Infrastructure</text>
+  <rect x="70" y="492" width="290" height="44" rx="9" fill="#f1f5f9" stroke="#64748b" stroke-width="1.2"/>
+  <text x="215" y="519" text-anchor="middle" font-size="12.5" fill="#334155">TaskStore + Checkpointer (SQLite / PG)</text>
+  <rect x="380" y="492" width="290" height="44" rx="9" fill="#f1f5f9" stroke="#64748b" stroke-width="1.2"/>
+  <text x="525" y="519" text-anchor="middle" font-size="12.5" fill="#334155">Tracer + SSE bus · OpenTelemetry</text>
+  <rect x="690" y="492" width="300" height="44" rx="9" fill="#f1f5f9" stroke="#64748b" stroke-width="1.2"/>
+  <text x="840" y="519" text-anchor="middle" font-size="12.5" fill="#334155">Config (pydantic-settings) · Knowledge base</text>
+</svg>

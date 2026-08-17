@@ -186,7 +186,9 @@ blade-ai config set mode server http://localhost:8089  # 终端 2：切换到 Se
 
 BLADE AI 采用分层设计：顶层是接入适配器，中间是统一的 LangGraph 编排核心，其下是能力层与共享的基础设施层。三条调用路径（Local 同进程、Server HTTP+SSE、SDK）最终都汇聚到同一份编译后的 Graph。
 
-![分层架构：接入层、编排层、能力层、基础设施层](assets/architecture.png)
+![功能架构大图：从交互界面域、编排引擎域、安全守卫域、领域语义域、执行能力域、上下文与记忆域、模型连接域、可观测域、持久化与配置域，到真实故障面的十层功能域](assets/architecture-layers.svg.png)
+
+*点击图片可查看高清原图。*
 
 单一 `AgentState`（按生命周期组织：身份 / 意图 / 规划 / 安全 / 确认 / 执行 / 验证 / 恢复 / 循环控制 / 结果 / 记忆）是唯一真相源；确定性的 `--direct` 路径与 LLM 规划路径在 `safety_check` 处汇合；Recover 图完全独立编译、拥有自己的 ReAct 循环；SSE 流式事件（token / tool / confirm / result ……）贯穿节点 → FastAPI → TUI，是统一的实时反馈通道。完整设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 

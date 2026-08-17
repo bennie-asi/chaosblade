@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 560" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="dArrow" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <text x="470" y="32" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a">Defense in depth · layered safety guardrails</text>
+  <text x="470" y="54" text-anchor="middle" font-size="12.5" fill="#64748b">Intent flows top-down; a fault reaches the cluster only after clearing every layer</text>
+
+  <!-- user input -->
+  <rect x="350" y="74" width="240" height="40" rx="20" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="470" y="100" text-anchor="middle" font-size="14" font-weight="600" fill="#334155">User intent</text>
+  <path d="M470,114 L470,132" fill="none" stroke="#94a3b8" stroke-width="2" marker-end="url(#dArrow)"/>
+
+  <!-- Layer 1 Safety Check -->
+  <rect x="120" y="134" width="700" height="60" rx="10" fill="#ffedd5" stroke="#d97706" stroke-width="1.8"/>
+  <text x="150" y="161" font-size="15" font-weight="700" fill="#b45309">① Safety Check <tspan font-size="11.5" font-weight="500" fill="#d97706">— pure rule engine · no LLM</tspan></text>
+  <text x="150" y="182" font-size="12.5" fill="#92400e">Namespace denylist (configurable) · conflict detection · target validity · blast-radius scoring</text>
+  <path d="M470,194 L470,210" fill="none" stroke="#94a3b8" stroke-width="2" marker-end="url(#dArrow)"/>
+
+  <!-- Layer 2 Confirmation Gate -->
+  <rect x="150" y="212" width="640" height="60" rx="10" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.8"/>
+  <text x="180" y="239" font-size="15" font-weight="700" fill="#6d28d9">② Confirmation Gate</text>
+  <text x="180" y="260" font-size="12.5" fill="#5b21b6">Dynamic interrupt() · human approve / reject — critical operations need authorisation</text>
+  <path d="M470,272 L470,288" fill="none" stroke="#94a3b8" stroke-width="2" marker-end="url(#dArrow)"/>
+
+  <!-- Layer 3 Per-phase guards -->
+  <rect x="180" y="290" width="580" height="64" rx="10" fill="#fee2e2" stroke="#dc2626" stroke-width="1.8"/>
+  <text x="210" y="317" font-size="15" font-weight="700" fill="#b91c1c">③ Per-phase guards <tspan font-size="11.5" font-weight="500" fill="#dc2626">— different red lines per phase</tspan></text>
+  <text x="210" y="337" font-size="12.5" fill="#7f1d1d">Plan blocks changes · Execute: method may vary, identity may not · Verify: env-locked</text>
+  <path d="M470,354 L470,370" fill="none" stroke="#94a3b8" stroke-width="2" marker-end="url(#dArrow)"/>
+
+  <!-- Layer 4 ToolGuard -->
+  <rect x="210" y="372" width="520" height="64" rx="10" fill="#fef3c7" stroke="#ca8a04" stroke-width="1.8"/>
+  <text x="240" y="399" font-size="15" font-weight="700" fill="#a16207">④ ToolGuard</text>
+  <text x="240" y="419" font-size="12" fill="#854d0e">Command allowlist (fail-closed) + danger denylist (rm -rf, |bash) · shell=False</text>
+  <path d="M470,436 L470,452" fill="none" stroke="#94a3b8" stroke-width="2" marker-end="url(#dArrow)"/>
+
+  <!-- Layer 5 Loop & Timeout -->
+  <rect x="240" y="454" width="460" height="64" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="1.8"/>
+  <text x="270" y="481" font-size="15" font-weight="700" fill="#15803d">⑤ Loop Max &amp; Timeout</text>
+  <text x="270" y="501" font-size="12" fill="#166534">Loop caps 100/100/60 · recursion_limit 500 · --timeout auto-destroy</text>
+
+  <!-- cluster -->
+  <text x="470" y="544" text-anchor="middle" font-size="13" font-weight="600" fill="#0f766e">▼  Cluster (irreversible operations)</text>
+</svg>

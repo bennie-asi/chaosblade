@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 440" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#64748b"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#dc2626"/>
+    </marker>
+    <marker id="arrowAmber" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#d97706"/>
+    </marker>
+  </defs>
+
+  <!-- inputs -->
+  <g>
+    <rect x="40" y="34" width="200" height="52" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="140" y="58" text-anchor="middle" font-size="15" font-weight="600" fill="#3730a3">Natural language</text>
+    <text x="140" y="76" text-anchor="middle" font-size="12" fill="#6366f1">Natural-language intent</text>
+
+    <rect x="260" y="34" width="200" height="52" rx="10" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="360" y="58" text-anchor="middle" font-size="15" font-weight="600" fill="#334155">Structured  --direct</text>
+    <text x="360" y="76" text-anchor="middle" font-size="12" fill="#64748b">Structured args · zero LLM</text>
+  </g>
+
+  <!-- main chain boxes -->
+  <g>
+    <!-- Phase 1 -->
+    <rect x="40" y="160" width="190" height="96" rx="12" fill="#2563eb"/>
+    <text x="135" y="196" text-anchor="middle" font-size="16" font-weight="700" fill="#ffffff">Phase 1 · Plan</text>
+    <text x="135" y="218" text-anchor="middle" font-size="13" fill="#dbeafe">Intent understanding</text>
+    <text x="135" y="238" text-anchor="middle" font-size="12" fill="#bfdbfe">LLM ReAct + skill match</text>
+
+    <!-- Safety Check -->
+    <rect x="272" y="160" width="190" height="96" rx="12" fill="#d97706"/>
+    <text x="367" y="196" text-anchor="middle" font-size="16" font-weight="700" fill="#ffffff">Safety Check</text>
+    <text x="367" y="218" text-anchor="middle" font-size="13" fill="#ffedd5">Safety review</text>
+    <text x="367" y="238" text-anchor="middle" font-size="12" fill="#fed7aa">Pure rule engine · no LLM</text>
+
+    <!-- Confirm Gate -->
+    <rect x="504" y="160" width="190" height="96" rx="12" fill="#7c3aed"/>
+    <text x="599" y="196" text-anchor="middle" font-size="16" font-weight="700" fill="#ffffff">Confirm Gate</text>
+    <text x="599" y="218" text-anchor="middle" font-size="13" fill="#ede9fe">Human confirmation</text>
+    <text x="599" y="238" text-anchor="middle" font-size="12" fill="#ddd6fe">interrupt · await approval</text>
+
+    <!-- Phase 2 -->
+    <rect x="736" y="160" width="190" height="96" rx="12" fill="#0d9488"/>
+    <text x="831" y="196" text-anchor="middle" font-size="16" font-weight="700" fill="#ffffff">Phase 2 · Execute</text>
+    <text x="831" y="218" text-anchor="middle" font-size="13" fill="#ccfbf1">Injection</text>
+    <text x="831" y="238" text-anchor="middle" font-size="12" fill="#99f6e4">ChaosBlade / kubectl</text>
+
+    <!-- Phase 3 -->
+    <rect x="968" y="160" width="150" height="96" rx="12" fill="#16a34a"/>
+    <text x="1043" y="196" text-anchor="middle" font-size="16" font-weight="700" fill="#ffffff">Phase 3</text>
+    <text x="1043" y="216" text-anchor="middle" font-size="13" fill="#dcfce7">Verify</text>
+    <text x="1043" y="236" text-anchor="middle" font-size="12" fill="#bbf7d0">L1 status · L2 semantic</text>
+  </g>
+
+  <!-- input arrows -->
+  <path d="M135,86 L135,158" fill="none" stroke="#6366f1" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M360,86 C360,120 367,120 367,158" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrowAmber)"/>
+  <text x="392" y="126" font-size="11" fill="#64748b">bypass planning</text>
+
+  <!-- chain arrows -->
+  <path d="M230,208 L270,208" fill="none" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M462,208 L502,208" fill="none" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M694,208 L734,208" fill="none" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M926,208 L966,208" fill="none" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- recover subgraph -->
+  <rect x="736" y="322" width="382" height="86" rx="12" fill="#fef2f2" stroke="#dc2626" stroke-width="1.8" stroke-dasharray="7 5"/>
+  <text x="927" y="352" text-anchor="middle" font-size="15" font-weight="700" fill="#b91c1c">Recover · Independent subgraph</text>
+  <text x="927" y="374" text-anchor="middle" font-size="12.5" fill="#dc2626">blade destroy + two-layer verification</text>
+  <text x="927" y="392" text-anchor="middle" font-size="12.5" fill="#dc2626">--force cleanup as the degraded path</text>
+
+  <!-- verify -> recover arrow -->
+  <path d="M1043,256 L1043,300 L927,300 L927,320" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <text x="1036" y="294" text-anchor="end" font-size="11" fill="#dc2626">drill ends / expires</text>
+
+  <!-- footer caption -->
+  <text x="580" y="430" text-anchor="middle" font-size="12.5" fill="#94a3b8">Intent → Safety review → Injection → Two-layer verification → Deterministic recovery</text>
+</svg>

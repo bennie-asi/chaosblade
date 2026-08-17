@@ -1,5 +1,5 @@
 .PHONY: build wheel wheel-platform clean dev server install run test dist package checksums \
-        dev-tui build-tui install-tui test-tui typecheck-tui clean-tui download-node
+        dev-tui build-tui install-tui test-tui typecheck-tui clean-tui download-node diagrams
 
 # Pinned Node.js version for bundling into the standalone binary.
 NODE_VERSION ?= 24.16.0
@@ -195,3 +195,11 @@ typecheck-tui:
 clean-tui:
 	cd tui && npm run clean
 	rm -rf tui/node_modules
+
+# Re-render the architecture diagram PNG from its SVG source at 3x
+# intrinsic resolution (SVG is the editable source; PNG is a build
+# artifact). qlmanage emits a square canvas, so crop to the content
+# aspect ratio (viewBox 1400:2160 -> 4200x6480).
+diagrams:
+	qlmanage -t -s 6480 -o assets assets/architecture-layers.svg >/dev/null 2>&1
+	sips --cropToHeightWidth 6480 4200 assets/architecture-layers.svg.png >/dev/null

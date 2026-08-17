@@ -188,7 +188,9 @@ Those five gate what *reaches* the cluster. One more answers what no gate can: *
 
 BLADE AI is layered: entry adapters on top, a unified LangGraph orchestration core, a capabilities layer, and shared infrastructure. All three call paths (Local in-process, Server over HTTP+SSE, SDK) converge on the same compiled graph.
 
-![Layered architecture: Entry, Orchestration, Capabilities, Infrastructure](assets/architecture.png)
+![Functional architecture map: ten layers from entry interfaces, through the orchestration engine, safety guards, domain semantics, execution, memory, model connectivity and observability, down to the real fault surface](assets/architecture-layers.svg.png)
+
+*Click the image to open the full-resolution original for detail.*
 
 A single `AgentState` (organized by lifecycle: identity / intent / planning / safety / confirmation / execution / verification / recovery / loop-control / results / memory) is the source of truth; the deterministic `--direct` path and the LLM planning path merge at `safety_check`; the Recover graph is compiled independently with its own ReAct loop; and SSE streaming (token / tool / confirm / result …) threads through nodes → FastAPI → TUI as the unified real-time channel. Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
