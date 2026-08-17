@@ -182,7 +182,9 @@ class TestDirectMutationRejection:
         })
 
         assert result["screener_route"] == PHASE1_SCREENER_ROUTE_RETRY
-        assert "environment capability profile" in result["messages"][0].content
+        # Truthful capability cause (names the profile in force) — the old
+        # generic "unavailable for the current environment" sentence is gone.
+        assert "not a registered capability profile" in result["messages"][0].content
         assert "phase1_readonly_violation" in result["messages"][0].content
 
 
@@ -224,6 +226,75 @@ class TestKubectlBypassRejection:
         })
         result = await phase1_screener({"messages": [msg]})
         assert result["screener_route"] == PHASE1_SCREENER_ROUTE_RETRY
+
+
+# ---------------------------------------------------------------------------
+# Truthful rejection reasons — the guard must surface the verdict it actually
+# reached, never re-invent a template from the scope word. Task
+# inject-a9ea4da7: an exec probe carrying ``;`` was refused with the generic
+# "classifier verdict: destructive ... all mutation paths are blocked", which
+# the model read as "all exec is blocked" and over-generalised. Regression
+# locks: specific cause + paired fix shape + probe/mutation frame split.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestTruthfulRejectionReasons:
+    async def test_malformed_probe_carries_specific_operator_reason(self):
+        """The exact shape refused in task inject-a9ea4da7 (msg 20)."""
+        msg = _ai("kubectl_read", {
+            "subcommand": "exec",
+            "v_args": (
+                "pod-x -n ns -- sh -c "
+                "'echo SHELL_OK; command -v stress-ng'"
+            ),
+        })
+        result = await phase1_screener({"messages": [msg]})
+        assert result["screener_route"] == PHASE1_SCREENER_ROUTE_RETRY
+        content = result["messages"][0].content
+        # The judge's ACTUAL cause survives to the model...
+        assert "shell control operator" in content
+        assert "(redirect/command chain/background/substitution)" in content
+        # ...paired with the compliant probe shape...
+        assert "-- which stress-ng" in content
+        # ...framed as a SHAPE problem that keeps exec reachable...
+        assert "COMMAND SHAPE" in content
+        # ...and the deleted generic template never returns.
+        assert "classifier verdict: destructive" not in content
+        assert "would mutate cluster state" not in content
+
+    async def test_genuine_pod_mutation_carries_judge_reason_too(self):
+        """A real pod mutation (rm) is refused with the judge's actual cause
+        as well: in a read-only phase the only legitimate exec shape is a
+        probe, and the paired hint points genuine injections to Phase 2 —
+        never the deleted generic template."""
+        msg = _ai("kubectl_read", {
+            "subcommand": "exec",
+            "v_args": "pod-x -n ns -- rm -rf /data/cache",
+        })
+        result = await phase1_screener({"messages": [msg]})
+        assert result["screener_route"] == PHASE1_SCREENER_ROUTE_RETRY
+        content = result["messages"][0].content
+        assert "phase1_readonly_violation" in content
+        assert "not a valid read-only probe" in content
+        # The judge names the actual verdict, not a fabricated one.
+        assert "'rm' is not a known read-only diagnostic command" in content
+        # The paired hint keeps the Phase-2 forward path visible.
+        assert "Phase 2" in content
+        assert "classifier verdict: destructive" not in content
+
+    async def test_escape_carrier_detail_survives_phase1(self):
+        """The classifier's escape branch records a carrier-policy
+        reject_detail; phase1 must render it instead of flattening it."""
+        msg = _ai("kubectl_read", {
+            "subcommand": "exec",
+            "v_args": "pod-x -n ns -- chroot /host iptables -A INPUT -j DROP",
+        })
+        result = await phase1_screener({"messages": [msg]})
+        assert result["screener_route"] == PHASE1_SCREENER_ROUTE_RETRY
+        content = result["messages"][0].content
+        assert "host-escape primitive" in content
+        assert "classifier verdict: destructive" not in content
 
 
 # ---------------------------------------------------------------------------

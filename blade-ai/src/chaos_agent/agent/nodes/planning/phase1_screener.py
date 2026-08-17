@@ -78,7 +78,12 @@ from typing import Any
 from langchain_core.messages import AIMessage, ToolMessage
 
 from chaos_agent.agent.state import AgentState
-from chaos_agent.agent.capabilities import tool_call_allowed
+from chaos_agent.agent.capabilities import explain_tool_refusal, tool_call_allowed
+from chaos_agent.agent.nodes._guard_rejection import (
+    is_malformed_probe,
+    read_only_rejection_reason,
+    scope_floor_note,
+)
 from chaos_agent.agent.target_guard.classifier import (
     SCOPE_BANNED,
     SCOPE_READONLY,
@@ -102,35 +107,69 @@ PHASE1_SCREENER_ROUTE_RETRY = "retry"
 
 
 def _make_violation_message(
-    tool_name: str, reason: str, tc_id: str,
+    tool_name: str,
+    reason: str,
+    tc_id: str,
+    *,
+    suggestion: str = "",
+    probe_refusal: bool = False,
+    floor_note: str = "",
 ) -> ToolMessage:
     """Build the rejection ToolMessage.
 
     Wording mirrors Layer D's tool-not-found handler so the LLM gets a
     consistent signal across all Phase 1 enforcement paths. Critical
     properties:
+      - The CAUSE is the verdict the classifier actually reached
+        (``read_only_rejection_reason`` renders it upstream) — never a
+        template re-invented from the scope word (that template read as
+        "all exec is blocked" and trained over-generalisation,
+        task inject-a9ea4da7).
       - Does NOT list alternative tools (that's what Layer D's
         original LangChain default did, and it actively trained the
         LLM to bypass via kubectl exec — see task-ce9647931ce1).
       - Explains the restriction is intentional + machine-enforced.
       - Points to the ONLY legitimate forward path: emit final summary
         text without tool_calls.
+
+    Two frames share the envelope:
+      - mutation refusal (default): the call WOULD mutate; the phase
+        boundary is the floor and ``floor_note`` carries the
+        verdict-class-specific anti-bypass line.
+      - probe refusal (``probe_refusal``): the inner command failed the
+        read-only probe SHAPE test — the refusal is about the command
+        form, not about exec itself, and a correctly shaped probe stays
+        reachable. The frame keeps that exploration space open instead
+        of collapsing it into the mutation floor.
     """
+    suggestion_block = f"\nHow to fix: {suggestion}\n" if suggestion else ""
+    if probe_refusal:
+        phase_note = (
+            "Phase 1 (planning) is read-only by runtime enforcement. This "
+            "refusal is about the COMMAND SHAPE, not about exec itself — a "
+            "correctly shaped read-only probe (one single command after "
+            "`--`, e.g. `-- which stress-ng`) IS allowed here and will "
+            "pass. Fault INJECTION is bound automatically in Phase 2 after "
+            "your plan is approved."
+        )
+    else:
+        phase_note = (
+            "Phase 1 (planning) is read-only by runtime enforcement. "
+            "Mutation tools (blade_create, blade_destroy, full kubectl "
+            "with exec/delete/patch/...) are bound automatically in "
+            "Phase 2 after your plan is approved by the user."
+        )
+        if floor_note:
+            phase_note += f"\n\n{floor_note}"
     return ToolMessage(
         content=(
             f"Error: phase1_readonly_violation\n"
             f"\n"
-            f"Tool '{tool_name}' would mutate cluster state in this call.\n"
+            f"Tool '{tool_name}' was REFUSED — nothing was executed.\n"
             f"Reason: {reason}\n"
+            f"{suggestion_block}"
             f"\n"
-            f"Phase 1 (planning) is read-only by runtime enforcement. "
-            f"Mutation tools (blade_create, blade_destroy, full kubectl "
-            f"with exec/delete/patch/...) are bound automatically in "
-            f"Phase 2 after your plan is approved by the user.\n"
-            f"\n"
-            f"DO NOT retry with `kubectl exec ... blade create` or any "
-            f"other equivalent path — all mutation paths are blocked "
-            f"here by the same classifier.\n"
+            f"{phase_note}\n"
             f"\n"
             f"To advance to Phase 2: finish your planning observations, "
             f"then emit a final summary text WITHOUT any tool_calls. The "
@@ -251,10 +290,18 @@ async def phase1_screener(state: AgentState) -> dict[str, Any]:
         # Shared capability verdict (fail-CLOSED). Distinct from the mutation
         # classifier below, which is deliberately fail-OPEN.
         if not tool_call_allowed(tool_name, state, "plan"):
+            # Truthful cause from the one module that holds the resolved
+            # profile — the generic "unavailable for the current environment"
+            # sentence names neither the profile in force nor what to use
+            # instead (same lesson intent_screener already applied).
+            cap_reason, cap_suggestion = explain_tool_refusal(
+                tool_name, state, "plan",
+            )
             rejections.append(_make_violation_message(
                 tool_name,
-                "tool is unavailable for the current environment capability profile",
+                cap_reason,
                 tc_id,
+                suggestion=cap_suggestion,
             ))
             has_context_reject = True
             continue
@@ -296,28 +343,44 @@ async def phase1_screener(state: AgentState) -> dict[str, Any]:
             legitimate_ids.append((tool_name, tc_id))
             continue
 
-        # Non-readonly verdict — build a rejection reason
+        # Non-readonly verdict — render the verdict the classifier actually
+        # reached (shared renderer, truth-first: reject_detail > probe reason
+        # > raw command), never a template re-invented from the scope word.
         if scope == SCOPE_BANNED:
             reason_str = (
-                effective.raw_command
+                effective.reject_detail
+                or effective.raw_command
                 or "operation classified as banned (e.g. exec ... blade "
                    "create, apply -f chaosblade.yaml, ...)"
             )
             reason = f"banned operation — {reason_str[:200]}"
+            suggestion = effective.reject_suggestion
+            probe_refusal = False
         elif scope == SCOPE_UNKNOWN:
             reason = (
-                "unclassifiable call (defensive reject — Phase 1 cannot "
-                "verify the call is read-only without classifier signal)"
+                effective.reject_detail
+                or "unclassifiable call (defensive reject — Phase 1 cannot "
+                   "verify the call is read-only without classifier signal)"
             )
+            suggestion = effective.reject_suggestion
+            probe_refusal = False
         else:
-            # destructive_known or actual targeted scope — call would
-            # mutate cluster state on a real resource
-            reason = (
-                f"call would mutate {scope} resources "
-                f"(classifier verdict: destructive)"
-            )
+            # SCOPE_ESCAPE carries a carrier-policy reject_detail; a targeted
+            # scope carries either a genuine mutation or a malformed probe —
+            # the renderer and its probe flag tell them apart.
+            reason, suggestion = read_only_rejection_reason(effective)
+            probe_refusal = is_malformed_probe(effective)
 
-        rejections.append(_make_violation_message(tool_name, reason, tc_id))
+        rejections.append(_make_violation_message(
+            tool_name,
+            reason,
+            tc_id,
+            suggestion=suggestion,
+            probe_refusal=probe_refusal,
+            # The probe frame already carries the phase-boundary note; a
+            # second floor line would just dilute the shape fix.
+            floor_note="" if probe_refusal else scope_floor_note(scope),
+        ))
 
     if not rejections:
         return {"screener_route": PHASE1_SCREENER_ROUTE_PASS}

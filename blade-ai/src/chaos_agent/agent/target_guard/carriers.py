@@ -95,9 +95,14 @@ _SUGGEST_APPROVED_NODE = (
 )
 _SUGGEST_FAMILY = (
     "Express the fault with a binary of the APPROVED fault family "
-    "(network → iptables/tc/nft, disk → dd/fallocate/fio, "
-    "cpu|mem → stress-ng, process → kill). Inspection commands "
-    "(crictl, ip addr, ps) are not injections — if you only need to look, use "
+    "(network → iptables/tc/nft, or a timeout-bounded nc -l listener for a "
+    "port-occupation fault; disk → dd/fallocate/fio; cpu|mem → stress-ng; "
+    "process → kill, a one-shot crictl stop for a discrete restart, a "
+    "timer-armed bounded crictl-stop loop for a sustained terminate-style "
+    "fault, or a timer-armed cgroup-freezer FROZEN write for a "
+    "suspend-style fault). Inspection "
+    "commands (crictl ps/pods/inspect, ip addr, ps) are not injections — if "
+    "you only need to look, use "
     "a read-only probe instead. Note the SECOND requirement that applies once "
     "the family is right: a host mutation must also self-recover, so pair it "
     "with its own reversal behind a time bound in the same call. Doing both at "
@@ -482,6 +487,12 @@ def _resolve_carrier_from_artifact(
         # here is how this suggestion came to recommend two forms that the very
         # same check rejects (a bare `systemd-run --on-active` with no forward
         # mutation, and `rm` as a disk reclaim). The observer states the cause.
+        #
+        # ``has_registered_rollback`` is deliberately NOT passed: the system
+        # has no registration API for host-mutation rollback handles — the
+        # ``recovery_armed`` artifact status is a CONSEQUENCE of an observed
+        # inline arm, never an alternative to it (see the recoverability
+        # module docstring). The seam stays opt-in for the day one exists.
         recoverability = assess_recoverability(host_command, operation_family)
         if not recoverability.recoverable:
             _missing = "; ".join(recoverability.missing) or "a bounded, reversible form"
@@ -807,6 +818,11 @@ def classify_host_operation(command: str) -> str:
     families: set[str] = set()
     if re.search(r"(^|[\s/])(iptables|ip6tables|nft|tc)(\s|$)", lowered):
         families.add("network")
+    # ``nc`` in LISTEN mode occupies the port while it runs — the documented
+    # port-occupation fault (skill case Node_网络故障_节点端口占用). Client-mode
+    # nc carries no ``-l`` and is not a fault: it does not match this shape.
+    if re.search(r"\bnc\b[^;&|\n]{0,20}-l\b", lowered):
+        families.add("network")
     if re.search(r"(^|[\s/])(dd|fallocate|fio)(\s|$)", lowered):
         families.add("disk")
     if re.search(r"(^|[\s/])(stress|stress-ng)(\s|$)", lowered):
@@ -815,6 +831,21 @@ def classify_host_operation(command: str) -> str:
         if re.search(r"--cpu\b", lowered):
             families.add("cpu")
     if re.search(r"(^|[\s/])(kill|pkill|killall)(\s|$)", lowered):
+        families.add("process")
+    # ``crictl stop`` terminates every process in the container — the
+    # documented kubectl-native equivalent of a process kill (skill case
+    # Pod_进程被杀死 path B). ``crictl ps/pods/inspect`` stay read-only: they
+    # do not match this shape. One-shot or not is decided by the
+    # recoverability gate, not here.
+    if re.search(r"\bcrictl\s+stop\b", lowered):
+        families.add("process")
+    # A cgroup-freezer state write suspends or resumes every process in the
+    # container — the documented process-suspend mechanism (skill cases
+    # Pod_进程异常_进程被挂起 / Container_进程异常_Sidecar进程被挂起). Whether the
+    # freeze is timer-armed is decided by the recoverability gate, not here.
+    if re.search(
+        r"\becho\s+(?:frozen|thawed)\b[^;&|\n]*>|>\s*\S*freezer\.state\b", lowered,
+    ):
         families.add("process")
     return next(iter(families)) if len(families) == 1 else ""
 

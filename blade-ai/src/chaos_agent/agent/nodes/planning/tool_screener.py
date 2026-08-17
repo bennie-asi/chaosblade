@@ -81,6 +81,7 @@ from chaos_agent.agent.target_guard.classifier import (
     SCOPE_ESCAPE,
     SCOPE_READONLY,
     SCOPE_UNKNOWN,
+    canonicalise_kind,
 )
 from chaos_agent.agent.result.verdict import FailureCategory
 from chaos_agent.config.settings import settings
@@ -176,6 +177,150 @@ async def _discover_vehicle_pods(
             sorted(positives),
         )
     return positives, misses
+
+
+async def _resolve_exec_pod_node(
+    state: AgentState, pod_name: str, pod_ns: str,
+    vehicle_cache: dict[str, Any],
+) -> str:
+    """Resolve which node hosts ``pod_name`` (exec-vehicle node binding).
+
+    A host-level ``blade create`` inside ``kubectl exec POD -- ...`` has no
+    selector of its own — the fault lands on the pod's host node, so the
+    guard's identity comparison needs that node name. One bounded in-band
+    read per pod per task; the outcome is persisted in
+    ``exec_pod_node_bindings`` (an empty node string caches a failed probe
+    as a negative entry), so later screener rounds never re-probe — the
+    same self-poisoning rationale as ``vehicle_probe_misses``.
+
+    Returns the node name, or "" when it cannot be resolved (fail closed:
+    the caller keeps the drift review).
+    """
+    cached = {
+        pod: node
+        for pod, node in (state.get("exec_pod_node_bindings") or ())
+    }
+    if pod_name in cached:
+        return cached[pod_name]
+
+    from chaos_agent.transports import (
+        PROFILE_K8S,
+        TransportTarget,
+        execute_via_transport,
+    )
+    from chaos_agent.tools.kubectl import build_kubectl_cmd
+
+    kubeconfig = str(state.get("kubeconfig") or "")
+    node = ""
+    try:
+        cmd = build_kubectl_cmd(
+            "get",
+            ["pod", pod_name, "-n", pod_ns or "default",
+             "-o", "jsonpath={.spec.nodeName}"],
+            kubeconfig=kubeconfig,
+        )
+        result = await execute_via_transport(
+            cmd, TransportTarget.from_state({}),
+            timeout=settings.timeout_kubectl,
+            task_id=str(state.get("task_id") or ""),
+            source="node-binding-check",
+            expect_profile=PROFILE_K8S,
+        )
+        if getattr(result, "exit_code", 1) == 0:
+            node = str(getattr(result, "stdout", "") or "").strip()
+    except Exception:
+        logger.warning(
+            "target_guard: exec-pod node binding probe failed for %s/%s; "
+            "keeping identity review (fail closed)", pod_ns, pod_name,
+        )
+
+    bindings = tuple(cached.items()) + ((pod_name, node),)
+    vehicle_cache["exec_pod_node_bindings"] = bindings
+    if node:
+        logger.info(
+            "target_guard: resolved exec-pod node binding %s/%s -> %s",
+            pod_ns, pod_name, node,
+        )
+    return node
+
+
+def _selector_probe_key(namespace: str, labels: dict[str, str]) -> str:
+    """Stable cache key for a label-selector name probe."""
+    return namespace + "|" + ",".join(
+        f"{k}={v}" for k, v in sorted(labels.items())
+    )
+
+
+async def _resolve_label_pod_names(
+    state: AgentState, namespace: str, labels: dict[str, str],
+    vehicle_cache: dict[str, Any],
+) -> tuple[str, ...]:
+    """Resolve the pod names a label selector CURRENTLY matches.
+
+    Powers the selector cross-shape resolution (labels-vs-names): the
+    guard policy compares selectors statically and cannot see that an
+    approved name set and an executed label selector pick the same pods,
+    so the screener resolves the live set here, DATA-side — the same
+    division of labour as the exec-pod node binding.
+
+    One bounded in-band read per (namespace, selector) per task; the
+    outcome is persisted in ``selector_name_probes`` (an empty tuple
+    caches a failed or empty probe as a negative entry), so later
+    screener rounds never re-probe — the same self-poisoning rationale
+    as ``vehicle_probe_misses``: under an active network fault the probe
+    would ride the very API path the fault is severing.
+
+    Returns the matching pod names; empty means "no pass" (fail closed:
+    the caller keeps the static drift review).
+    """
+    cached = dict(state.get("selector_name_probes") or ())
+    key = _selector_probe_key(namespace, labels)
+    if key in cached:
+        return tuple(cached[key])
+
+    from chaos_agent.transports import (
+        PROFILE_K8S,
+        TransportTarget,
+        execute_via_transport,
+    )
+    from chaos_agent.tools.kubectl import build_kubectl_cmd
+
+    kubeconfig = str(state.get("kubeconfig") or "")
+    selector = ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
+    names: tuple[str, ...] = ()
+    try:
+        cmd = build_kubectl_cmd(
+            "get",
+            ["pods", "-n", namespace or "default", "-l", selector,
+             "-o", "jsonpath={.items[*].metadata.name}"],
+            kubeconfig=kubeconfig,
+        )
+        result = await execute_via_transport(
+            cmd, TransportTarget.from_state({}),
+            timeout=settings.timeout_kubectl,
+            task_id=str(state.get("task_id") or ""),
+            source="selector-name-probe",
+            expect_profile=PROFILE_K8S,
+        )
+        if getattr(result, "exit_code", 1) == 0:
+            names = tuple(
+                str(getattr(result, "stdout", "") or "").split()
+            )
+    except Exception:
+        logger.warning(
+            "target_guard: selector name probe failed for %s -l %s; "
+            "keeping identity review (fail closed)", namespace, selector,
+        )
+
+    vehicle_cache["selector_name_probes"] = (
+        tuple(cached.items()) + ((key, names),)
+    )
+    if names:
+        logger.info(
+            "target_guard: resolved selector %s -l %s -> %s",
+            namespace, selector, sorted(names),
+        )
+    return names
 
 
 def _identity_matches_approved(
@@ -855,6 +1000,99 @@ async def tool_screener(state: AgentState) -> dict:
                 ):
                     # EffectiveTarget is frozen, so rebuild instead of mutating.
                     effective = replace(effective, is_vehicle_exec=True)
+            if (
+                tool_name != "blade_destroy"
+                and effective.scope == "node"
+                and not effective.names
+                and not effective.labels
+                and effective.exec_pod_name
+                and approved is not None
+            ):
+                # Exec-vehicle node binding: a host-level ``blade create``
+                # inside a tool pod carries no selector — the fault lands on
+                # the pod's host node. Resolve that node DATA-side and pin
+                # it as the effective name so the identity comparison works
+                # on a cluster fact instead of rejecting the selector-less
+                # shape as drift (task-ccfadf7d: an approved node-mem load
+                # executed in the node's own tool pod was misread as
+                # "resource selection drift"). A binding that resolves
+                # OUTSIDE the approved set is genuine drift; one that
+                # cannot be resolved keeps the fail-closed review.
+                approved_name_set = approved.names or approved.resolved_names
+                if approved_name_set:
+                    bound_node = await _resolve_exec_pod_node(
+                        state,
+                        effective.exec_pod_name,
+                        effective.exec_pod_namespace,
+                        vehicle_cache,
+                    )
+                    if bound_node and bound_node in approved_name_set:
+                        effective = replace(effective, names=(bound_node,))
+            if tool_name != "blade_destroy" and approved is not None:
+                # Selector cross-shape resolution (labels vs names): the
+                # policy layer compares selectors statically — a call that
+                # selects the SAME pods through a different selector shape
+                # than the approval can only be rejected as drift there
+                # (drift_policy documents the limitation). The screener has
+                # cluster access, so it resolves the live correspondence
+                # DATA-side before the comparison, exactly like the node
+                # binding above. Both directions stay strictly inside the
+                # approval: the resolved set must be a subset of the
+                # approved name set (A: labels executed under a names-only
+                # approval), or the executed names must be live members of
+                # the approved labels (B: pod churn under a labels
+                # approval). Anything wider, unresolvable, or from a failed
+                # probe keeps the fail-closed drift review.
+                approved_name_set = approved.names or approved.resolved_names
+                if (
+                    effective.scope == "pod"
+                    and canonicalise_kind(approved.scope) == "pod"
+                    and effective.labels
+                    and not effective.names
+                    and approved_name_set
+                    and not approved.labels
+                ):
+                    probe_ns = effective.namespace or approved.namespace
+                    resolved = await _resolve_label_pod_names(
+                        state, probe_ns, dict(effective.labels),
+                        vehicle_cache,
+                    )
+                    if resolved and all(
+                        n in approved_name_set for n in resolved
+                    ):
+                        effective = replace(effective, names=tuple(resolved))
+                elif (
+                    effective.scope == "pod"
+                    and canonicalise_kind(approved.scope) == "pod"
+                    and effective.names
+                    and not effective.labels
+                    and approved.labels
+                    and not all(
+                        n in approved_name_set for n in effective.names
+                    )
+                ):
+                    # No ``approved_name_set`` precondition here: a labels
+                    # approval that was NEVER resolved at freeze time has an
+                    # empty name set, and ``all(n in ())`` is False for any
+                    # executed name — exactly the shape that needs the live
+                    # probe most. The subset verdict comes from the probe.
+                    resolved = await _resolve_label_pod_names(
+                        state, approved.namespace or effective.namespace,
+                        dict(approved.labels), vehicle_cache,
+                    )
+                    resolved_set = set(resolved)
+                    if resolved_set and all(
+                        n in resolved_set for n in effective.names
+                    ):
+                        # Refresh the frozen resolution to the live set;
+                        # the labels stay authoritative, so the policy's
+                        # names-subset check validates against CURRENT
+                        # members of the approved selector. Local rebuild
+                        # only — the state's approval snapshot is untouched.
+                        approved = replace(
+                            approved,
+                            resolved_names=tuple(sorted(resolved_set)),
+                        )
             if tool_name != "blade_destroy":
                 # Single funnel: identity / recoverability verdict via the
                 # gateway. ``decision`` drives routing (drift interrupt /

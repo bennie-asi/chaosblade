@@ -256,6 +256,17 @@ class EffectiveTarget:
     # comparison does not apply. Inner-command classification (banned /
     # escape / readonly) still runs in full.
     is_vehicle_exec: bool = False
+    # Exec-vehicle node binding: a HOST-level blade command inside
+    # ``kubectl exec POD -- blade create ...`` (no ``k8s`` prefix) carries
+    # no selector of its own — the fault lands on whatever node hosts the
+    # exec'd pod, so the pod IS the node binding. The classifier records
+    # the pod's identity here (structured fact from the command shape, not
+    # a guess); the screener resolves the pod's nodeName against the live
+    # cluster and pins ``names`` to it before the drift comparison. When
+    # the resolved node is not in the approved name set — or cannot be
+    # resolved at all — the comparison keeps its fail-closed review.
+    exec_pod_name: str = ""
+    exec_pod_namespace: str = ""
     # Fault-binary mutation inside a kubectl exec (tc/iptables/stress/...).
     # A pod-scoped mutation whose namespace containment the static
     # classifier cannot prove for privileged / hostNetwork pods. Identity
@@ -293,6 +304,19 @@ class EffectiveTarget:
     # compliant path exists, so this is a form issue"), so never fill it just to
     # avoid an empty field.
     reject_suggestion: str = ""
+    # Why a kubectl-exec inner command FAILED the read-only probe test, set by
+    # the classifier's exec branch from ``readonly.readonly_inner_tokens_reason``
+    # (the reason view of the shared judge). Only meaningful to the READ-ONLY
+    # phase screeners (phase1 / verifier / recover Layer 2): scope is still
+    # "pod" — a legitimate mutation target in Phase 2 — so the cause cannot ride
+    # ``reject_detail`` (whose slot is reserved for REJECT scopes and whose
+    # emptiness drives ``is_hard_floor``). Empty for every non-exec call and
+    # for execs whose inner command passed the probe test. Before this field
+    # existed the reason was flattened to a boolean at the ``is_readonly_*``
+    # API boundary and the screeners re-invented a generic "would mutate"
+    # template — which read as "all exec is blocked" and pushed the model into
+    # over-generalisation (task inject-a9ea4da7).
+    readonly_probe_reason: str = ""
     # Mechanism-level policy ban: the call's INJECTION MECHANISM is forbidden
     # by policy regardless of how the call is reshaped. Distinct from BOTH
     # neighbours:

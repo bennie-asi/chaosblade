@@ -111,7 +111,11 @@ def _check_labels_superset(
     Without cluster-state lookup we can't verify whether
     ``approved.names`` resolve to the same pods as ``effective.labels``
     or vice versa. Hence: labels-vs-names cross is rejected unless
-    ``is_namespace_wide`` is set.
+    ``is_namespace_wide`` is set. (The screener closes the gap DATA-side
+    before this check: it resolves the live labels<->names correspondence
+    with a bounded cached probe and pins / refreshes the selectors, so a
+    cross that genuinely picks the approved pods never reaches here —
+    see ``_resolve_label_pod_names`` in ``tool_screener``.)
     """
     if not approved.labels:
         return False

@@ -340,6 +340,27 @@ class TestWgetWritesByDefault:
         """``--spider`` skips the DOWNLOAD, not the other write/upload forms."""
         assert not is_readonly_host_command(cmd), cmd
 
+    @pytest.mark.parametrize("cmd", [
+        "wget --version",                 # binary-presence probe, no URL at all
+        "wget -V",
+        "wget --help",
+        "wget --version http://svc/",     # metadata flag exits before URL parsing
+    ])
+    def test_metadata_flags_are_readonly(self, cmd):
+        """``--version``/``--help`` print and exit BEFORE any URL parsing —
+        no network access, no file write. The standard probe a planning phase
+        uses to check the binary exists."""
+        assert is_readonly_host_command(cmd), host_command_rejection_reason(cmd)
+
+    @pytest.mark.parametrize("cmd", [
+        "wget --post-file=/etc/shadow --version",
+        "wget -o /tmp/log --version",
+    ])
+    def test_metadata_flag_does_not_excuse_a_write(self, cmd):
+        """The mutating scan runs FIRST: a write/upload form stays refused
+        even with a metadata flag riding alongside."""
+        assert not is_readonly_host_command(cmd), cmd
+
 
 class TestDdReadingIntoDiscard:
     """``dd if=<src> of=/dev/null`` is the standard read-throughput probe.
@@ -791,6 +812,18 @@ class TestBladeCliGuard:
         assert is_readonly_argv(cmd), cmd
 
     @pytest.mark.parametrize("cmd", [
+        # cobra prints help and exits before Run — verified live: exit 0,
+        # usage printed, `blade status --type create` unchanged (no record).
+        ["blade", "create", "mem", "load", "-h"],
+        ["blade", "create", "mem", "load", "--mode", "ram",
+         "--mem-percent", "80", "--timeout", "10", "-h"],
+        ["blade", "create", "k8s", "node-mem", "load", "--help"],
+        ["blade", "destroy", "-h"],
+    ])
+    def test_blade_help_flag_on_mutating_verb_is_readonly(self, cmd):
+        assert is_readonly_argv(cmd), cmd
+
+    @pytest.mark.parametrize("cmd", [
         ["blade", "create", "cpu", "fullload", "--cpu-percent", "80"],
         ["blade", "destroy", "e519ab5a1ff75531"],
         ["blade", "prepare"],
@@ -808,8 +841,191 @@ class TestBladeCliGuard:
             "blade status --uid e519ab5a1ff75531"
         )
 
+    def test_blade_create_help_inside_exec_probe_is_readonly(self):
+        # Flag-discovery probe during planning: `blade create <t> <a> -h`
+        # never creates an experiment (cobra help short-circuit).
+        assert is_readonly_kubectl_exec(
+            "chaosblade-tool-jlc95 -n default -- "
+            "blade create mem load -h"
+        )
+
     def test_blade_create_inside_exec_probe_not_readonly(self):
         assert not is_readonly_kubectl_exec(
             "chaosblade-tool-jlc95 -n default -- "
             "blade create cpu fullload --cpu-percent 80"
         )
+
+
+class TestUniversalMetadataProbe:
+    """``--version`` / ``--help`` / ``-V`` / ``-h`` — AND NOTHING ELSE — is a
+    read-only probe for ANY binary: GNU-style tools print and exit BEFORE any
+    action, so such an argv touches neither disk, network, nor process state.
+
+    Found by auditing every dual-use binary in this file with the two
+    standard probes: blade/dd/timeout/nice/numactl/swapon/systemctl/crictl/
+    ctr/docker/stress(-ng) all refused their own ``--version``. One universal
+    rule replaces a per-binary exemption for each.
+
+    The "every token is a metadata flag" shape is what keeps this
+    bypass-proof — a real command token alongside falls through to the
+    per-binary judge and stays refused.
+    """
+
+    BINARIES = [
+        "blade", "dd", "timeout", "nice", "numactl", "swapon", "systemctl",
+        "crictl", "ctr", "docker", "stress", "stress-ng", "wget", "tc",
+    ]
+
+    @pytest.mark.parametrize("binary", BINARIES)
+    @pytest.mark.parametrize("flag", ["--version", "--help", "-V", "-h"])
+    def test_pure_metadata_probe_readonly(self, binary, flag):
+        assert is_readonly_argv([binary, flag]), f"{binary} {flag}"
+        # Same verdict through the kubectl-exec inner path (shared judge).
+        assert is_readonly_inner_tokens([binary, flag])
+
+    @pytest.mark.parametrize("cmd", [
+        ["docker", "--version", "run", "alpine"],
+        ["blade", "--version", "create", "cpu", "fullload"],
+        ["systemctl", "--version", "start", "nginx"],
+        ["crictl", "--version", "rmp", "x"],
+        ["timeout", "--version", "60", "sh"],       # wrapper + wrapped cmd
+        ["dd", "--version", "of=/tmp/x"],           # real operand mixed in
+        ["nsenter", "--version"],                   # escape primitive, bare
+        ["chroot", "--help"],
+    ])
+    def test_metadata_flag_does_not_excuse_a_real_command(self, cmd):
+        assert not is_readonly_argv(cmd), cmd
+
+    def test_bare_wrapper_stays_refused(self):
+        """No arguments at all is not a metadata probe — fail closed."""
+        assert not is_readonly_argv(["timeout"])
+        assert not is_readonly_argv(["nice"])
+
+
+class TestExtendedProbeVocabulary:
+    """Audit follow-up: common read-only probes that were refused only because
+    the vocabulary was stale or the first-token judge was too narrow. Every
+    admitted form is paired with its mutating sibling below, so a future edit
+    that over-admits is caught as loudly as the original false rejection.
+    """
+
+    # Category 1 — pure diagnostics added to the name-only read-only table.
+    @pytest.mark.parametrize("cmd", [
+        ["who"], ["w"], ["last", "-n", "5"], ["groups"], ["locale"],
+        ["getconf", "PAGE_SIZE"], ["numastat"], ["dmidecode", "-t", "memory"],
+        ["lshw", "-short"], ["whereis", "wget"],
+        ["traceroute", "-n", "10.0.0.1"], ["arping", "-c", "2", "10.0.0.1"],
+    ])
+    def test_pure_diagnostics_readonly(self, cmd):
+        assert is_readonly_argv(cmd), cmd
+
+    # Category 4 — the two narrow-judge bugs: iptables with a ``-t`` prefix and
+    # systemctl verbs missing from the read-only set. Both blocked the drill
+    # mainline (NAT inspection is how network faults are verified).
+    @pytest.mark.parametrize("cmd", [
+        ["iptables", "-t", "nat", "-L", "-n"],
+        ["iptables", "-t", "filter", "-S"],
+        ["ip6tables", "-t", "mangle", "-L"],
+        ["iptables", "-L", "-n"],                       # still works unprefixed
+    ])
+    def test_iptables_table_prefix_readonly(self, cmd):
+        assert is_readonly_argv(cmd), cmd
+
+    @pytest.mark.parametrize("cmd", [
+        ["iptables", "-t", "nat", "-A", "POSTROUTING", "-j", "MASQUERADE"],
+        ["iptables", "-t", "filter", "-F"],
+        ["ip6tables", "-A", "INPUT", "-j", "DROP"],
+    ])
+    def test_iptables_table_prefix_still_rejects_mutation(self, cmd):
+        assert not is_readonly_argv(cmd), cmd
+
+    @pytest.mark.parametrize("cmd", [
+        ["systemctl", "cat", "kubelet"],
+        ["systemctl", "list-timers"],
+        ["systemctl", "list-dependencies", "kubelet"],
+        ["systemctl", "list-sockets"],
+    ])
+    def test_systemctl_listing_verbs_readonly(self, cmd):
+        assert is_readonly_argv(cmd), cmd
+
+    @pytest.mark.parametrize("cmd", [
+        ["systemctl", "restart", "kubelet"],
+        ["systemctl", "stop", "nginx"],
+    ])
+    def test_systemctl_mutating_verbs_still_rejected(self, cmd):
+        assert not is_readonly_argv(cmd), cmd
+
+
+class TestExtendedDualUseGuards:
+    """Category 2/3 — dual-use binaries admitted only in their read-only shape.
+
+    Each block pins the admitted probe AND its mutating sibling, so the guard
+    can never silently widen into an execution / write / state-change channel.
+    """
+
+    @pytest.mark.parametrize("cmd,ok", [
+        (["ifconfig"], True),
+        (["ifconfig", "-a"], True),
+        (["ifconfig", "eth0"], True),
+        (["ifconfig", "eth0", "down"], False),
+        (["ifconfig", "eth0", "10.0.0.1", "netmask", "255.255.255.0"], False),
+        (["ifconfig", "eth0", "mtu", "1500"], False),
+        (["ipvsadm"], True),
+        (["ipvsadm", "-Ln"], True),
+        (["ipvsadm", "-L", "--timeout"], True),
+        (["ipvsadm", "-A", "-t", "10.0.0.1:80"], False),
+        (["ipvsadm", "-D", "-t", "10.0.0.1:80"], False),
+        (["crontab", "-l"], True),
+        (["crontab", "-r"], False),
+        (["crontab", "-e"], False),
+        (["crontab", "/tmp/evil"], False),
+        (["timedatectl", "status"], True),
+        (["timedatectl", "list-timezones"], True),
+        (["timedatectl", "set-time", "2030-01-01"], False),
+        (["timedatectl", "set-ntp", "false"], False),
+        (["taskset", "-p", "123"], True),
+        (["taskset", "-p", "0x3", "123"], False),
+        (["taskset", "0x3", "sh"], False),
+        (["chrt", "-p", "123"], True),
+        (["chrt", "-m"], True),
+        (["chrt", "-f", "99", "123"], False),
+        (["resolvectl", "status"], True),
+        (["resolvectl", "flush-caches"], False),
+        (["resolvectl", "set-dns", "1.1.1.1"], False),
+        (["systemd-resolve", "--status"], True),
+        (["fdisk", "-l"], True),
+        (["fdisk", "/dev/sda"], False),
+        # parted is refused in EVERY form: strace on a live node shows it
+        # opens block devices O_RDWR even in list mode — an RW fd on a raw
+        # device is a write channel. ``fdisk -l`` is the admitted equivalent.
+        (["parted", "-l"], False),
+        (["parted", "/dev/sda", "mkpart"], False),
+        (["openssl", "version"], True),
+        (["openssl", "genrsa", "-out", "/tmp/k", "2048"], False),
+        (["openssl", "s_client", "-connect", "x:443"], False),
+        (["java", "-version"], True),
+        (["java", "-jar", "/tmp/app.jar"], False),
+        (["java", "-cp", "/tmp", "Main"], False),
+        (["rpm", "-qa"], True),
+        (["rpm", "-qf", "/usr/bin/curl"], True),
+        (["rpm", "-i", "x.rpm"], False),
+        (["rpm", "-e", "pkg"], False),
+        (["dpkg", "-l"], True),
+        (["dpkg", "-s", "pkg"], True),
+        (["dpkg", "-i", "x.deb"], False),
+        (["dpkg", "--purge", "pkg"], False),
+        (["apk", "info"], True),
+        (["apk", "search", "curl"], True),
+        (["apk", "add", "curl"], False),
+        (["apk", "del", "pkg"], False),
+    ])
+    def test_dual_use_verdicts(self, cmd, ok):
+        assert is_readonly_argv(cmd) == ok, " ".join(cmd)
+
+    def test_watch_unwraps_to_the_wrapped_command(self):
+        """``watch`` delegates to the command it repeats — safe because the
+        wrapped command still decides."""
+        assert is_readonly_argv(["watch", "-n", "1", "df", "-h"])
+        assert is_readonly_argv(["watch", "--interval", "2", "ss", "-tlnp"])
+        assert not is_readonly_argv(["watch", "rm", "-rf", "/data/x"])
+

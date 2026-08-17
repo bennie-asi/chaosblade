@@ -155,11 +155,12 @@ def test_every_rejection_path_uses_the_helper():
     )
 
 
-def test_helper_is_the_single_source_for_all_five_sites():
+def test_helper_is_the_single_source_for_all_seven_sites():
     src = textwrap.dedent(inspect.getsource(ic.make_intent_clarification))
-    assert src.count("await _reject_turn(") == 5, (
-        "expected all five rejection paths (2 pre-existing mismatch checks, "
-        "the single-fault gate, the batch mismatch check and the batch gate) "
+    assert src.count("await _reject_turn(") == 7, (
+        "expected all seven rejection paths (2 pre-existing mismatch checks, "
+        "the single-fault gate + its duration-contract gate, the batch "
+        "mismatch check, the batch gate + its duration-contract gate) "
         "to share the helper"
     )
 

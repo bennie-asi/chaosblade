@@ -12,7 +12,21 @@ from __future__ import annotations
 
 import pytest
 
+from chaos_agent.agent.target_guard.carriers import classify_host_operation
 from chaos_agent.agent.target_guard.recoverability import Recoverability, assess
+
+# The EXACT stoploop command task inject-e47de3e8 burned six minutes being
+# rejected for (skill case Pod_进程被杀死 path B): a rounds-capped crictl-stop
+# loop armed with a systemd-run timer whose payload pkills the loop. Both the
+# recoverability gate and the family classifier must clear it verbatim.
+_DRILL_STOPLOOP_CMD = (
+    "chroot /host sh -c 'systemd-run --on-active=60s "
+    "--unit=blade-stoploop-mysql sh -c \"pkill -f \\\"crictl sto\\$((0+0))p "
+    "-t 0\\\"; pkill -x crictl; true\" && sh -c \"for i in 1 2 3 4; do "
+    "SBX=$(crictl pods --name mysql -q | head -1); CID=$(crictl ps -q --pod "
+    "$SBX | head -1); [ -n \\\"$CID\\\" ] && crictl stop -t 0 $CID; sleep 15; "
+    "done\"'"
+)
 
 
 class TestBoundedTimerForms:
@@ -114,3 +128,321 @@ class TestTransparentMissingReasons:
     def test_missing_is_empty_when_recoverable(self):
         r = assess("stress-ng --cpu 2 --timeout 60", "cpu")
         assert r == Recoverability(True)
+
+
+class TestVocabularyExtensions:
+    """Equivalent syntax spellings a shell may emit must not be false-rejected."""
+
+    def test_kill_signal_name_spellings_bounded(self):
+        cmd = "kill -s STOP 1234 && sleep 300 && kill -s CONT 1234"
+        assert assess(cmd, "process").recoverable is True
+
+    def test_kill_sigstop_spelling_bounded(self):
+        cmd = "kill -SIGSTOP 1234 && sleep 300 && kill -SIGCONT 1234"
+        assert assess(cmd, "process").recoverable is True
+
+    def test_iptables_long_wait_flag_pairs(self):
+        cmd = (
+            "iptables --wait -A OUTPUT -j DROP && sleep 300 && "
+            "iptables --wait -D OUTPUT -j DROP"
+        )
+        assert assess(cmd, "network").recoverable is True
+
+    def test_iptables_wait_equals_form_pairs(self):
+        cmd = (
+            "iptables --wait=5 -A OUTPUT -j DROP && sleep 300 && "
+            "iptables --wait=5 -D OUTPUT -j DROP"
+        )
+        assert assess(cmd, "network").recoverable is True
+
+
+class TestTcDevicePairing:
+    """tc reversals pair by device — a del on another dev leaves the fault."""
+
+    def test_same_dev_del_bounded(self):
+        cmd = (
+            "tc qdisc add dev eth0 root netem loss 100% && sleep 300 && "
+            "tc qdisc del dev eth0 root"
+        )
+        assert assess(cmd, "network").recoverable is True
+
+    def test_other_dev_del_not_bounded(self):
+        cmd = (
+            "tc qdisc add dev eth0 root netem loss 100% && sleep 300 && "
+            "tc qdisc del dev eth1 root"
+        )
+        assert assess(cmd, "network").recoverable is False
+
+    def test_multi_dev_needs_every_dev_reversed(self):
+        cmd = (
+            "tc qdisc add dev eth0 root netem loss 100% && "
+            "tc qdisc add dev eth1 root netem loss 100% && sleep 300 && "
+            "tc qdisc del dev eth0 root"
+        )
+        assert assess(cmd, "network").recoverable is False
+
+    def test_device_less_add_falls_back_to_existence(self):
+        cmd = "tc qdisc add root netem loss 100% && sleep 300 && tc qdisc del root"
+        assert assess(cmd, "network").recoverable is True
+
+
+class TestDegenerateBounds:
+    """A formally present but absurd timer is no bound at all."""
+
+    def test_sleep_beyond_cap_not_bounded(self):
+        cmd = (
+            "iptables -I OUTPUT -j DROP && sleep 999999999 && "
+            "iptables -D OUTPUT -j DROP"
+        )
+        assert assess(cmd, "network").recoverable is False
+
+    def test_stress_timeout_beyond_cap_not_bounded(self):
+        assert (
+            assess("stress-ng --cpu 2 --timeout 999999999", "cpu").recoverable
+            is False
+        )
+
+    def test_sleep_at_the_cap_is_bounded(self):
+        cmd = (
+            "iptables -I OUTPUT -j DROP && sleep 2592000 && "
+            "iptables -D OUTPUT -j DROP"
+        )
+        assert assess(cmd, "network").recoverable is True
+
+    def test_systemd_calendar_value_not_value_capped(self):
+        # Calendar specs are recurrence, not durations — never value-capped.
+        cmd = (
+            "iptables -I OUTPUT -j DROP && "
+            "systemd-run --on-calendar=*:0/10 sh -c 'iptables -D OUTPUT -j DROP'"
+        )
+        assert assess(cmd, "network").recoverable is True
+
+
+class TestBoundedContainerStopLoop:
+    """Terminate-style process faults expressed through ``crictl stop``.
+
+    Regression anchor: task inject-e47de3e8. The skill's documented
+    kubectl-native process kill was rejected at BOTH carrier gates — the
+    family classifier had no ``crictl stop`` mapping and recoverability
+    knew only suspend/resume — so the model spent six minutes detouring to
+    another carrier. Two forms are cleared: the sustained mode (a
+    double-bounded loop — rounds cap + timer terminator) and the discrete
+    mode (a one-shot stop the kubelet self-heals). Loop-shaped variants
+    without both bounds keep failing closed: a host-side loop outlives the
+    agent, while one-shots are agent-paced. Arbitrary host kills (kill -9)
+    stay rejected — no kubelet rebuilds a killed host process.
+    """
+
+    def test_drill_stoploop_command_is_recoverable(self):
+        assert assess(_DRILL_STOPLOOP_CMD, "process").recoverable is True
+
+    def test_drill_stoploop_command_classifies_as_process(self):
+        assert classify_host_operation(_DRILL_STOPLOOP_CMD) == "process"
+
+    def test_seq_form_is_bounded(self):
+        cmd = (
+            "systemd-run --on-active=120s --unit=stoploop sh -c 'pkill -f "
+            "crictl-stoploop' && for i in $(seq 1 4); do crictl stop "
+            "-t 0 abc123; sleep 15; done"
+        )
+        assert assess(cmd, "process").recoverable is True
+
+    def test_bare_loop_without_timer_not_bounded(self):
+        cmd = (
+            "for i in 1 2 3 4; do crictl stop -t 0 abc123; sleep 15; done"
+        )
+        assert assess(cmd, "process").recoverable is False
+
+    def test_one_shot_container_stop_is_bounded_discrete(self):
+        # Discrete mode: a single instantaneous event the kubelet self-heals
+        # — no persistent state, no window, nothing to undo (skill case
+        # Pod_进程被杀死 path B discrete form).
+        assert assess("crictl stop -t 0 abc123", "process").recoverable is True
+
+    def test_one_shot_stop_sequence_is_bounded_discrete(self):
+        # Several one-shots in one command are still agent-paced and
+        # instantaneous — no loop means no durable mechanism.
+        assert assess(
+            "crictl stop -t 0 aaa; crictl stop -t 0 bbb", "process",
+        ).recoverable is True
+
+    def test_until_loop_around_stop_not_discrete(self):
+        assert assess(
+            "until false; do crictl stop -t 0 abc123; sleep 5; done",
+            "process",
+        ).recoverable is False
+
+    def test_watch_around_stop_not_discrete(self):
+        assert assess(
+            "watch -n 5 crictl stop -t 0 abc123", "process",
+        ).recoverable is False
+
+    def test_uncapped_while_loop_not_bounded(self):
+        cmd = (
+            "systemd-run --on-active=60s --unit=x sh -c 'pkill -f crictl' && "
+            "while true; do crictl stop -t 0 abc123; sleep 15; done"
+        )
+        assert assess(cmd, "process").recoverable is False
+
+    def test_loop_without_interval_not_bounded(self):
+        cmd = (
+            "systemd-run --on-active=60s --unit=x sh -c 'pkill -f crictl' && "
+            "for i in 1 2 3 4; do crictl stop -t 0 abc123; done"
+        )
+        assert assess(cmd, "process").recoverable is False
+
+    def test_timer_with_unrelated_payload_not_bounded(self):
+        # Timer present, but its payload does not terminate the loop — it
+        # bounds nothing, so the loop could outlive the drill window.
+        cmd = (
+            "systemd-run --on-active=60s --unit=x sh -c 'echo done' && "
+            "for i in 1 2 3 4; do crictl stop -t 0 abc123; sleep 15; done"
+        )
+        assert assess(cmd, "process").recoverable is False
+
+    def test_inspection_crictl_verbs_do_not_classify(self):
+        # ps/pods/inspect are read-only probes — never a process fault.
+        for verb in ("crictl ps", "crictl pods", "crictl inspect abc"):
+            assert classify_host_operation(verb) == ""
+
+    def test_one_shot_stop_classifies_and_discrete_gate_accepts(self):
+        # Family mapping is one-shot-agnostic; the recoverability gate
+        # accepts the one-shot form as the discrete mode.
+        assert classify_host_operation("crictl stop -t 0 abc123") == "process"
+        assert assess("crictl stop -t 0 abc123", "process").recoverable is True
+
+    def test_arbitrary_host_kill_still_not_bounded(self):
+        # A killed host process has no kubelet to rebuild it — only
+        # container stops are self-healing.
+        assert assess("kill -9 1234", "process").recoverable is False
+
+
+class TestTimeoutBoundedListener:
+    """Port occupation via a timeout(1)-bounded ``nc -l`` listener.
+
+    Regression anchor: skill case Node_网络故障_节点端口占用. The port is
+    held only while the listener runs, so ending the process IS the
+    recovery — no inverse rule exists to pair. A listener without a sane
+    bound, and a client-mode nc (no ``-l``), keep failing closed.
+    """
+
+    def test_timeout_wrapped_listener_is_recoverable(self):
+        cmd = "timeout 300 nc -l -p 8080 -k"
+        assert assess(cmd, "network").recoverable is True
+
+    def test_listener_classifies_as_network(self):
+        assert classify_host_operation("timeout 300 nc -l -p 8080 -k") == "network"
+
+    def test_self_timeout_flag_form_is_recoverable(self):
+        cmd = "nc -l -p 8080 --timeout=300"
+        assert assess(cmd, "network").recoverable is True
+
+    def test_unbounded_listener_not_recoverable(self):
+        assert assess("nc -l -p 8080 -k", "network").recoverable is False
+
+    def test_degenerate_timeout_not_recoverable(self):
+        assert (
+            assess("timeout 999999999 nc -l -p 8080 -k", "network").recoverable
+            is False
+        )
+
+    def test_client_mode_nc_does_not_classify(self):
+        # No ``-l``: a connect attempt occupies nothing — not a fault.
+        assert classify_host_operation("nc 10.0.0.1 80 < /dev/null") == ""
+
+
+class TestTimeoutBoundedIoBurn:
+    """IO pressure via a timeout(1)-bounded burner (dd/fio).
+
+    Regression anchor: skill cases Node_磁盘IO过高 /
+    Pod_Terminating_Volume卸载失败 used ``timeout 300 sh -c "while true;
+    do dd ...; done"`` — the burn loop is uncapped but the wrapping timeout
+    kills it, so the pressure self-ends. Disk FILLS do NOT qualify: killing
+    a fallocate leaves the bytes on disk, so fills keep needing a paired
+    reclaim.
+    """
+
+    def test_timeout_wrapped_burn_loop_is_recoverable(self):
+        cmd = (
+            "timeout 300 sh -c 'while true; do dd if=/dev/zero of=/data/burn "
+            "bs=1M count=512 oflag=direct; done'"
+        )
+        assert assess(cmd, "disk").recoverable is True
+
+    def test_timeout_wrapped_fio_is_recoverable(self):
+        cmd = "timeout 600 fio --name=burn --rw=randwrite --size=1G"
+        assert assess(cmd, "disk").recoverable is True
+
+    def test_unbounded_burn_loop_not_recoverable(self):
+        cmd = "while true; do dd if=/dev/zero of=/data/burn bs=1M; done"
+        assert assess(cmd, "disk").recoverable is False
+
+    def test_timeout_wrapped_fill_still_needs_reclaim(self):
+        # Killing the filler does not reclaim the bytes — fill semantics
+        # are deliberately excluded from the self-terminating bound.
+        cmd = "timeout 60 fallocate -l 10G /data/fill"
+        assert assess(cmd, "disk").recoverable is False
+
+    def test_fill_with_timer_and_reclaim_still_recoverable(self):
+        # The original paired-reclaim form is untouched by the burn bound.
+        cmd = (
+            "fallocate -l 10G /data/fill && systemd-run --on-active=300s "
+            "fallocate -d /data/fill"
+        )
+        assert assess(cmd, "disk").recoverable is True
+
+
+class TestTimerArmedFreezerSuspend:
+    """A cgroup-freezer suspend armed with a THAW timer BEFORE the freeze.
+
+    Regression anchor: skill cases Pod_进程异常_进程被挂起 /
+    Container_进程异常_Sidecar进程被挂起. The documented discipline is
+    arm-then-freeze: a frozen container cannot register its own rescue and
+    the carrier pod may be cleaned before the thaw is due, so the timer
+    whose payload writes THAWED to the SAME freezer.state must be armed
+    first. Every violation keeps failing closed.
+    """
+
+    _FREEZER_PATH = "/sys/fs/cgroup/freezer/kubepods/abc123/freezer.state"
+
+    def _armed_cmd(self, payload: str = None, arm_first: bool = True) -> str:
+        payload = payload or f"echo THAWED > {self._FREEZER_PATH}"
+        arm = f"systemd-run --on-active=120s --unit=blade-thaw sh -c '{payload}'"
+        freeze = f"echo FROZEN > {self._FREEZER_PATH}"
+        parts = (arm, freeze) if arm_first else (freeze, arm)
+        return "; sleep 1; ".join(parts)
+
+    def test_arm_then_freeze_is_recoverable(self):
+        assert assess(self._armed_cmd(), "process").recoverable is True
+
+    def test_freezer_write_classifies_as_process(self):
+        assert (
+            classify_host_operation(f"echo FROZEN > {self._FREEZER_PATH}")
+            == "process"
+        )
+        assert (
+            classify_host_operation(f"echo THAWED > {self._FREEZER_PATH}")
+            == "process"
+        )
+
+    def test_freeze_before_arm_not_recoverable(self):
+        # A rescue registered after the freeze may never run — the frozen
+        # container cannot exec and the carrier may already be gone.
+        assert (
+            assess(self._armed_cmd(arm_first=False), "process").recoverable
+            is False
+        )
+
+    def test_timer_payload_without_thaw_not_recoverable(self):
+        assert (
+            assess(self._armed_cmd(payload="echo done"), "process").recoverable
+            is False
+        )
+
+    def test_thaw_to_different_state_file_not_recoverable(self):
+        other = f"echo THAWED > {self._FREEZER_PATH}.other"
+        assert assess(self._armed_cmd(payload=other), "process").recoverable is False
+
+    def test_bare_freeze_without_timer_not_recoverable(self):
+        cmd = f"echo FROZEN > {self._FREEZER_PATH}"
+        assert assess(cmd, "process").recoverable is False

@@ -684,6 +684,22 @@ class AgentState(MessagesState):
     # cluster on every screener iteration — in-band kubectl on the very API
     # path a network fault may be severing (self-poisoning).
     vehicle_probe_misses: Optional[tuple[str, ...]] = None
+    # Pod → nodeName bindings resolved by the screener for exec-vehicle
+    # node binding (host-level ``blade create`` inside a tool pod carries
+    # no selector; the fault lands on the pod's host node). Cached so the
+    # binding is probed once per pod per task, never per screener round.
+    # Entries are (pod_name, node_name) pairs; an empty node string means
+    # the probe failed (negative entry, keeps fail-closed review).
+    exec_pod_node_bindings: Optional[tuple[tuple[str, str], ...]] = None
+    # Label selector → current pod names, resolved by the screener for the
+    # selector cross-shape comparison (labels-vs-names): the guard policy
+    # compares selectors statically and cannot see that an approved name set
+    # and an executed label selector pick the same pods. Cached so each
+    # (namespace, selector) is probed once per task, never per screener
+    # round. Entries are (probe_key, names_tuple) pairs; an empty tuple
+    # means the probe failed or matched nothing (negative entry, keeps the
+    # fail-closed review).
+    selector_name_probes: Optional[tuple[tuple[str, tuple[str, ...]], ...]] = None
     blade_parsed_flags: Optional[dict] = None    # {"path": "/tmp", "percent": "85", ...}
     direct: bool = False                 # True: skip LLM, go direct path
     original_replicas: Optional[dict] = None     # kubectl scale-based faults: {resource -> count}

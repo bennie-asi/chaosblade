@@ -209,6 +209,18 @@ class TestSuggestedFormsActuallyPass:
         # Process suspend/resume pairing.
         ("process",
          "chroot /host sh -c 'kill -STOP 4242 && sleep 60 && kill -CONT 4242'"),
+        # The terminate-style variant the process hint now names: a rounds-
+        # capped crictl-stop loop armed with a timer that pkills the loop
+        # (skill case Pod_进程被杀死 path B, task inject-e47de3e8).
+        ("process",
+         "chroot /host sh -c 'systemd-run --on-active=60s --unit=stoploop "
+         "sh -c \"pkill -f crictl-stoploop\" && for i in 1 2 3 4; do "
+         "crictl stop -t 0 abc123; sleep 15; done'"),
+        # The discrete variant the hint also names: a one-shot crictl stop —
+        # an instantaneous event the kubelet self-heals (path-B discrete
+        # form, task inject-ffb519da).
+        ("process",
+         "chroot /host sh -c 'crictl stop -t 0 abc123'"),
     ])
     def test_recommended_form_is_accepted(self, family, command):
         from chaos_agent.agent.target_guard.recoverability import assess

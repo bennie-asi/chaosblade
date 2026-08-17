@@ -1045,3 +1045,36 @@ class TestHostInject:
     def test_host_read_is_readonly(self):
         et = infer_effective_target("host_read", {"command": "df -h"})
         assert et.scope == SCOPE_READONLY
+
+
+class TestExecReadonlyProbeReason:
+    """The exec branch must consume the REASON view of the read-only judge,
+    not the boolean view — the cause rides ``readonly_probe_reason`` so the
+    read-only phase screeners can render the verdict they actually reached
+    (task inject-a9ea4da7: the boolean flattening produced the generic
+    "classifier verdict: destructive" template and model over-generalisation).
+    """
+
+    def test_malformed_probe_carries_operator_reason(self):
+        et = infer_effective_target("kubectl_read", {
+            "subcommand": "exec",
+            "v_args": "pod-x -n ns -- sh -c 'echo OK; command -v stress-ng'",
+        })
+        assert et.scope == "pod"
+        assert "shell control operator" in et.readonly_probe_reason
+
+    def test_unknown_binary_carries_binary_reason(self):
+        et = infer_effective_target("kubectl_read", {
+            "subcommand": "exec",
+            "v_args": "pod-x -n ns -- rm -rf /data/cache",
+        })
+        assert et.scope == "pod"
+        assert "'rm' is not a known read-only diagnostic" in et.readonly_probe_reason
+
+    def test_valid_probe_stays_readonly_without_reason(self):
+        et = infer_effective_target("kubectl_read", {
+            "subcommand": "exec",
+            "v_args": "pod-x -n ns -- which stress-ng",
+        })
+        assert et.scope == SCOPE_READONLY
+        assert et.readonly_probe_reason == ""

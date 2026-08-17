@@ -62,7 +62,10 @@ class TestPhaseScreenerCapability:
         # The legitimate sibling is not executed — it gets a skipped notice.
         assert "skipped" in by_id["c1"].content
         assert by_id["c2"].content.startswith("Error:")
-        assert "capability profile" in by_id["c2"].content
+        # Truthful capability cause: names BOTH the profile the tool belongs
+        # to and the environment in force (explain_tool_refusal) — the old
+        # generic "capability profile" sentence named neither.
+        assert "provided for the host profile" in by_id["c2"].content
 
     @pytest.mark.asyncio
     async def test_every_tool_call_gets_an_answer(self):

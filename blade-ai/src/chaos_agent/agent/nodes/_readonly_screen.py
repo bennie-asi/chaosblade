@@ -36,8 +36,16 @@ def find_readonly_violations(tool_calls) -> list[tuple]:
     """Classify *tool_calls* against the read-only phase discipline.
 
     Pure classification — no message mutation. Returns one
-    ``(tool_name, tool_call_id, detail)`` tuple per offending call
-    (``detail`` is the raw command when the classifier surfaced one).
+    ``(tool_name, tool_call_id, detail, probe_reason, effective)`` tuple
+    per offending call (``detail`` is the raw command when the classifier
+    surfaced one; ``probe_reason`` is the judge's actual cause when the
+    refusal is an exec whose inner command failed the read-only probe
+    test — empty otherwise; ``effective`` is the full verdict object so
+    the renderer can apply the shared truth-first chain —
+    ``_guard_rejection.read_only_rejection_reason`` — instead of
+    re-inventing the cause from the two string fields. Dropping it is
+    how the recorded ``reject_detail`` (host-escape primitive, banned
+    subcommand, ...) used to be lost on this path).
     Verdict rules, shared with every caller:
 
       - verdicts come from the target_guard classifier (no hand-rolled
@@ -77,6 +85,8 @@ def find_readonly_violations(tool_calls) -> list[tuple]:
                 name or "<unknown call>",
                 tc_id,
                 effective.raw_command or name or "<unknown call>",
+                effective.readonly_probe_reason,
+                effective,
             ))
     return violations
 

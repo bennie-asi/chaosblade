@@ -94,7 +94,20 @@ def make_phase_screener(
         ``(node, route_fn)``: the async graph node and its conditional
         edge dispatcher reading ``state.screener_route``.
     """
-    from chaos_agent.agent.capabilities import screen_tool_calls, tool_call_field
+    from chaos_agent.agent.capabilities import (
+        explain_tool_refusal,
+        screen_tool_calls,
+        tool_call_field,
+    )
+    from chaos_agent.agent.nodes._guard_rejection import (
+        is_malformed_probe,
+        read_only_rejection_reason,
+        scope_floor_note,
+    )
+    from chaos_agent.agent.target_guard.classifier import (
+        SCOPE_BANNED,
+        SCOPE_UNKNOWN,
+    )
 
     async def screener_node(state: dict) -> dict:
         messages = list(state.get("messages") or [])
@@ -152,27 +165,65 @@ def make_phase_screener(
         )
 
         ro_details = {v[1]: v[2] for v in ro_violations}
+        ro_effectives = {v[1]: v[4] for v in ro_violations}
         fabricated: list[ToolMessage] = []
         for idx, c in enumerate(calls):
             c_id = tool_call_field(c, "id")
             c_name = tool_call_field(c, "name") or "<unknown tool>"
             if c_id in rejected_ids:
+                # Truthful cause from the module holding the resolved profile
+                # (names the profile in force and what to use instead) — the
+                # old generic sentence was the same for every tool in every
+                # profile, which is the exact regression intent_screener fixed.
+                cap_reason, cap_suggestion = explain_tool_refusal(
+                    c_name, state, capability_phase,
+                )
                 content = (
                     f"Error: capability_profile_violation\n\n"
-                    f"'{c_name}' is not available for the current "
-                    f"environment capability profile. Use only the tools "
-                    f"bound for this environment — a tool from another "
-                    f"execution domain cannot reach this target."
+                    f"{cap_reason} {cap_suggestion}"
                 )
                 if idx == len(calls) - 1:
                     content += stop_hint
             elif c_id in ro_ids:
+                # Shared truth-first renderer (reject_detail > probe reason
+                # > raw command > scope word) — same chain phase1_screener
+                # uses. Rendering from the two string fields alone (the old
+                # way) silently dropped the recorded reject_detail, e.g. the
+                # host-escape primitive the classifier had named.
+                eff = ro_effectives[c_id]
+                ro_reason, ro_suggestion = read_only_rejection_reason(eff)
+                probe_refusal = is_malformed_probe(eff)
+                fix_block = (
+                    f"How to fix: {ro_suggestion}\n" if ro_suggestion else ""
+                )
+                shape_note = (
+                    "This refusal is about the COMMAND SHAPE, not about the "
+                    "tool itself — a correctly shaped read-only probe IS "
+                    "allowed here and will pass.\n"
+                    if probe_refusal else ""
+                )
+                # Anti-bypass floor only for BANNED/UNKNOWN: that half of
+                # scope_floor_note is phase-neutral ("all mutation paths are
+                # blocked here by the same classifier"). Its other half names
+                # Phase 2 as the forward path — planning-specific and wrong
+                # here, where phase_duty already carries the boundary frame.
+                floor_note = (
+                    scope_floor_note(eff.scope)
+                    if not probe_refusal
+                    and eff.scope in (SCOPE_BANNED, SCOPE_UNKNOWN)
+                    else ""
+                )
                 content = (
                     f"Error: readonly_phase_violation\n\n"
                     f"'{ro_details.get(c_id, c_name)}' was REFUSED and "
-                    f"nothing was executed. {phase_duty}\n\n"
+                    f"nothing was executed. {phase_duty}\n"
+                    f"Reason: {ro_reason}\n"
+                    f"{fix_block}"
+                    f"{shape_note}"
                     f"{verdict_guidance}"
                 )
+                if floor_note:
+                    content += f"\n\n{floor_note}"
                 if idx == len(calls) - 1:
                     content += stop_hint
             else:

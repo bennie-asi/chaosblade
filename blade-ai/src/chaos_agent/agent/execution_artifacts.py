@@ -465,6 +465,53 @@ def _tool_result_failed(message: ToolMessage) -> bool:
     return content.startswith("Error:") or content.startswith("[target_guard]")
 
 
+def _systemd_timer_seconds(inner: str) -> int:
+    """The fault window a systemd-run transient timer arms, in seconds.
+
+    A duration-style ``--on-active/--on-boot/--on-startup/--on-unit-active``
+    value is a fixed delay and converts to seconds (systemd duration
+    semantics: a bare number is seconds; ``s``/``min``/``h`` suffixes).
+    ``--on-calendar`` is a recurrence spec with no single firing delay, and a
+    polyglot value that does not parse is no deadline at all — both return 0.
+    """
+    best = 0
+    for value in re.findall(
+        r"--on-(?:active|boot|startup|unit-active)=(\S+)", inner,
+    ):
+        match = re.fullmatch(r"(\d+)([a-z]*)", value.lower())
+        if not match:
+            continue
+        number, unit = int(match.group(1)), match.group(2)
+        if unit in ("", "s", "sec", "second", "seconds"):
+            seconds = number
+        elif unit in ("m", "min", "minute", "minutes"):
+            seconds = number * 60
+        elif unit in ("h", "hr", "hour", "hours"):
+            seconds = number * 3600
+        else:
+            continue
+        best = max(best, seconds)
+    return best
+
+
+def _timeout_bound_seconds(inner: str) -> int:
+    """The fault window a ``timeout N`` / ``--timeout N`` self-termination arms.
+
+    Self-terminating forms (a timeout-wrapped IO burn loop, a bounded nc
+    listener, a stressor with ``--timeout``) carry no systemd timer and no
+    recovery-meaningful sleep — their bound IS the window. Zero when no
+    positive bound is present.
+    """
+    best = 0
+    for pattern in (
+        r"\btimeout\s+([1-9][0-9]*)\b",
+        r"--timeout(?:=|\s+)([1-9][0-9]*)",
+    ):
+        for value in re.findall(pattern, inner):
+            best = max(best, int(value))
+    return best
+
+
 def _mark_bounded_host_recovery(
     artifacts: dict[str, dict],
     v_args: str,
@@ -488,9 +535,21 @@ def _mark_bounded_host_recovery(
     family = classify_host_operation(inner)
     if not family or not host_operation_has_bounded_recovery(inner, family):
         return
-    timer = re.search(r"\bsleep\s+([1-9][0-9]*)\b", inner)
-    if not timer:
-        return
+    # The deadline is the FAULT WINDOW, not any sleep in the command. A
+    # timer-armed stop loop carries a short loop-interval sleep (e.g.
+    # ``sleep 15`` between rounds) while its window is the systemd-run
+    # duration — arming from the interval released the carrier while the
+    # fault was still running (task inject-e47de3e8 review). Prefer the
+    # timer when it parses to a fixed delay, then a self-termination bound
+    # (timeout N / --timeout), then the sleep-based form's old reading.
+    timeout_seconds = _systemd_timer_seconds(inner)
+    if not timeout_seconds:
+        timeout_seconds = _timeout_bound_seconds(inner)
+    if not timeout_seconds:
+        timer = re.search(r"\bsleep\s+([1-9][0-9]*)\b", inner)
+        if not timer:
+            return
+        timeout_seconds = int(timer.group(1))
     pod_name, namespace = _exec_pod_identity(outer)
     if not pod_name:
         return
@@ -505,7 +564,6 @@ def _mark_bounded_host_recovery(
     artifact = matches[0]
     if artifact.get("host_exec_tool_call_id") == tool_call_id:
         return
-    timeout_seconds = int(timer.group(1))
     artifact["status"] = "recovery_armed"
     artifact["host_exec_tool_call_id"] = tool_call_id
     artifact["recovery_timeout_seconds"] = timeout_seconds

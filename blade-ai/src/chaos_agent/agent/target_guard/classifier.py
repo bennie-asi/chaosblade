@@ -1645,15 +1645,21 @@ def _classify_kubectl_exec(args: list[str], raw_command: str) -> EffectiveTarget
     # not drift). Reached only AFTER the escape / mutating-fault-binary checks
     # above, so ``iptables -A`` / ``chroot`` / ``stress`` never land here — the
     # shared classifier returns False for them and this branch is skipped.
-    from chaos_agent.tools.readonly import is_readonly_inner_tokens
-    if is_readonly_inner_tokens(inner):
+    from chaos_agent.tools.readonly import readonly_inner_tokens_reason
+
+    probe_reason = readonly_inner_tokens_reason(inner)
+    if probe_reason is None:
         return EffectiveTarget(
             scope=SCOPE_READONLY, namespace="",
             raw_command=raw_command, confidence=ConfidenceLevel.HIGH,
         )
 
-    # Plain shell command (rm/kill/etc) — acts on the pod's own
-    # filesystem/process space. scope=pod is correct.
+    # Plain shell command (rm/kill/etc) or a MALFORMED probe (shell control
+    # operators, unknown binary) — acts on the pod's own filesystem/process
+    # space, so scope=pod is correct for Phase 2. The read-only phase screeners
+    # additionally need the verdict's CAUSE, so carry the reason the shared
+    # judge actually reached — never flatten it to a boolean and let the
+    # screeners re-invent a generic template.
     #
     # Vehicle identity (exec into the task's own injection machinery) is
     # resolved DATA-side by the screener — task-registered artifacts and
@@ -1664,6 +1670,7 @@ def _classify_kubectl_exec(args: list[str], raw_command: str) -> EffectiveTarget
     return EffectiveTarget(
         scope="pod", namespace=ns, names=(pod_name,),
         raw_command=raw_command, confidence=ConfidenceLevel.HIGH,
+        readonly_probe_reason=probe_reason,
     )
 
 
@@ -1747,6 +1754,23 @@ def _classify_inline_blade(
     else:
         effective_names = ()
 
+    # Host-level blade (no ``k8s`` prefix) inside a kubectl exec carries
+    # NO selector: the fault lands on whatever node hosts the exec'd pod.
+    # Record the pod so the screener can resolve the node binding
+    # DATA-side (pod → nodeName → approved name set). The classifier
+    # stays static and never guesses a node name itself.
+    exec_pod_name = ""
+    exec_pod_namespace = ""
+    if (
+        not is_k8s
+        and scope == "node"
+        and fallback_pod
+        and not effective_names
+        and not labels
+    ):
+        exec_pod_name = fallback_pod
+        exec_pod_namespace = fallback_ns
+
     return EffectiveTarget(
         scope=scope,
         namespace=effective_ns,
@@ -1757,6 +1781,8 @@ def _classify_inline_blade(
         confidence=ConfidenceLevel.HIGH,
         raw_command=raw_command,
         is_tier1_exec=is_tier1,
+        exec_pod_name=exec_pod_name,
+        exec_pod_namespace=exec_pod_namespace,
     )
 
 

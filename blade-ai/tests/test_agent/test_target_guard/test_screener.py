@@ -1047,6 +1047,23 @@ class TestBoundedRecoveryFamilies:
         cmd = "chroot /host sh -c 'kill -STOP 1234 && sleep 300'"
         assert host_operation_has_bounded_recovery(cmd, "process") is False
 
+    def test_process_bounded_crictl_stop_loop_is_bounded(self):
+        # The terminate-style sustained kill the skill documents (path B):
+        # a rounds-capped crictl-stop loop armed with a timer that pkills
+        # the loop. Double-bounded, so the carrier gate clears it.
+        cmd = (
+            "chroot /host sh -c 'systemd-run --on-active=60s --unit=stoploop "
+            "sh -c \"pkill -f crictl-stoploop\" && for i in 1 2 3 4; do "
+            "crictl stop -t 0 abc123; sleep 15; done'"
+        )
+        assert host_operation_has_bounded_recovery(cmd, "process") is True
+
+    def test_process_one_shot_crictl_stop_is_bounded_discrete(self):
+        # Discrete mode: an instantaneous container stop the kubelet
+        # self-heals — no window to arm, nothing to undo.
+        cmd = "chroot /host sh -c 'crictl stop -t 0 abc123'"
+        assert host_operation_has_bounded_recovery(cmd, "process") is True
+
     def test_disk_fill_with_truncate_reclaim_is_bounded(self):
         cmd = (
             "chroot /host sh -c 'dd if=/dev/zero of=/host/tmp/fill bs=1M "
@@ -1233,6 +1250,182 @@ class TestCarrierHardeningIntegration:
         delta = await tool_screener(state)
         assert delta["screener_route"] == SCREENER_ROUTE_RETRY
         assert "REJECT_BANNED" in delta["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_process_bounded_crictl_stop_loop_passes(self):
+        """End-to-end regression for task inject-e47de3e8.
+
+        The skill's documented terminate-style sustained process kill — a
+        rounds-capped ``crictl stop`` loop armed with a systemd-run timer
+        whose payload pkills the loop — was rejected at BOTH carrier gates
+        (no ``crictl stop`` family mapping; recoverability knew only
+        suspend/resume), burning six minutes of carrier detours. With the
+        family mapping and the bounded-loop recognition in place, the same
+        shape clears the screener.
+        """
+        settings.target_guard_enforcing = True
+        cmd = (
+            "node-debugger-node-a-abc12 -n kubewiz -- chroot /host sh -c "
+            "'systemd-run --on-active=60s --unit=stoploop sh -c \"pkill -f "
+            "crictl-stoploop\" && for i in 1 2 3 4; do crictl stop -t 0 "
+            "abc123; sleep 15; done'"
+        )
+        state = {
+            "messages": [_ai_with_tool_call("kubectl", {
+                "subcommand": "exec", "v_args": cmd,
+            })],
+            "approved_target": _approved_node_process(),
+            "execution_artifacts": [_debug_artifact(family="process")],
+        }
+        with patch(
+            "chaos_agent.agent.nodes.planning.tool_screener.registered_carrier_is_current",
+            new=AsyncMock(return_value=True),
+        ):
+            delta = await tool_screener(state)
+        assert delta["screener_route"] == SCREENER_ROUTE_PASS
+
+    @pytest.mark.asyncio
+    async def test_process_one_shot_crictl_stop_is_rejected(self):
+        # One-shot terminate has no loop to bound and no early-end handle —
+        # it keeps failing closed even though the family now maps.
+        settings.target_guard_enforcing = True
+        cmd = (
+            "node-debugger-node-a-abc12 -n kubewiz -- chroot /host sh -c "
+            "'crictl stop -t 0 abc123'"
+        )
+        state = {
+            "messages": [_ai_with_tool_call("kubectl", {
+                "subcommand": "exec", "v_args": cmd,
+            })],
+            "approved_target": _approved_node_process(),
+            "execution_artifacts": [_debug_artifact(family="process")],
+        }
+        delta = await tool_screener(state)
+        assert delta["screener_route"] == SCREENER_ROUTE_RETRY
+
+    @pytest.mark.asyncio
+    async def test_network_timeout_bounded_listener_passes(self):
+        """A port-occupation fault as a timeout-bounded ``nc -l`` listener.
+
+        The port is held only while the listener runs — ending the process
+        IS the recovery, no inverse rule exists. The documented skill form
+        (Node_网络故障_节点端口占用) clears the screener; the unbounded
+        listener keeps failing closed at the recoverability gate.
+        """
+        settings.target_guard_enforcing = True
+        cmd = (
+            "node-debugger-node-a-abc12 -n kubewiz -- chroot /host sh -c "
+            "'timeout 300 nc -l -p 8080 -k'"
+        )
+        state = {
+            "messages": [_ai_with_tool_call("kubectl", {
+                "subcommand": "exec", "v_args": cmd,
+            })],
+            "approved_target": _approved_node_network(),
+            "execution_artifacts": [_debug_artifact()],
+        }
+        with patch(
+            "chaos_agent.agent.nodes.planning.tool_screener.registered_carrier_is_current",
+            new=AsyncMock(return_value=True),
+        ):
+            delta = await tool_screener(state)
+        assert delta["screener_route"] == SCREENER_ROUTE_PASS
+
+    @pytest.mark.asyncio
+    async def test_disk_timeout_bounded_burn_passes(self):
+        """An IO-pressure burn wrapped in timeout(1) self-terminates.
+
+        The wrapping timeout kills the burner, so the pressure self-ends —
+        no reclaim pairing is needed (fills do NOT qualify for this bound).
+        """
+        settings.target_guard_enforcing = True
+        cmd = (
+            "node-debugger-node-a-abc12 -n kubewiz -- chroot /host sh -c "
+            "'timeout 300 sh -c \"while true; do dd if=/dev/zero "
+            "of=/host/tmp/burn bs=1M count=512 oflag=direct; done\"'"
+        )
+        state = {
+            "messages": [_ai_with_tool_call("kubectl", {
+                "subcommand": "exec", "v_args": cmd,
+            })],
+            "approved_target": _approved_node_disk(),
+            "execution_artifacts": [_debug_artifact(family="disk")],
+        }
+        with patch(
+            "chaos_agent.agent.nodes.planning.tool_screener.registered_carrier_is_current",
+            new=AsyncMock(return_value=True),
+        ):
+            delta = await tool_screener(state)
+        assert delta["screener_route"] == SCREENER_ROUTE_PASS
+
+    @pytest.mark.asyncio
+    async def test_process_timer_armed_freezer_suspend_passes(self):
+        """The documented cgroup-freezer suspend: THAW timer armed BEFORE
+        the FROZEN write, aimed at the same freezer.state."""
+        settings.target_guard_enforcing = True
+        freezer = "/sys/fs/cgroup/freezer/kubepods/abc123/freezer.state"
+        cmd = (
+            "node-debugger-node-a-abc12 -n kubewiz -- chroot /host sh -c "
+            "'systemd-run --on-active=120s --unit=blade-thaw sh -c \"echo "
+            f"THAWED > {freezer}\"; sleep 1; echo FROZEN > {freezer}'"
+        )
+        state = {
+            "messages": [_ai_with_tool_call("kubectl", {
+                "subcommand": "exec", "v_args": cmd,
+            })],
+            "approved_target": _approved_node_process(),
+            "execution_artifacts": [_debug_artifact(family="process")],
+        }
+        with patch(
+            "chaos_agent.agent.nodes.planning.tool_screener.registered_carrier_is_current",
+            new=AsyncMock(return_value=True),
+        ):
+            delta = await tool_screener(state)
+        assert delta["screener_route"] == SCREENER_ROUTE_PASS
+
+    @pytest.mark.asyncio
+    async def test_process_one_shot_crictl_stop_discrete_passes(self):
+        """Discrete mode through the exec-carrier channel: an instantaneous
+        container stop the kubelet self-heals. Regression anchor: task
+        inject-ffb519da ran the same mutation via kubectl-debug-direct;
+        both channels must judge the same command shape identically."""
+        settings.target_guard_enforcing = True
+        cmd = (
+            "node-debugger-node-a-abc12 -n kubewiz -- chroot /host sh -c "
+            "'crictl stop -t 0 abc123'"
+        )
+        state = {
+            "messages": [_ai_with_tool_call("kubectl", {
+                "subcommand": "exec", "v_args": cmd,
+            })],
+            "approved_target": _approved_node_process(),
+            "execution_artifacts": [_debug_artifact(family="process")],
+        }
+        with patch(
+            "chaos_agent.agent.nodes.planning.tool_screener.registered_carrier_is_current",
+            new=AsyncMock(return_value=True),
+        ):
+            delta = await tool_screener(state)
+        assert delta["screener_route"] == SCREENER_ROUTE_PASS
+
+    @pytest.mark.asyncio
+    async def test_process_bare_freezer_freeze_is_rejected(self):
+        # A freeze with no armed thaw has no rescue — keep failing closed.
+        settings.target_guard_enforcing = True
+        cmd = (
+            "node-debugger-node-a-abc12 -n kubewiz -- chroot /host sh -c "
+            "'echo FROZEN > /sys/fs/cgroup/freezer/kubepods/abc123/"
+            "freezer.state'"
+        )
+        state = {
+            "messages": [_ai_with_tool_call("kubectl", {
+                "subcommand": "exec", "v_args": cmd,
+            })],
+            "approved_target": _approved_node_process(),
+            "execution_artifacts": [_debug_artifact(family="process")],
+        }
+        delta = await tool_screener(state)
+        assert delta["screener_route"] == SCREENER_ROUTE_RETRY
 
     @pytest.mark.asyncio
     async def test_systemd_run_network_injection_passes(self):

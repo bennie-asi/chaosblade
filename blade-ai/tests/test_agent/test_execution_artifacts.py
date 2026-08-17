@@ -218,6 +218,136 @@ def test_successful_bounded_host_exec_arms_recovery_deadline():
     assert artifacts[0]["recovery_deadline_epoch"] == 1600
 
 
+def _bounded_exec_with_command(command: str):
+    return _debug_messages() + [
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "kubectl",
+                "args": {"subcommand": "exec", "v_args": command},
+                "id": "tc-exec",
+            }],
+        ),
+        ToolMessage(
+            content="injection started",
+            name="kubectl",
+            tool_call_id="tc-exec",
+        ),
+    ]
+
+
+def test_stoploop_arms_deadline_from_timer_not_loop_interval():
+    # A timer-armed crictl-stop loop carries a SHORT loop-interval sleep;
+    # the fault window is the systemd-run duration. Arming from the interval
+    # would release the carrier while the loop still runs.
+    command = (
+        "node-debugger-n1-abc12 -n kubewiz -- chroot /host sh -c "
+        "'systemd-run --on-active=60s --unit=blade-stoploop-mysql sh -c "
+        "\"pkill -f crictl-stoploop\" && for i in 1 2 3 4; do crictl stop "
+        "-t 0 abc123; sleep 15; done'"
+    )
+    with patch(
+        "chaos_agent.agent.execution_artifacts.time.time", return_value=1000,
+    ):
+        artifacts = collect_execution_artifacts(_bounded_exec_with_command(command))
+
+    assert artifacts[0]["status"] == "recovery_armed"
+    assert artifacts[0]["recovery_timeout_seconds"] == 60
+    assert artifacts[0]["recovery_deadline_epoch"] == 1060
+
+
+def test_systemd_run_timer_form_arms_deadline_without_sleep():
+    # A timer carrying the inverse has no sleep at all — its window IS the
+    # timer duration. Before this was read from sleep only, so the carrier
+    # was never armed and could take a second mutation mid-fault.
+    command = (
+        "node-debugger-n1-abc12 -n kubewiz -- chroot /host sh -c "
+        "'iptables -I OUTPUT -j DROP && systemd-run --on-active=600s "
+        "iptables -D OUTPUT -j DROP'"
+    )
+    with patch(
+        "chaos_agent.agent.execution_artifacts.time.time", return_value=1000,
+    ):
+        artifacts = collect_execution_artifacts(_bounded_exec_with_command(command))
+
+    assert artifacts[0]["status"] == "recovery_armed"
+    assert artifacts[0]["recovery_timeout_seconds"] == 600
+    assert artifacts[0]["recovery_deadline_epoch"] == 1600
+
+
+def test_timeout_bounded_listener_arms_deadline_from_timeout():
+    # Self-terminating forms carry neither a systemd timer nor a recovery
+    # sleep — the ``timeout N`` bound IS the fault window. Reading sleep
+    # only would never arm the carrier, leaving the double-injection gate
+    # sealed forever.
+    command = (
+        "node-debugger-n1-abc12 -n kubewiz -- chroot /host sh -c "
+        "'timeout 300 nc -l -p 8080 -k'"
+    )
+    with patch(
+        "chaos_agent.agent.execution_artifacts.time.time", return_value=1000,
+    ):
+        artifacts = collect_execution_artifacts(_bounded_exec_with_command(command))
+
+    assert artifacts[0]["status"] == "recovery_armed"
+    assert artifacts[0]["recovery_timeout_seconds"] == 300
+    assert artifacts[0]["recovery_deadline_epoch"] == 1300
+
+
+def test_timeout_bounded_burn_loop_arms_deadline_from_timeout():
+    command = (
+        "node-debugger-n1-abc12 -n kubewiz -- chroot /host sh -c "
+        "'timeout 300 sh -c \"while true; do dd if=/dev/zero of=/host/tmp/"
+        "burn bs=1M count=512 oflag=direct; done\"'"
+    )
+    with patch(
+        "chaos_agent.agent.execution_artifacts.time.time", return_value=1000,
+    ):
+        artifacts = collect_execution_artifacts(_bounded_exec_with_command(command))
+
+    assert artifacts[0]["status"] == "recovery_armed"
+    assert artifacts[0]["recovery_timeout_seconds"] == 300
+    assert artifacts[0]["recovery_deadline_epoch"] == 1300
+
+
+def test_freezer_suspend_arms_deadline_from_thaw_timer_not_gap_sleep():
+    # The arm-then-freeze suspend carries a short gap sleep between arming
+    # and freezing; the fault window is the THAW timer's duration.
+    command = (
+        "node-debugger-n1-abc12 -n kubewiz -- chroot /host sh -c "
+        "'systemd-run --on-active=120s --unit=blade-thaw sh -c \"echo THAWED "
+        "> /sys/fs/cgroup/freezer/kubepods/abc123/freezer.state\"; sleep 1; "
+        "echo FROZEN > /sys/fs/cgroup/freezer/kubepods/abc123/freezer.state'"
+    )
+    with patch(
+        "chaos_agent.agent.execution_artifacts.time.time", return_value=1000,
+    ):
+        artifacts = collect_execution_artifacts(_bounded_exec_with_command(command))
+
+    assert artifacts[0]["status"] == "recovery_armed"
+    assert artifacts[0]["recovery_timeout_seconds"] == 120
+    assert artifacts[0]["recovery_deadline_epoch"] == 1120
+
+
+def test_discrete_one_shot_stop_passes_gate_but_arms_no_deadline():
+    # A one-shot crictl stop is an instantaneous event the kubelet
+    # self-heals — it clears the bounded-recovery gate, but carries no
+    # fault WINDOW, so the carrier must not be armed: no deadline means
+    # immediate cleanup stays possible and the double-injection gate is
+    # not sealed by a phantom window.
+    command = (
+        "node-debugger-n1-abc12 -n kubewiz -- chroot /host sh -c "
+        "'crictl stop -t 0 abc123'"
+    )
+    with patch(
+        "chaos_agent.agent.execution_artifacts.time.time", return_value=1000,
+    ):
+        artifacts = collect_execution_artifacts(_bounded_exec_with_command(command))
+
+    assert artifacts[0]["status"] == "active"
+    assert "recovery_deadline_epoch" not in artifacts[0]
+
+
 def _bounded_exec_messages():
     return _debug_messages() + [
         AIMessage(

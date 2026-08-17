@@ -66,6 +66,9 @@ _READONLY_BINARIES = frozenset({
     # network inspection
     "ss", "netstat", "ping", "ping6", "nslookup", "dig", "host",
     "wget", "curl",
+    # path / reachability probes (send packets, mutate nothing — same class as
+    # ``ping``). ``traceroute`` maps hops; ``arping`` resolves a MAC.
+    "traceroute", "traceroute6", "arping",
     # host inspection probes reached through a privileged debug pod: hardware /
     # kernel / filesystem / hashing facts that are read-only REGARDLESS of args
     # in this name-only set. Added after task-3a360709 surfaced read-only host
@@ -77,6 +80,18 @@ _READONLY_BINARIES = frozenset({
     "lscpu", "lspci", "getcap", "getenforce", "sestatus",
     "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
     "base64", "strings", "hexdump", "xxd", "od", "nm", "ldd", "objdump",
+    # extended session / locale / hardware facts (all dump state, none write):
+    # who/w/last enumerate logins, groups/locale/getconf print facts,
+    # dmidecode/lshw inspect hardware, whereis locates files.
+    # Evidence (strace on al8 host): who/w/last/groups/getconf/whereis/locale/
+    # dmidecode/traceroute/arping are fully CLEAN. lshw creates+unlinks a
+    # transient probe marker (/var/run/fb-<pid>) that is removed before exit —
+    # no residual state. numastat has no binary in the target env; verified by
+    # upstream source audit (numactl numastat.c): every fopen is mode "r"
+    # (/proc/meminfo, sysfs numastat/meminfo, /proc/<pid>/smaps), the only
+    # popen("resize") fires solely when stdout is a TTY — never in exec output.
+    "who", "w", "last", "groups", "locale", "getconf",
+    "numastat", "dmidecode", "lshw", "whereis",
 })
 # Binaries that ARE the injection in an exec context even though their names
 # are not fault verbs: load generators, device-mapper, port-occupying
@@ -160,6 +175,12 @@ _IPTABLES_READONLY_FIRST = (
     "-L", "-S", "--list", "--list-rules", "--version", "-V",
     "--help", "-h", "version",
 )
+# Global options that PRECEDE the command verb and consume a value (``-t nat``)
+# or stand alone (``-4``/``-6``/``-w``). The first-token check used to stop at
+# these and reject the everyday ``iptables -t nat -L -n`` form; skip them to
+# reach the real verb.
+_IPTABLES_GLOBAL_VALUE_FLAGS = frozenset({"-t", "--table", "-M", "--modprobe"})
+_IPTABLES_GLOBAL_VALUELESS = frozenset({"-4", "-6", "-w", "--wait"})
 _NFT_READONLY_FIRST = ("list", "--version", "-v", "--help", "-h")
 _TC_MUTATING = ("add", "del", "delete", "change", "replace", "mod")
 # ChaosBlade CLI — read-only only for its experiment-inspection verbs.
@@ -179,8 +200,9 @@ _IP_MUTATING = frozenset({
     "exec",
 })
 _SYSTEMCTL_READONLY_VERBS = frozenset({
-    "status", "is-active", "is-enabled", "is-failed",
-    "show", "list-units", "list-unit-files",
+    "status", "is-active", "is-enabled", "is-failed", "is-system-running",
+    "show", "cat", "list-units", "list-unit-files", "list-dependencies",
+    "list-timers", "list-sockets", "list-jobs",
 })
 _MOUNT_MUTATING_FLAGS = ("-o", "--options", "--bind", "--move", "-B", "-M",
                          "--rbind", "--make-shared", "--remount",
@@ -227,6 +249,48 @@ _CONNTRACK_MUTATING_FLAGS = frozenset({
 _SWAPON_READONLY_FLAGS = frozenset({"-s", "--show", "--summary"})
 # arp prints the cache unless ``-d`` (delete entry) / ``-s`` (add static) edit it.
 _ARP_MUTATING_FLAGS = frozenset({"-d", "--delete", "-s", "--set"})
+# --- Extended dual-use probe guards (audit follow-up) ---------------------
+# ifconfig DISPLAYS by default; it mutates only when an action keyword or a
+# value positional (what is being SET) is present. ``ifconfig eth0`` /
+# ``ifconfig -a`` are display forms; ``ifconfig eth0 down`` /
+# ``ifconfig eth0 10.0.0.1 netmask ...`` change state.
+_IFCONFIG_MUTATING_KEYWORDS = frozenset({
+    "up", "down", "arp", "-arp", "promisc", "-promisc", "multicast",
+    "mtu", "netmask", "dstaddr", "broadcast", "metric", "media",
+})
+# crontab INSTALLS a crontab by default; only ``-l``/``--list`` reads.
+# (``-r`` removes, ``-e`` edits, a positional file installs — all mutate.)
+_CRONTAB_READONLY_FLAGS = frozenset({"-l", "--list"})
+# timedatectl reads unless it SETS the clock — set-time IS the clock-drift
+# fault in this project, so it must never pass as a probe.
+_TIMEDATECTL_MUTATING_VERBS = frozenset({
+    "set-time", "set-timezone", "set-local-rtc", "set-ntp",
+})
+# resolvectl / systemd-resolve read with ``status``; the set-*/revert/flush
+# verbs rewrite resolver state (a network mutation).
+_RESOLVECTL_MUTATING_VERBS = frozenset({
+    "revert", "set-dns", "set-domain", "set-llmnr", "set-mdns",
+    "set-dns-over-tls", "set-dnssec", "flush-caches",
+    "reset-statistics", "reset-server-features",
+})
+# fdisk / parted list partitions only with ``-l``/``--list``; a bare device
+# argument opens the interactive (mutating) partition editor.
+_DISK_READONLY_FLAGS = frozenset({"-l", "--list"})
+# openssl is a crypto toolkit — only the ``version`` subcommand is a probe;
+# every other subcommand computes / writes / connects. java RUNS bytecode by
+# default; only its version banner is a safe probe (note the single-dash
+# ``-version``, not covered by the ``--version`` metadata rule).
+_JAVA_READONLY_PROBES = frozenset({
+    "-version", "--version", "-showversion", "-fullversion",
+})
+# Package managers: query forms read, everything else installs / removes.
+_DPKG_READONLY_FLAGS = frozenset({
+    "-l", "--list", "-s", "--status", "-S", "--search", "-L", "--listfiles",
+    "-W", "--show", "-p", "--print-avail",
+})
+_APK_READONLY_VERBS = frozenset({
+    "info", "search", "list", "policy", "version", "audit", "manifest",
+})
 # find — read-only only WITHOUT its action primitives. ``-exec``/``-ok`` run an
 # arbitrary command per match (the ``+`` terminator needs no shell metachar,
 # so the string-level screens cannot see it), ``-delete`` removes whole trees,
@@ -294,6 +358,19 @@ _WGET_MUTATING_LONG_PREFIXES = (
     "--post", "--body-file", "--upload-file", "--output-file",
 )
 _WGET_MUTATING_SHORT = frozenset({"-o", "-a"})
+# wget metadata-only flags: they print and exit BEFORE any URL parsing, so no
+# network access and no file write can happen (same exemption shape as
+# iptables/nft/blade above). Checked only AFTER the mutating-flag scan, so a
+# write/upload form stays refused no matter what rides alongside it.
+_WGET_METADATA_FLAGS = frozenset({"--version", "-V", "--help", "-h"})
+# Universal metadata probes: GNU-style tools print and exit BEFORE any action,
+# so an argv made ONLY of these flags touches neither disk, network, nor
+# process state — for ANY binary. The "every token is a metadata flag" shape is
+# what keeps this bypass-proof: ``docker --version run alpine`` or
+# ``blade --version create cpu`` carry a real token and fall through to the
+# per-binary judges. Applied below the escape-primitive check, so
+# nsenter/chroot/unshare stay refused even as bare probes.
+_METADATA_FLAGS = frozenset({"--version", "-V", "--help", "-h"})
 # The remaining table entries that can execute a command or write a file. Same
 # root cause as find/awk/curl/wget: a name that reads as "diagnostic" while the
 # argument list decides.
@@ -342,13 +419,14 @@ _RUNTIME_VALUE_FLAGS = frozenset({
     "--tlscacert", "--tlscert", "--tlskey", "-D", "--debug-dir",
 })
 # Wrappers that prefix a real command; the wrapped command decides the verdict.
-_COMMAND_WRAPPERS = ("timeout", "stdbuf", "nice", "ionice", "env")
+_COMMAND_WRAPPERS = ("timeout", "stdbuf", "nice", "ionice", "env", "watch")
 # Wrapper flags consuming a separate value — skipping only the flag would leave
 # its value to be mistaken for the wrapped command.
 _WRAPPER_VALUE_FLAGS = frozenset({
     "-n", "-c", "-p", "-o", "-i", "-e", "-k", "-s", "-u",
     "--kill-after", "--signal", "--unset", "--chdir",
     "--class", "--classdata", "--pid", "--output", "--input", "--error",
+    "--interval",
 })
 # ``timeout``'s DURATION positional: a number with an optional unit suffix.
 _DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
@@ -501,8 +579,11 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
         if unwrapped is not tokens and unwrapped != tokens:
             return _classify_argv(unwrapped, _depth + 1)
         # No wrapped command: ``env`` alone dumps the environment (read-only);
-        # a bare wrapper otherwise does nothing observable.
-        return (True, None) if binary in _READONLY_BINARIES else (
+        # a bare metadata probe (``timeout -V`` / ``nice --help``) prints and
+        # exits; a bare wrapper otherwise does nothing observable.
+        if binary in _READONLY_BINARIES or (args and all(a in _METADATA_FLAGS for a in args)):
+            return True, None
+        return (
             False, f"'{binary}' wraps no command, so read-only status cannot be determined"
         )
 
@@ -514,14 +595,39 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     if binary in _ESCAPE_PRIMITIVES:
         return False, f"'{binary}' reaches the host / escapes the container, not a read-only probe"
 
-    # Netfilter tooling — read-only only in list/version forms.
+    # Pure metadata probe (``--version`` / ``-h`` / ... and nothing else): every
+    # CLI prints and exits before any action, whatever the binary otherwise
+    # does — covers dd/timeout/nice/systemctl/docker/crictl/stress-ng/... in
+    # one rule instead of per-binary exemptions.
+    if args and all(a in _METADATA_FLAGS for a in args):
+        return True, None
+
+    # Netfilter tooling — read-only only in list/version forms. The command verb
+    # may be preceded by global options (``iptables -t nat -L -n``), so skip
+    # them before locating the verb rather than reading args[0].
+    # Evidence: even ``-L`` creates /run/xtables.lock (O_CREAT) — the iptables
+    # 1.8+ lock protocol taken for ANY netlink op; the ruleset itself is not
+    # touched (strace shows no other write).
     if binary in ("iptables", "ip6tables"):
-        ok = bool(args) and args[0] in _IPTABLES_READONLY_FIRST
-        if ok:
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in _IPTABLES_GLOBAL_VALUE_FLAGS:
+                i += 2  # ``-t <table>`` / ``-M <modprobe>`` consume a value
+                continue
+            if a in _IPTABLES_GLOBAL_VALUELESS:
+                i += 1
+                # ``-w`` may carry an optional seconds value (``-w 5 -L``)
+                if a == "-w" and i < len(args) and args[i].isdigit():
+                    i += 1
+                continue
+            break
+        cmd = args[i] if i < len(args) else ""
+        if cmd in _IPTABLES_READONLY_FIRST:
             return True, None
         return False, (
             f"'{binary}' is read-only only with -L/-S/--list/--version "
-            f"(got '{args[0] if args else 'no arguments'}'; -A/-D/-I/-F etc. mutate)"
+            f"(got '{cmd or 'no command'}'; -A/-D/-I/-F etc. mutate)"
         )
     if binary == "nft":
         ok = bool(args) and args[0] in _NFT_READONLY_FIRST
@@ -535,11 +641,25 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
         return False, "'tc' add/del/change/replace mutate (only show/qdisc queries are read-only)"
 
     # blade — read-only only for experiment inspection (see _BLADE_READONLY_VERBS).
+    # Evidence: even these verbs open chaosblade.dat (BoltDB bookkeeping) and
+    # touch its mtime, but content stays byte-identical (md5 before/after on a
+    # live node) — an open-for-mapping side effect, not a mutation.
     if binary == "blade":
         if args and args[0] in _BLADE_READONLY_VERBS:
             return True, None
+        # A help flag ANYWHERE short-circuits the mutation: blade is a
+        # cobra-based CLI and cobra prints help and exits before the
+        # subcommand's Run executes, whatever other flags are present.
+        # Verified live: `blade create mem load -h`, `blade create mem load
+        # --mode ram --mem-percent 80 --timeout 10 -h`, `blade create k8s
+        # node-mem load --help` and `blade destroy -h` all exit 0, print
+        # usage, and leave `blade status --type create` unchanged (no
+        # experiment record created). This form is the flag-discovery probe
+        # for injection planning, not an injection.
+        if any(a in ("-h", "--help") for a in args):
+            return True, None
         return False, (
-            "'blade' is read-only only for status/query/version "
+            "'blade' is read-only only for status/query/version or a -h/--help probe "
             f"(got '{args[0] if args else 'no arguments'}'; create/destroy/prepare/revoke mutate)"
         )
 
@@ -774,6 +894,10 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
                 f"'wget' is read-only only with --spider or output to stdout; {bad} writes local files"
                 " or uploads data"
             )
+        # Metadata probes exit before any download: ``wget --version`` is the
+        # standard binary-presence check and touches neither disk nor network.
+        if any(a in _WGET_METADATA_FLAGS for a in args):
+            return True, None
         if "--spider" in args:
             return True, None
         stdout_out = False
@@ -806,7 +930,7 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
             return True, None
         return False, (
             "'wget' writes the response into a file in the current directory by default; only --spider,"
-            " -O- (stdout) or -O /dev/null (discard) is read-only"
+            " -O- (stdout) or -O /dev/null (discard) is read-only (besides --version/--help metadata probes)"
         )
 
     # command — ``command -v X`` resolves a path and runs nothing (the probe
@@ -910,6 +1034,116 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
                 f"'dd' reading into a discard sink is read-only, but {bad}= changes what is written"
             )
 
+    # --- Extended dual-use probe guards (audit follow-up) -----------------
+    # ifconfig — display unless an action keyword or a value positional (the
+    # thing being SET) is present. Two+ positionals means ``iface VALUE``.
+    if binary == "ifconfig":
+        positionals = [a for a in args if not a.startswith("-")]
+        kw = next((p for p in positionals if p.lower() in _IFCONFIG_MUTATING_KEYWORDS), None)
+        if kw is not None or len(positionals) >= 2:
+            return False, (
+                f"'ifconfig' {kw or 'with a value argument'} changes interface state "
+                "(only bare / -a / single-interface display is read-only)"
+            )
+        return True, None
+
+    # ipvsadm — lists with -L/--list (bare lists too); every other verb
+    # adds/edits/deletes a virtual service or real server.
+    if binary == "ipvsadm":
+        if not args or any(
+            a == "--list" or a == "-L" or (a.startswith("-L") and not a.startswith("--"))
+            for a in args
+        ):
+            return True, None
+        return False, "'ipvsadm' is read-only only with -L/--list (add/edit/delete service mutate)"
+
+    # crontab — installs/edits/removes by default; only -l/--list reads.
+    if binary == "crontab":
+        if any(a in _CRONTAB_READONLY_FLAGS for a in args):
+            return True, None
+        return False, "'crontab' installs/edits/removes a crontab by default (only -l/--list is read-only)"
+
+    # timedatectl — reads unless it SETS the clock.
+    if binary == "timedatectl":
+        verb = next((a for a in args if not a.startswith("-")), "")
+        if verb in _TIMEDATECTL_MUTATING_VERBS:
+            return False, f"'timedatectl' {verb} changes the clock/timezone, which mutates (status/list-timezones are read-only)"
+        return True, None
+
+    # resolvectl / systemd-resolve — read with status; set-*/revert/flush mutate.
+    if binary in ("resolvectl", "systemd-resolve"):
+        verb = next((a for a in args if not a.startswith("-")), "")
+        if verb in _RESOLVECTL_MUTATING_VERBS:
+            return False, f"'{binary}' {verb} rewrites resolver state (status is read-only)"
+        return True, None
+
+    # taskset / chrt — query one pid with -p; a second positional is the value
+    # being SET, and without -p they RUN a command. chrt -m lists limits.
+    if binary in ("taskset", "chrt"):
+        if binary == "chrt" and any(a in ("-m", "--max") for a in args):
+            return True, None
+        has_p = any(
+            a in ("-p", "--pid") or (a.startswith("-") and not a.startswith("--") and "p" in a[1:])
+            for a in args
+        )
+        positionals = [a for a in args if not a.startswith("-")]
+        if has_p and len(positionals) == 1:
+            return True, None
+        return False, f"'{binary}' is read-only only as a single-pid -p query (setting affinity/priority or running a command mutates)"
+
+    # fdisk lists partitions with -l/--list (verified O_RDONLY on devices via
+    # strace). parted is deliberately NOT admitted even for -l: strace shows it
+    # opens every block device O_RDWR in list mode, and an RW fd on a raw
+    # device is a write channel — fail closed.
+    if binary == "fdisk":
+        if any(a in _DISK_READONLY_FLAGS for a in args):
+            return True, None
+        return False, "'fdisk' is read-only only with -l/--list (a bare device opens the mutating partition editor)"
+    if binary == "parted":
+        return False, (
+            "'parted' opens block devices O_RDWR even in list mode (verified by strace),"
+            " so no form is admitted as a read-only probe — use 'fdisk -l'"
+        )
+
+    # openssl — only the 'version' subcommand is a probe.
+    if binary == "openssl":
+        verb = next((a for a in args if not a.startswith("-")), "")
+        if verb == "version":
+            return True, None
+        return False, "'openssl' is read-only only for the 'version' subcommand (other subcommands compute/write/connect)"
+
+    # java — runs bytecode; only its version banner is a safe probe.
+    # Evidence (Oracle JDK 17 CDS docs): the default CDS archive is
+    # memory-mapped READ-ONLY at startup; archive WRITES happen only with the
+    # explicit -Xshare:dump / -XX:ArchiveClassesAtExit flags, and crash logs
+    # only on abnormal exit. The banner forms below never reach bytecode.
+    if binary == "java":
+        if args and all(a in _JAVA_READONLY_PROBES for a in args):
+            return True, None
+        return False, "'java' runs bytecode (execution); only its -version banner is a read-only probe"
+
+    # Package managers — query forms read; everything else installs/removes.
+    # Evidence (strace on al8 host): rpm -q* opens BDB region files
+    # (/var/lib/rpm/__db.*) O_RDWR as part of BDB env recovery, but the real
+    # database (Packages/...) is opened O_RDONLY only and no DB file mtime
+    # changes — query stays query.
+    if binary == "rpm":
+        if any(a == "--query" or (a.startswith("-q") and not a.startswith("--")) for a in args):
+            return True, None
+        return False, "'rpm' is read-only only in query mode (-q/-qa/-ql..., --query); install/erase/upgrade mutate"
+    # dpkg query forms are classified as dpkg-query actions in the Debian man
+    # page (dpkg-query reads /var/lib/dpkg without the mutating lock); no
+    # Debian host exists in the test cluster, so this is doc-level evidence.
+    if binary == "dpkg":
+        if any(a in _DPKG_READONLY_FLAGS or a.split("=", 1)[0] in _DPKG_READONLY_FLAGS for a in args):
+            return True, None
+        return False, "'dpkg' is read-only only for query forms (-l/-s/-S/-L/-W); install/remove/purge mutate"
+    if binary == "apk":
+        verb = next((a for a in args if not a.startswith("-")), "")
+        if verb in _APK_READONLY_VERBS:
+            return True, None
+        return False, "'apk' is read-only only for info/search/list/policy/version (add/del/upgrade mutate)"
+
     if binary in _MUTATING_BINARIES:
         return False, f"'{binary}' is a write/load-generating command, not a read-only diagnostic"
     if binary in _READONLY_BINARIES:
@@ -1012,6 +1246,35 @@ def is_readonly_inner_tokens(inner: list[str]) -> bool:
     return _classify_inner(inner)[0]
 
 
+def readonly_inner_tokens_reason(inner: list[str]) -> str | None:
+    """Specific reason a kubectl-exec inner command (tokens after ``--``) is
+    NOT read-only, or ``None`` when it IS.
+
+    The reason view of :func:`is_readonly_inner_tokens`. Callers that must
+    REFUSE (the classifier's exec branch, the read-only phase screeners) use
+    this view so the verdict the shared judge actually reached — e.g. "contains
+    the shell control operator ';'" — survives to the model instead of being
+    flattened to a boolean at the API boundary and re-invented downstream.
+    """
+    ok, reason = _classify_inner(inner or [])
+    return None if ok else reason
+
+
+# The compliant-shape guidance paired with every read-only-probe refusal.
+# Single source of truth: the kubectl_read tool layer and the read-only phase
+# screeners render the SAME hint, so a model refused at the screener gets the
+# identical fix path it would have got from the tool (and vice versa).
+READONLY_PROBE_FIX_HINT = (
+    "A read-only probe is ONE single command after `--` — no `;` / `&&` / "
+    "`||` / redirects / background, no multi-statement `sh -c`. "
+    "Examples: `-- which stress-ng` (check a binary), "
+    "`-- ls /usr/bin/stress-ng` (check a file), `-- cat <path>` / "
+    "`-- iptables -L` / `-- ip addr show` / `-- systemctl status` (read state). "
+    "If the command is genuinely a fault INJECTION, it belongs to Phase 2 "
+    "(execution), not to a read-only phase."
+)
+
+
 def is_readonly_kubectl_exec(v_args: str) -> bool:
     """True if a ``kubectl exec``/``debug`` inner command is a read-only probe.
 
@@ -1087,6 +1350,8 @@ def host_command_rejection_reason(command: str) -> str | None:
 __all__ = [
     "is_readonly_argv",
     "is_readonly_inner_tokens",
+    "readonly_inner_tokens_reason",
+    "READONLY_PROBE_FIX_HINT",
     "is_readonly_kubectl_exec",
     "kubectl_exec_rejection_reason",
     "is_readonly_host_command",
