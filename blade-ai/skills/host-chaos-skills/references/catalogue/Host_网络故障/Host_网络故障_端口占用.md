@@ -50,11 +50,11 @@ blade destroy <experiment-uid>
 
 前提条件：主机需具备 `nc`（netcat）
 
-注入命令：
+注入命令（**timeout 包裹自带自恢复**，到期 nc 自行退出释放端口）：
 ```bash
 # 用 nc 监听占用端口，真实服务将无法 bind
 # 只允许监听形态：带命令执行的 -e/-c 是反弹 shell，不是故障，会被拒绝
-nc -l -p <port> -k
+timeout <duration> nc -l -p <port> -k
 ```
 
 恢复命令：
@@ -70,4 +70,4 @@ fuser -k <port>/tcp
 注意事项：
 - nc 的 `-k` 参数表示保持监听（accept 后不退出）
 - 原生方式无法强制抢占已被其他进程占用的端口
-- 无自动超时恢复，必须手动 kill 进程
+- 自恢复基于 `timeout <duration>` 包裹，到期 nc 自行退出、端口释放；提前恢复仍用上方 kill/fuser 命令

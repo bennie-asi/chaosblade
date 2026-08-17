@@ -52,20 +52,24 @@ blade destroy <experiment-uid>
 
 > 当 ChaosBlade 不可用时，可使用以下原生命令实现等效故障注入。
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**）：
 ```bash
-# 移走而非删除：原文件即备份，同文件系统内为原子操作，不存在
+# 先武装定时移回（timer 由宿主机 systemd(PID 1) 管理，到期自动还原），
+# 再移走文件。移走而非删除：原文件即备份，同文件系统内为原子操作，不存在
 # 「备份成功但删除失败」或「备份失败却已删除」的中间态
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-filedel \
+  mv <filepath>.orig <filepath> &&
 mv <filepath> <filepath>.orig
 ```
 
-恢复命令：
+恢复命令（timer 到期前可提前手动恢复）：
 ```bash
-# 移回原路径，不留残留备份文件
+# 提前恢复：移回原路径，不留残留备份文件（同时停掉已武装的 timer）
+systemctl stop blade-restore-filedel 2>/dev/null
 mv <filepath>.orig <filepath>
 ```
 
 注意事项：
 - 操作前必须备份，否则数据不可恢复
-- 无自动超时恢复，必须手动恢复
+- 自恢复基于 systemd-run transient timer 到期自动 `mv` 回原路径，补齐了 ChaosBlade `--timeout` 的自恢复能力；`&&` 串联保证武装失败时不会执行移走操作
 - 演练环境不要对无法重建的唯一数据文件做此操作

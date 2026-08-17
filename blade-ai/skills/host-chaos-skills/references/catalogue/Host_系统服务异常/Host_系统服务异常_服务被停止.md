@@ -52,26 +52,33 @@ blade destroy <experiment-uid>
 
 > 当 ChaosBlade 不可用时，可使用以下原生命令实现等效故障注入。
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**；到期自动拉起服务，补齐自恢复能力）：
 ```bash
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-<service-name> \
+  systemctl start <service-name> &&
 systemctl stop <service-name>
 ```
 
-恢复命令：
+恢复命令（提前恢复）：
 ```bash
+# 先终止武装的定时器，再手动拉起
+systemctl stop blade-restore-<service-name> 2>/dev/null
 systemctl start <service-name>
 ```
 
 注意事项：
 - systemctl stop 会触发服务的 ExecStop 优雅停止流程
-- 如果服务配置了 Restart=always，需要先 mask 服务再 stop：
+- 如果服务配置了 Restart=always，需要先 mask 服务再 stop（武装还原需包含 unmask）：
   ```bash
-  systemctl mask <service-name>
+  systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-<service-name> \
+    sh -c 'systemctl unmask <service-name> && systemctl start <service-name>' &&
+  systemctl mask <service-name> &&
   systemctl stop <service-name>
   ```
-  恢复时：
+  提前恢复时：
   ```bash
+  systemctl stop blade-restore-<service-name> 2>/dev/null
   systemctl unmask <service-name>
   systemctl start <service-name>
   ```
-- 原生方式无自动超时恢复
+- 自恢复基于注入前武装的 systemd-run transient timer（到期自动拉起服务）；提前恢复仍用上方手动命令

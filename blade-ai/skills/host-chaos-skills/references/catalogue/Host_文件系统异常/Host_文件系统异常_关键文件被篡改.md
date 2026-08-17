@@ -63,32 +63,43 @@ blade destroy <experiment-uid>
 
 > 当 ChaosBlade 不可用时，可使用以下原生命令实现等效故障注入。
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**——timer 由宿主机 systemd(PID 1) 管理，到期自动还原）：
 ```bash
-# 方式一：权限篡改
+# 方式一：权限篡改 —— 先记录原权限并武装定时还原
+ORIG_MODE=$(stat -c %a <filepath>)
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-filemode \
+  chmod $ORIG_MODE <filepath> &&
 chmod 000 <filepath>
 
-# 方式二：内容清空（先备份）—— 配置文件被清空同样触发解析失败/服务异常
-cp <filepath> <filepath>.bak
+# 方式二：内容清空 —— 备份→武装→清空必须全链 && 串联：
+# 备份失败时武装与清空都不执行，避免「无备份却已清空」的不可恢复破坏
+cp <filepath> <filepath>.bak &&
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-filecontent \
+  sh -c 'cp <filepath>.bak <filepath> && rm -f <filepath>.bak' &&
 truncate -s 0 <filepath>
 
 # 方式三：文件移走（同目录，避免跨文件系统）
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-filemove \
+  mv <filepath>.orig <filepath> &&
 mv <filepath> <filepath>.orig
 ```
 
-恢复命令：
+恢复命令（timer 到期前可提前手动恢复，同时停掉已武装的 timer）：
 ```bash
 # 方式一恢复：
+systemctl stop blade-restore-filemode 2>/dev/null
 chmod <original-mode> <filepath>
 
 # 方式二恢复：
-cp <filepath>.bak <filepath>
+systemctl stop blade-restore-filecontent 2>/dev/null
+cp <filepath>.bak <filepath> && rm -f <filepath>.bak
 
 # 方式三恢复：
+systemctl stop blade-restore-filemove 2>/dev/null
 mv <filepath>.orig <filepath>
 ```
 
 注意事项：
 - 操作前必须备份原文件，否则无法恢复
-- 无自动超时恢复机制
+- 自恢复基于 systemd-run transient timer 到期自动执行逆操作，补齐了 ChaosBlade `--timeout` 的自恢复能力；`&&` 串联保证武装失败时不会执行篡改操作；方式一的原权限必须在武装前用 `stat -c %a` 取真实值固化进 timer，不可事后猜测
 - chmod 000 对 root 用户无效（root 可绕过权限检查）

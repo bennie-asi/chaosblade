@@ -50,16 +50,21 @@ blade destroy <experiment-uid>
 
 前提条件：具备 root 权限，且主机 iptables 支持 nat 表
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**；到期自动删除 DNAT 规则，补齐自恢复能力）：
 ```bash
-# 在网络层把本机发出的 DNS 查询重定向到伪造的解析器。
+# 1) 先武装定时还原（定时器由宿主机 systemd(PID 1) 管理），再注入规则
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-dnsnat sh -c \
+  'iptables -t nat -D OUTPUT -p udp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53; \
+   iptables -t nat -D OUTPUT -p tcp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53' &&
+# 2) 在网络层把本机发出的 DNS 查询重定向到伪造的解析器。
 # 比改 /etc/hosts 覆盖面更广：绕过 hosts 的应用（自带 DNS 缓存/直连解析器的）同样受影响。
-iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53
+iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53 &&
 iptables -t nat -A OUTPUT -p tcp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53
 ```
 
-恢复命令：
+恢复命令（提前恢复；先停武装的定时器再手动删除规则）：
 ```bash
+systemctl stop blade-restore-dnsnat 2>/dev/null
 # -D 与注入的 -A 参数逐字对应，是精确逆操作
 iptables -t nat -D OUTPUT -p udp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53
 iptables -t nat -D OUTPUT -p tcp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53
@@ -72,4 +77,4 @@ iptables -t nat -D OUTPUT -p tcp --dport 53 -j DNAT --to-destination <redirect-d
 注意事项：
 - /etc/hosts 修改仅影响本机解析，不影响其他机器
 - 某些应用有独立 DNS 缓存，修改 hosts 后可能需要重启应用才生效
-- 无自动超时恢复，必须手动恢复
+- 自恢复基于注入前武装的 systemd-run transient timer（到期自动删除 DNAT 规则）；提前恢复仍用上方手动命令

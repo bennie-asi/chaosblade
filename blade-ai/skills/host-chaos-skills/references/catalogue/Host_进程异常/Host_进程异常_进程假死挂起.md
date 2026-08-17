@@ -52,17 +52,21 @@ blade destroy <experiment-uid>
 
 > 当 ChaosBlade 不可用时，可使用以下原生命令实现等效故障注入。
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**；到期自动发送 SIGCONT，补齐自恢复能力）：
 ```bash
 # 1) 先取 PID（输出可能多行，逐个处理）
 pgrep -f <process-name>
 
-# 2) 对取到的 PID 发送 SIGSTOP 挂起
+# 2) 先武装定时 SIGCONT（定时器由宿主机 systemd(PID 1) 管理，到期重新 pgrep 取 PID），再挂起
+systemd-run --on-active=<recovery-seconds>s --unit=blade-cont-<process-name> \
+  sh -c 'kill -CONT $(pgrep -f <process-name>)' &&
 kill -STOP <pid>
 ```
 
-恢复命令：
+恢复命令（提前恢复；SIGCONT 幂等，武装的定时器后续再触发也无副作用）：
 ```bash
+# 可选：先终止武装的定时器
+systemctl stop blade-cont-<process-name> 2>/dev/null
 # 对注入时记录的同一 PID 发送 SIGCONT
 kill -CONT <pid>
 ```
@@ -70,4 +74,4 @@ kill -CONT <pid>
 注意事项：
 - SIGSTOP 信号无法被进程捕获或忽略，进程必定被挂起
 - 与 kill 不同，stop 后进程仍存在，资源未释放
-- 原生方式无自动超时恢复，必须手动发送 SIGCONT
+- 自恢复基于注入前武装的 systemd-run transient timer（到期自动 SIGCONT）；提前恢复仍用上方手动命令

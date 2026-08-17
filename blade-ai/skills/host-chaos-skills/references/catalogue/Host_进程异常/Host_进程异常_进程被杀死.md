@@ -55,21 +55,32 @@ blade destroy <experiment-uid>
 
 > 当 ChaosBlade 不可用时，可使用以下原生命令实现等效故障注入。
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**——与恢复先于自断规范一致）：
 ```bash
 # 1) 先取 PID（按进程名，或按端口用 fuser <port>/tcp 查）
 pgrep -f <process-name>
 
-# 2) 杀死取到的 PID
+# 2) 若进程由 systemd 服务托管：先武装定时拉起，再杀死。
+#    timer 由宿主机 systemd(PID 1) 管理，到期自动 systemctl start 恢复服务
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-<service> \
+  systemctl start <service> &&
 kill -9 <pid>
 
-# 按端口一步杀死（需宿主机有 fuser）
+# 按端口一步杀死（需宿主机有 fuser；同样先武装定时拉起）
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-<service> \
+  systemctl start <service> &&
 fuser -k <port>/tcp
+
+# 3) 若进程不受 systemd 托管：先武装定时执行应用启动命令，再杀死
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-<process-name> \
+  sh -c '<应用启动命令>' &&
+kill -9 <pid>
 ```
 
-恢复命令：
+恢复命令（timer 到期前可提前手动恢复）：
 ```bash
-# 手动重启服务
+# 提前恢复：手动重启服务（同时停掉已武装的 timer，避免重复拉起）
+systemctl stop blade-restore-<service> 2>/dev/null
 systemctl start <service>
 # 或执行应用启动命令
 ```
@@ -78,3 +89,4 @@ systemctl start <service>
 - kill -9 发送 SIGKILL 信号，进程无法处理该信号（不会执行清理逻辑）
 - 使用 kill -15 可让进程优雅退出
 - 原生方式无法实现持续杀死（count + timeout 模式）
+- 自恢复基于 systemd-run transient timer（宿主机 PID 1 管理）补齐了 ChaosBlade `--timeout` 的自恢复能力；注入前必须先确认进程的托管方式（`systemctl status` / `ps -o ppid`），不受任何守护机制管理的裸进程被杀后无法自动拉起，timer 载荷里的启动命令必须写全（工作目录、环境变量、用户）

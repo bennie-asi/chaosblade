@@ -76,20 +76,25 @@ blade destroy <experiment-uid>
 
 前提条件：具备 root 权限执行 iptables
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**；到期自动删除 DROP 规则，补齐自恢复能力）：
 ```bash
-# 出站方向丢弃到特定 IP 的所有包
+# 1) 先武装定时还原（定时器由宿主机 systemd(PID 1) 管理；仅登记本次实际注入的那条 -D，
+#    下面三条按注入选择其一）
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-drop \
+  iptables -D OUTPUT -d <target-ip> -j DROP &&
+# 2) 出站方向丢弃到特定 IP 的所有包
 iptables -I OUTPUT -d <target-ip> -j DROP
 
-# 或丢弃到特定端口的包
+# 或丢弃到特定端口的包（武装对应改为该条 -D）
 iptables -I OUTPUT -p tcp --dport <port> -d <target-ip> -j DROP
 
-# 入站方向丢弃来自特定 IP 的包
+# 入站方向丢弃来自特定 IP 的包（武装对应改为该条 -D）
 iptables -I INPUT -s <source-ip> -j DROP
 ```
 
-恢复命令：
+恢复命令（提前恢复；先停武装的定时器再手动删除规则）：
 ```bash
+systemctl stop blade-restore-drop 2>/dev/null
 # 删除对应规则
 iptables -D OUTPUT -d <target-ip> -j DROP
 iptables -D OUTPUT -p tcp --dport <port> -d <target-ip> -j DROP
@@ -98,5 +103,5 @@ iptables -D INPUT -s <source-ip> -j DROP
 
 注意事项：
 - iptables 规则立即生效，已建立的 TCP 连接可能需要等超时
-- 无自动超时恢复，必须手动删除规则
+- 自恢复基于注入前武装的 systemd-run transient timer（到期自动删除注入的 DROP 规则）；提前恢复仍用上方手动命令
 - 注意不要误删其他 iptables 规则

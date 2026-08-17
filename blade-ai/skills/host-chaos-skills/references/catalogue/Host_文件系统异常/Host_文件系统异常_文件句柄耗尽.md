@@ -72,4 +72,4 @@ kill <pid>
 注意事项：
 - 单进程受 `ulimit -n` 限制，全局受 `file-max` 限制
 - 建议在演练前临时提高 ulimit 以达到预期效果：`ulimit -n 1000000`
-- 原生方式无自动超时恢复
+- 自恢复基于 stress-ng 自带的 `--timeout <duration>s`，到期进程自行退出、fd 释放；提前恢复用上方 kill 命令

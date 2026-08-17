@@ -54,27 +54,31 @@ blade destroy <experiment-uid>
 
 前提条件：具备 root 权限
 
-注入命令：
+注入命令（**先武装定时恢复，再注入**；到期自动重启时间同步服务并校时，补齐自恢复能力；
+武装→停服务→改时间必须 `&&` 全链串联，武装失败时不得执行偏移）：
 ```bash
 # 1) 先查本机用的是哪个时间同步服务（三者取其一，不要盲试）
 systemctl is-active ntpd
 systemctl is-active chronyd
 
-# 2) 停掉实际在跑的那个，防止时间被自动校正
-systemctl stop chronyd
+# 2) 武装定时恢复（定时器由宿主机 systemd(PID 1) 管理）→ 停服务 → 改时间，全链 && 串联
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-ntp \
+  sh -c 'systemctl start chronyd; chronyc makestep 2>/dev/null || true' &&
+systemctl stop chronyd &&
+date -s "<offset>"   # 偏移量按演练目标确定，如 "+2 hours"（向前）、"-30 minutes"（向后）
 
-# 若两者都没有，改用 timedatectl 关闭同步
-timedatectl set-ntp false
-
-# 修改系统时间（向前偏移 2 小时）
-date -s "+2 hours"
-
-# 或向后偏移 30 分钟
-date -s "-30 minutes"
+# 若两者都没有，改用 timedatectl 关闭同步（武装对应还原，同样全链 && 串联）：
+systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-ntp \
+  timedatectl set-ntp true &&
+timedatectl set-ntp false &&
+date -s "<offset>"
 ```
 
-恢复命令：
+恢复命令（提前恢复；先停武装的定时器再手动还原）：
 ```bash
+# 0) 终止武装的定时器
+systemctl stop blade-restore-ntp 2>/dev/null
+
 # 1) 启回注入时停掉的那个服务（与注入步骤对应，不要盲试）
 systemctl start chronyd
 
@@ -88,5 +92,4 @@ ntpdate pool.ntp.org
 
 注意事项：
 - 时间偏移会影响所有依赖系统时钟的应用（日志、证书、定时器、分布式一致性）
-- 原生方式修改后，NTP 可能在短时间内自动校正回来
-- 无自动超时恢复，必须手动恢复
+- 自恢复基于注入前武装的 systemd-run transient timer（到期自动启回时间同步服务并校时）；提前恢复仍用上方手动命令
