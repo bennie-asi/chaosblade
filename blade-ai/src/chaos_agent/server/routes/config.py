@@ -44,6 +44,7 @@ _WRITABLE_KEYS: frozenset[str] = frozenset(
         "llm_temperature",
         "llm_max_retries",
         "llm_enable_thinking",
+        "llm_thinking_format",
         "verifier_json_mode",
         # User-facing behaviour.
         "confirmation_required",

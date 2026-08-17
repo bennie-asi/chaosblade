@@ -44,6 +44,7 @@ LLM_BOUND_KEYS: frozenset[str] = frozenset({
     "llm_max_retries",
     "llm_temperature",
     "llm_enable_thinking",
+    "llm_thinking_format",
     "verifier_json_mode",
 })
 

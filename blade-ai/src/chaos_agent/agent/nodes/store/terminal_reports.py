@@ -80,7 +80,15 @@ async def _generate_postmortem(
             # R10 — wire the SAME tracing / OTel callbacks as the main
             # graph LLM so postmortem's token usage flows into
             # ``TaskTrace.total_token_input/output`` + OTel GenAI export.
-            from chaos_agent.agent.factory import make_llm
+            # enable_thinking=False: single-shot report generation where
+            # reasoning tokens only add 6x+ latency (bench_thinking.py) —
+            # but ONLY for models strong enough to absorb the disable
+            # (>= 1M window; weak models keep thinking ON for quality,
+            # see factory.aux_calls_can_skip_thinking).
+            from chaos_agent.agent.factory import (
+                aux_calls_can_skip_thinking,
+                make_llm,
+            )
             from chaos_agent.observability import status_tracker as _st_mod
             _pm_callbacks: list = []
             _trace_cb = getattr(_st_mod, "_tracing_callback", None)
@@ -89,7 +97,12 @@ async def _generate_postmortem(
             _otel_cb = getattr(_st_mod, "_otel_callback", None)
             if _otel_cb is not None:
                 _pm_callbacks.append(_otel_cb)
-            pm_llm = make_llm(callbacks=_pm_callbacks or None)
+            pm_llm = make_llm(
+                callbacks=_pm_callbacks or None,
+                # None falls back to settings.llm_enable_thinking (ON by
+                # default) when the capability gate withholds the disable.
+                enable_thinking=False if aux_calls_can_skip_thinking() else None,
+            )
             context = build_postmortem_context(
                 dict(state),
                 max_messages=settings.postmortem_max_messages,

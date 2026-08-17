@@ -86,7 +86,11 @@ def capabilities_sync(
                 "message": "No fault-injection skill with references/catalogue/ found",
             }
 
-        llm = make_llm(read_timeout=120, enable_thinking=False)
+        # Thinking stays ON here (unlike display-catalog / postmortem
+        # generation): this pass derives the actual inject/verify/recover
+        # commands from each case doc, and those commands feed the
+        # injection chain directly — derivation quality beats latency.
+        llm = make_llm(read_timeout=120, enable_thinking=True)
         out_path = _get_output_path()
 
         typer.echo(

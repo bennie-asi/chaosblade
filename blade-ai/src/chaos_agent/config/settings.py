@@ -17,6 +17,11 @@ from typing import Any, Tuple, Type
 from pydantic import Field, AliasChoices, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
+# Per-model context budget knowledge table lives in the model-connection
+# layer (chaos_agent/llm/); the historical module-level name is kept as an
+# alias so resolve_context_budget() and external introspection keep working.
+from chaos_agent.llm.budgets import DEFAULT_MODEL_BUDGETS as _DEFAULT_MODEL_BUDGETS
+
 logger = logging.getLogger(__name__)
 
 # Messages per ReAct turn, measured over 9 real drills (task JSONL, gap between
@@ -55,83 +60,15 @@ def _active_config_file() -> Path:
 _WARNED_FALLBACK_MODELS: set[str] = set()
 
 
-# v7 M2 — per-model context budgets.
-#
-# Each entry maps a model-name PREFIX (case-insensitive) to its
-# context window size + the compact_ratio that's appropriate for
-# that window. The resolver picks the longest matching prefix, then
-# falls back to the global ``context_max_tokens`` /
-# ``context_compact_ratio`` settings if nothing matches.
-#
-# Window sources: provider docs (claude.ai/docs, platform.openai.com,
-# dashscope.aliyun.com, deepseek docs, bigmodel.cn).
-# Compact-ratio rationale: smaller/cheaper models can fill more of the
-# window before compacting (0.90); models with large windows want to
-# leave more headroom for tool outputs (0.80–0.85).
-_DEFAULT_MODEL_BUDGETS: dict[str, dict[str, float | int]] = {
-    # Anthropic — Opus/Sonnet 4.6 起 1M 窗口已 GA（2026-03 标准定价），
-    # 5 代在 API 上恒为 1M；4.5 及更早代际仍是 200K，由泛化前缀兜底
-    "claude-opus-5":    {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "claude-sonnet-5":  {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "claude-opus-4-6":  {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "claude-sonnet-4-6": {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "claude-opus":      {"max_tokens": 200_000, "compact_ratio": 0.85},
-    "claude-sonnet":    {"max_tokens": 200_000, "compact_ratio": 0.85},
-    "claude-haiku":     {"max_tokens": 200_000, "compact_ratio": 0.90},
-    # OpenAI
-    "gpt-5":            {"max_tokens": 400_000, "compact_ratio": 0.80},
-    "gpt-4.1":          {"max_tokens": 1_047_576, "compact_ratio": 0.80},
-    "gpt-4o":           {"max_tokens": 128_000, "compact_ratio": 0.85},
-    "gpt-4":            {"max_tokens": 128_000, "compact_ratio": 0.85},
-    "o1":               {"max_tokens": 128_000, "compact_ratio": 0.85},
-    "o3":               {"max_tokens": 200_000, "compact_ratio": 0.85},
-    "o4-mini":          {"max_tokens": 200_000, "compact_ratio": 0.90},
-    # Google Gemini
-    "gemini-3":         {"max_tokens": 1_048_576, "compact_ratio": 0.80},
-    "gemini-2.5":       {"max_tokens": 1_048_576, "compact_ratio": 0.80},
-    # Alibaba Qwen (DashScope) — 窗口值取自百炼官方模型列表：
-    # 3.7 全系 1M；3.6-max / 3-max 为 256k；3.5 代整代下界 256k；
-    # qwen3-coder-plus/flash 1M，coder-next 256k（泛化 coder 取下界）
-    "qwen3.7-max":      {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "qwen3.7-plus":     {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "qwen3.7":          {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "qwen3.6-max":      {"max_tokens": 262_144, "compact_ratio": 0.80},
-    "qwen3.6-plus":     {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "qwen3.5":          {"max_tokens": 262_144, "compact_ratio": 0.80},
-    "qwen3-max":        {"max_tokens": 262_144, "compact_ratio": 0.80},
-    "qwen3-coder-plus": {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "qwen3-coder-flash": {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "qwen3-coder":      {"max_tokens": 262_144, "compact_ratio": 0.80},
-    "qwen3":            {"max_tokens": 131_072, "compact_ratio": 0.80},
-    # qwen-max/plus 前缀覆盖新旧全部快照，取历史下界 32K 保守兜底
-    "qwen-max":         {"max_tokens":  32_768, "compact_ratio": 0.80},
-    "qwen-plus":        {"max_tokens":  32_768, "compact_ratio": 0.80},
-    "qwen-turbo":       {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "qwen-flash":       {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    # DeepSeek — V4（2026-04）起官方 chat/reasoner 端点升至 1M 窗口；
-    # 泛化 "deepseek" 保持 64K 作为老版本/第三方部署的保守兜底
-    "deepseek-v4":      {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "deepseek-chat":    {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "deepseek-reasoner": {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "deepseek":         {"max_tokens":  64_000, "compact_ratio": 0.80},
-    # Zhipu GLM — 5.2 升至 1M；5.0/5.1 与 4.6 为 200K
-    "glm-5.2":          {"max_tokens": 1_000_000, "compact_ratio": 0.80},
-    "glm-5":            {"max_tokens": 200_000, "compact_ratio": 0.85},
-    "glm-4.6":          {"max_tokens": 200_000, "compact_ratio": 0.85},
-    "glm-4":            {"max_tokens": 128_000, "compact_ratio": 0.85},
-    # Moonshot Kimi — K3（2026-07）1M（max_completion_tokens 上限
-    # 1048576 = 2^20，故窗口取二进制 1M）；K2 系列 256K
-    "kimi-k3":          {"max_tokens": 1_048_576, "compact_ratio": 0.80},
-    "kimi-k2":          {"max_tokens": 262_144, "compact_ratio": 0.80},
-    "moonshot":         {"max_tokens": 131_072, "compact_ratio": 0.85},
-    # xAI Grok
-    "grok-4-fast":      {"max_tokens": 2_000_000, "compact_ratio": 0.80},
-    "grok-4":           {"max_tokens": 256_000, "compact_ratio": 0.80},
-    # ByteDance Doubao
-    "doubao-seed":      {"max_tokens": 256_000, "compact_ratio": 0.80},
-    # MiniMax
-    "minimax":          {"max_tokens": 200_000, "compact_ratio": 0.80},
-}
+# v7 M2 — per-model context budgets. The built-in knowledge table
+# (windows + compact ratios per model prefix) migrated to
+# ``chaos_agent/llm/budgets.py`` so the whole model-connection concern
+# (endpoint dialects + model knowledge) lives in one place. The alias
+# ``_DEFAULT_MODEL_BUDGETS`` is imported at the top of this module and
+# remains the resolver's built-in source; ``model_budgets`` (user-set)
+# still overrides it by longest-prefix, and the global
+# ``context_max_tokens`` / ``context_compact_ratio`` remain the final
+# fallback. See resolve_context_budget() below.
 
 
 class JsonConfigSettingsSource(PydanticBaseSettingsSource):
@@ -278,6 +215,30 @@ class Settings(BaseSettings):
             )
         return v
 
+    @field_validator("llm_thinking_format")
+    @classmethod
+    def _validate_llm_thinking_format(cls, v: str) -> str:
+        """Normalise + validate the thinking dialect override.
+
+        Accepted values: ``auto`` (detect from ``api_base_url``) or an
+        explicit dialect (``qwen`` / ``openai`` / ``deepseek`` / ``none``).
+        Case- and whitespace-insensitive. A typo'd value is a user mistake,
+        not a reason to brick startup, so this raises with an actionable
+        message rather than silently degrading to detection.
+        """
+        from chaos_agent.llm.compat import ALLOWED_THINKING_FORMATS
+
+        normalized = (v or "auto").strip().lower()
+        if normalized not in ALLOWED_THINKING_FORMATS:
+            raise ValueError(
+                f"Invalid llm_thinking_format: {v!r}; must be one of "
+                f"{sorted(ALLOWED_THINKING_FORMATS)}.\n"
+                f"'auto' detects the dialect from api_base_url; 'none' never "
+                f"sends a thinking field (safe for unknown endpoints).\n"
+                f"Fix: set llm_thinking_format to 'auto' or a known dialect."
+            )
+        return normalized
+
     @model_validator(mode="after")
     def _validate_loop_detection_window_fits_thresholds(self) -> "Settings":
         """A detection window smaller than its own threshold can never fire.
@@ -408,6 +369,11 @@ class Settings(BaseSettings):
     llm_max_retries: int = 1                  # BLADE_AI_LLM_MAX_RETRIES
     llm_temperature: float = 0.7              # BLADE_AI_LLM_TEMPERATURE
     llm_enable_thinking: bool = True           # BLADE_AI_LLM_ENABLE_THINKING，启用模型深度思考模式(如Qwen的enable_thinking)
+    # 思考开关的线上方言（wire dialect）。"auto" = 按 api_base_url 主机名
+    # 自动探测（dashscope→qwen、openai.com→openai、deepseek.com→deepseek、
+    # 未知端点→不下发任何方言字段），显式值覆盖探测结果。思考字段的键名
+    # 每家厂商不同，发错方言在严格端点会被 400 拒绝。见 chaos_agent/llm/。
+    llm_thinking_format: str = "auto"   # BLADE_AI_LLM_THINKING_FORMAT，合法值见 llm/compat.py ALLOWED_THINKING_FORMATS（auto/qwen/openai/deepseek/zai/openrouter/together/qwen-chat-template/none）
     # Thinking 模型把"我为什么做这个/我已经做过什么"写在 reasoning_content 通道，
     # content 常为空。若不回传该字段，历史里只剩无理由的裸工具调用，模型每轮都要
     # 从原始输入重新推导意图 —— 单步任务下"重推导"恰好等于正确的下一步所以无害，
@@ -712,7 +678,7 @@ class Settings(BaseSettings):
 
     # 上下文窗口配置（per-model 优先；这两项是兜底，仅当 model_budgets
     # 中没有匹配前缀时才生效。resolve_context_budget() 是单一入口）
-    context_max_tokens: int = 128000  # BLADE_AI_CONTEXT_MAX_TOKENS，LLM上下文窗口大小（fallback）
+    context_max_tokens: int = 100_000  # BLADE_AI_CONTEXT_MAX_TOKENS，LLM上下文窗口大小（fallback）——未知模型的保守中位值，兼顾小窗口安全与大窗口利用率；窗口差异大的模型应在 model_budgets 或内置表登记
     context_compact_ratio: float = 0.85  # BLADE_AI_CONTEXT_COMPACT_RATIO，压缩触发比例（fallback）
 
     # v7 M2 — per-model 上下文预算覆盖。键是模型名前缀（大小写不敏感），

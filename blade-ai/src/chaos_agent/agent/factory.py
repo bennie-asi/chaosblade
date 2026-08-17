@@ -275,13 +275,85 @@ def make_llm(
     if callbacks:
         llm_kwargs["callbacks"] = callbacks
     _thinking = enable_thinking if enable_thinking is not None else settings.llm_enable_thinking
-    if _thinking:
-        llm_kwargs["extra_body"] = {"enable_thinking": True}
+    # Dialect translation lives in chaos_agent/llm/thinking.py. Two legacy
+    # defects are fixed here: (1) the knob was only shipped when True, so
+    # thinking-by-default models (qwen3.8-max) silently ran their full
+    # reasoning path even with enable_thinking=False — a 6-75x latency
+    # penalty on aux calls (scripts/bench_thinking.py); (2) the key was
+    # hardcoded to dashscope's ``enable_thinking``, which strict non-qwen
+    # endpoints reject. Unknown endpoints ship nothing (universal safe
+    # default).
+    from chaos_agent.llm import resolve_thinking_format, thinking_payload
+
+    _fmt = resolve_thinking_format(settings.api_base_url, settings.llm_thinking_format)
+    _payload = thinking_payload(settings.model_name, _fmt, _thinking)
+    if _payload:
+        llm_kwargs["extra_body"] = _payload
     # ResilientChatOpenAI adds application-level retry for transient transport
     # failures (mid-stream ReadError / RemoteProtocolError from sleep, network
     # handoff, gateway reset) that the OpenAI SDK's own max_retries can't cover
     # once streaming has begun. See resilient_llm.py.
     return ResilientChatOpenAI(**llm_kwargs)
+
+
+def aux_calls_can_skip_thinking() -> bool:
+    """Capability gate: may aux calls ship an explicit thinking-disable?
+
+    The latency wins behind disabling thinking on aux calls (6-75x,
+    scripts/bench_thinking.py) were measured on STRONG models only. A
+    weak model pays a quality price instead, so the disable is gated
+    on the model's resolved context window: >= 1M (flagship tier) may
+    skip thinking; anything below — small-window models and the 100K
+    global fallback that unknown models land on — keeps thinking ON.
+    Failing the gate degrades to "slower but correct", never the
+    reverse.
+    """
+    from chaos_agent.llm import window_allows_thinking_skip
+
+    max_tokens, _ = settings.resolve_context_budget(settings.model_name)
+    return window_allows_thinking_skip(max_tokens)
+
+
+def with_thinking_disabled(llm):
+    """Return ``llm`` with an explicit thinking-off wire flag.
+
+    Aux calls (baseline-command derivation, postmortem) are single-shot
+    structured-output requests where reasoning tokens buy nothing but
+    latency — an explicit disable cut them by 6-75x with no quality loss
+    (scripts/bench_thinking.py: 264.6s→3.5s, 130s→19.7s). "Explicit" is
+    the load-bearing word: thinking-by-default models ignore an absent
+    flag, so the disable field must actually ship.
+
+    Capability gate: the disable is only shipped when the active model
+    passes ``aux_calls_can_skip_thinking()`` (>= 1M context window);
+    weaker models get the original client back unchanged so their aux
+    calls keep the reasoning channel. The flag is endpoint-dialect-
+    specific (see chaos_agent/llm/); on an endpoint with no known
+    dialect nothing is sent and the original client is returned
+    unchanged. Non-ChatOpenAI objects (test mocks, other client types)
+    pass through untouched so injected fakes keep working.
+    """
+    from langchain_openai import ChatOpenAI
+
+    from chaos_agent.llm import resolve_thinking_format, thinking_payload
+
+    if not isinstance(llm, ChatOpenAI):
+        return llm
+    if not aux_calls_can_skip_thinking():
+        logger.info(
+            "Aux thinking-disable withheld: model %r resolves to a "
+            "< 1M context window; keeping reasoning ON for aux calls "
+            "to protect derivation quality.",
+            settings.model_name,
+        )
+        return llm
+    _fmt = resolve_thinking_format(settings.api_base_url, settings.llm_thinking_format)
+    _payload = thinking_payload(settings.model_name, _fmt, enabled=False)
+    if not _payload:
+        return llm
+    # Copy instead of rebuild: preserves callbacks / timeouts / retry
+    # wiring of whichever client the caller already holds.
+    return llm.model_copy(update={"extra_body": _payload})
 
 
 def _build_skill_tools(registry: SkillRegistry):
@@ -303,7 +375,7 @@ def _build_skill_tools(registry: SkillRegistry):
             currently available skills.
 
         Output: the activated skill's full markdown content (SKILL.md body
-                including safety rules, decision flow, use-case catalogue).
+                including safety rules, decision flow, use-case resources).
                 Errors start with "Error:".
 
         Side effects: marks the skill as the current active context for this task.
@@ -471,8 +543,12 @@ def _build_skill_tools(registry: SkillRegistry):
             previous version.
 
         Inputs:
-          - plan_content: full plan in Markdown (target / parameters /
-            verification methods / recovery / blast radius).
+          - plan_content: full plan in Markdown using these EXACT ``##``
+            headers: ``## Task Summary``, ``## Execution Steps``,
+            ``## Expected Impact``, ``## Verification Methods``,
+            ``## Rollback and Recovery``. Phase 2 executes only "Execution
+            Steps"; "Verification Methods" + "Expected Impact" reach the
+            verifier as its environment-adapted overlay.
           - task_id: task identifier used as the filename.
           - skill_case_resource: The resource_path of the chosen skill case file
             (e.g. "references/catalogue/Pod_镜像拉取失败/Pod_镜像拉取失败_镜像不存在或标签错误.md").

@@ -107,6 +107,7 @@ _COLD_KEYS = frozenset({
     "llm_max_retries",
     "llm_temperature",
     "llm_enable_thinking",
+    "llm_thinking_format",
     "verifier_json_mode",
     # LLM timeout (httpx.Timeout) is baked into the ChatOpenAI client at
     # make_llm() time, so changing it needs a restart like the others.

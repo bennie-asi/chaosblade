@@ -289,8 +289,8 @@ class TestResolveContextBudget:
     def test_anthropic_opus_uses_200k_window(self):
         from chaos_agent.config.settings import Settings
 
-        s = Settings(llm_api_key="test", model_name="claude-opus-4-7")
-        assert s.resolve_context_budget("claude-opus-4-7") == (200_000, 0.85)
+        s = Settings(llm_api_key="test", model_name="claude-opus-4-5")
+        assert s.resolve_context_budget("claude-opus-4-5") == (200_000, 0.85)
 
     def test_anthropic_haiku_uses_higher_ratio(self):
         from chaos_agent.config.settings import Settings
@@ -357,9 +357,13 @@ class TestResolveContextBudget:
         from chaos_agent.config.settings import Settings
 
         s = Settings(llm_api_key="test")
-        # 4.6 起 1M GA；4.5 及更早代际回落到泛化前缀的 200K
+        # 4.6 起 1M GA（Opus/Sonnet 4.6/4.7/4.8 逐代登记）；
+        # 4.5 及更早代际回落到泛化前缀的 200K
         assert s.resolve_context_budget("claude-opus-4-6") == (1_000_000, 0.80)
+        assert s.resolve_context_budget("claude-opus-4-7") == (1_000_000, 0.80)
+        assert s.resolve_context_budget("claude-opus-4-8") == (1_000_000, 0.80)
         assert s.resolve_context_budget("claude-sonnet-4-6") == (1_000_000, 0.80)
+        assert s.resolve_context_budget("claude-sonnet-4-8") == (1_000_000, 0.80)
         assert s.resolve_context_budget("claude-sonnet-5") == (1_000_000, 0.80)
         assert s.resolve_context_budget("claude-opus-4-5") == (200_000, 0.85)
 
@@ -381,8 +385,30 @@ class TestResolveContextBudget:
         from chaos_agent.config.settings import Settings
 
         s = Settings(llm_api_key="test")
-        assert s.resolve_context_budget("Claude-Opus-4-7") == (200_000, 0.85)
-        assert s.resolve_context_budget("CLAUDE-OPUS-4-7") == (200_000, 0.85)
+        assert s.resolve_context_budget("Claude-Opus-4-7") == (1_000_000, 0.80)
+        assert s.resolve_context_budget("CLAUDE-OPUS-4-7") == (1_000_000, 0.80)
+
+    def test_qwen38_and_latest_alias_windows(self):
+        from chaos_agent.config.settings import Settings
+
+        s = Settings(llm_api_key="test")
+        # 3.8 全系 1M（models.py 分档族同样认识 qwen3.8-max，不能脱节）
+        assert s.resolve_context_budget("qwen3.8-max") == (1_000_000, 0.80)
+        assert s.resolve_context_budget("qwen3.8-flash") == (1_000_000, 0.80)
+        # -latest 滚动别名 1M，但带日期快照仍走保守兜底
+        assert s.resolve_context_budget("qwen-plus-latest") == (1_000_000, 0.80)
+        assert s.resolve_context_budget("qwen-plus-2025-01-01") == (32_768, 0.80)
+
+    def test_new_generation_vendor_entries(self):
+        from chaos_agent.config.settings import Settings
+
+        s = Settings(llm_api_key="test")
+        assert s.resolve_context_budget("gemini-2.0-flash") == (1_048_576, 0.80)
+        assert s.resolve_context_budget("glm-6") == (1_000_000, 0.80)
+        assert s.resolve_context_budget("minimax-m3") == (1_000_000, 0.80)
+        assert s.resolve_context_budget("minimax-m2.5") == (196_608, 0.80)
+        assert s.resolve_context_budget("minimax-text") == (200_000, 0.80)
+        assert s.resolve_context_budget("seed-oss-1.6-256k") == (524_288, 0.80)
 
     def test_unknown_model_falls_back_to_global(self):
         from chaos_agent.config.settings import Settings
@@ -434,19 +460,20 @@ class TestResolveContextBudget:
             },
         )
         # 用户新增条目生效；built-in 仍兜底未匹配模型
+        # （4-5 为 1M GA 之前的代际，走泛化 claude-opus 200K）
         assert s.resolve_context_budget("my-private-llm-v1") == (50_000, 0.75)
-        assert s.resolve_context_budget("claude-opus-4-7") == (200_000, 0.85)
+        assert s.resolve_context_budget("claude-opus-4-5") == (200_000, 0.85)
 
     def test_malformed_user_entry_falls_through_to_builtin(self):
         from chaos_agent.config.settings import Settings
 
         # 用户填的 claude-opus 缺 max_tokens 字段 → 跳过用户层，
-        # 用 built-in 的 claude-opus 条目
+        # 用 built-in 的 claude-opus 条目（4-5 走泛化前缀 200K）
         s = Settings(
             llm_api_key="test",
             model_budgets={"claude-opus": {"compact_ratio": 0.5}},
         )
-        assert s.resolve_context_budget("claude-opus-4-7") == (200_000, 0.85)
+        assert s.resolve_context_budget("claude-opus-4-5") == (200_000, 0.85)
 
     def test_fallthrough_to_global_emits_warning(self, caplog):
         import logging

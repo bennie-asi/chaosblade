@@ -74,6 +74,13 @@ async def _llm_derive_baseline_commands(
     if not llm or not skill_case_content:
         return []
 
+    # Single-shot structured derivation: reasoning tokens only add latency
+    # (264.6s → 3.5s with an explicit disable, bench_thinking.py). Real
+    # ChatOpenAI clients get the dialect-correct disable flag; injected
+    # test fakes pass through untouched.
+    from chaos_agent.agent.factory import with_thinking_disabled
+    llm = with_thinking_disabled(llm)
+
     # Build target context so the LLM embeds the correct resource
     # names/namespace/labels directly into each command.
     target_lines = [f"Fault type: {scope}-{target}-{action}", f"Fault scope: {scope}"]
@@ -159,6 +166,12 @@ async def _llm_retry_failed_commands(
     """
     if not llm or not failed_observations:
         return []
+
+    # Same latency rationale as the initial derivation: retries are
+    # single-shot structured calls; the error feedback in the prompt does
+    # the corrective work, not the reasoning channel.
+    from chaos_agent.agent.factory import with_thinking_disabled
+    llm = with_thinking_disabled(llm)
 
     error_lines = []
     for obs in failed_observations:
