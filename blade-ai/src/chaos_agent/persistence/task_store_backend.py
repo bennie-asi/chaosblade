@@ -44,6 +44,11 @@ _DETAIL_COLUMNS: list[str] = [
     "baseline_data", "inject_context", "skill_use_case",
     "injection_method", "execution_artifacts", "kubectl_exec_pod_name",
     "injection_start_time",
+    # LLM model frozen at task finalize time (snapshot, NOT live config —
+    # config can change mid-investigation; the session/task row is the only
+    # place the at-run fact survives). Synced from the session JSON by
+    # ``_finalize_session_store``.
+    "model_name",
     # R18 — postmortem dict (JSON-serialised), see save_memory.
     "postmortem",
     # E18 — safety pre-check reports (JSON-serialised).

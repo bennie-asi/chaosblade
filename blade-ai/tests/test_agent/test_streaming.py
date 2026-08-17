@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from chaos_agent.agent.streaming import StreamEvent, parse_stream_event, _extract_node_name
 
 
@@ -794,3 +796,110 @@ class TestWithPhaseEvents:
         # catches them. The node result is still returned correctly.
         result = await wrapped({"task_id": "t1"})
         assert result["status"] == "done"
+
+    # ---- tracer span persistence (regression: task_spans stayed empty) ----
+
+    async def test_wrapper_persists_span_for_real_task(self):
+        """A real task id gets a span row + summary persisted to TaskStore."""
+        from chaos_agent.agent.dispatch import with_phase_events
+        from chaos_agent.agent.state import AgentState
+        from chaos_agent.observability.status_tracker import get_tracker
+        from chaos_agent.observability.tracer import clear_trace
+        from chaos_agent.persistence.task_store import get_task_store, reset_task_store
+
+        task_id = "inject-00000000-0000-4000-8000-000000000001"
+
+        async def ok_node(state: AgentState) -> dict:
+            # Simulate a tool call event so the span collects tool_calls.
+            get_tracker(task_id).update(
+                "Tool call", detail={"tool_calls": ["kubectl"]}
+            )
+            return {"status": "done"}
+
+        wrapped = with_phase_events("agent_loop", "inject", ok_node)
+        try:
+            await wrapped({"task_id": task_id})
+            store = await get_task_store()
+            spans = await store.get_spans(task_id)
+            assert len(spans) == 1
+            assert spans[0]["node_name"] == "agent_loop"
+            assert spans[0]["duration_ms"] >= 0
+            assert spans[0]["error"] is None
+            assert spans[0]["tool_calls"] == ["kubectl"]
+            # Summary rollup is flushed alongside the span — and the tool
+            # call count survives the flush (regression: flush_trace used
+            # to overwrite the accumulated count with trace's zero).
+            summary = await store.get_summary(task_id)
+            assert summary is not None
+            assert summary["total_tool_calls"] == 1
+        finally:
+            clear_trace(task_id)
+            await reset_task_store()
+
+    async def test_wrapper_skips_span_for_dialogue_id(self):
+        """Dialogue-level ids (chaos-/turn-) persist nothing — whitelist gate."""
+        from chaos_agent.agent.dispatch import with_phase_events
+        from chaos_agent.agent.state import AgentState
+        from chaos_agent.persistence.task_store import get_task_store, reset_task_store
+
+        async def ok_node(state: AgentState) -> dict:
+            return {"status": "done"}
+
+        wrapped = with_phase_events("intent_clarification", "intent", ok_node)
+        try:
+            await wrapped({"task_id": "chaos-session-1"})
+            store = await get_task_store()
+            assert await store.get("chaos-session-1") is None
+            assert await store.get_spans("chaos-session-1") == []
+        finally:
+            await reset_task_store()
+
+    async def test_wrapper_records_error_span(self):
+        """A failing node persists a span carrying the error, then re-raises."""
+        from chaos_agent.agent.dispatch import with_phase_events
+        from chaos_agent.agent.state import AgentState
+        from chaos_agent.observability.tracer import clear_trace
+        from chaos_agent.persistence.task_store import get_task_store, reset_task_store
+
+        task_id = "inject-00000000-0000-4000-8000-000000000002"
+
+        async def crashing_node(state: AgentState) -> dict:
+            raise ValueError("node exploded")
+
+        wrapped = with_phase_events("execute_loop", "inject", crashing_node)
+        try:
+            with pytest.raises(ValueError, match="node exploded"):
+                await wrapped({"task_id": task_id})
+            store = await get_task_store()
+            spans = await store.get_spans(task_id)
+            assert len(spans) == 1
+            assert spans[0]["error"] == "node exploded"
+        finally:
+            clear_trace(task_id)
+            await reset_task_store()
+
+    async def test_wrapper_records_interrupted_span(self):
+        """GraphInterrupt closes the span as paused and re-raises."""
+        from langgraph.errors import GraphInterrupt
+        from chaos_agent.agent.dispatch import with_phase_events
+        from chaos_agent.agent.state import AgentState
+        from chaos_agent.observability.tracer import clear_trace
+        from chaos_agent.persistence.task_store import get_task_store, reset_task_store
+
+        task_id = "inject-00000000-0000-4000-8000-000000000003"
+
+        async def pausing_node(state: AgentState) -> dict:
+            raise GraphInterrupt("waiting for confirmation")
+
+        wrapped = with_phase_events("confirmation_gate", "safety", pausing_node)
+        try:
+            with pytest.raises(GraphInterrupt):
+                await wrapped({"task_id": task_id})
+            store = await get_task_store()
+            spans = await store.get_spans(task_id)
+            assert len(spans) == 1
+            assert "interrupted" in (spans[0]["error"] or "")
+        finally:
+            clear_trace(task_id)
+            await reset_task_store()
+

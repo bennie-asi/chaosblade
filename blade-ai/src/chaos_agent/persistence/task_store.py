@@ -41,6 +41,14 @@ from chaos_agent.utils.time import now_iso
 
 logger = logging.getLogger(__name__)
 
+# Lifecycle states that carry a final verdict. ``infer_task_state`` returns
+# "injecting" as a fallback whenever the record shows no lifecycle evidence,
+# and that fallback must never overwrite a verdict already on record.
+_TERMINAL_TASK_STATES = frozenset({
+    "injected", "recovered", "partial_recovered",
+    "failed", "rejected", "completed",
+})
+
 
 # ---------------------------------------------------------------------------
 # TaskStore — business logic layer
@@ -90,8 +98,21 @@ class TaskStore:
         # 3. Extract index fields (namespace, target_name) from target JSON
         merged = _extract_index_fields(merged)
 
-        # 4. Infer task_state / stage / phase
-        merged.update(self._infer_fields(merged))
+        # 4. Infer task_state / stage / phase from the FULL logical record.
+        # The lifecycle inputs (verification / recover_verification / result)
+        # live in task_details, NOT the tasks row — the read path get()
+        # already merges both tables, and inference must see the same record.
+        # Deriving from the tasks row alone let a field-less tracer flush
+        # re-project a verified task back to the "injecting" fallback
+        # (inject-9bf2dddd: tasks row has blade_uid but no verification
+        # column, so infer saw "no verification" and regressed 'injected').
+        inference_base = dict(merged)
+        if row:
+            detail_row = await self._backend.select_details(task_id)
+            if detail_row:
+                for k, v in detail_row.items():
+                    inference_base.setdefault(k, v)
+        merged.update(self._infer_fields(inference_base))
         merged["task_id"] = task_id
 
         # 5. Set gmt_create / gmt_modified
@@ -125,7 +146,14 @@ class TaskStore:
         """
         if not is_real_task_id(task_id):
             return
-        await self._backend.upsert_task(task_id, ["task_state"], [task_state])
+        # ❗ task_id MUST be in the column list: the backend builds
+        # INSERT … ON CONFLICT(task_id) DO UPDATE SET from it. Omitting it
+        # produced a NULL-task_id ghost row on SQLite and a NOT NULL
+        # violation on PostgreSQL (empty SET clause on PG additionally
+        # yields a syntax error for conflict-key-only upserts).
+        await self._backend.upsert_task(
+            task_id, ["task_id", "task_state"], [task_id, task_state]
+        )
 
     async def get(self, task_id: str) -> Optional[dict]:
         """Return the full task data (tasks + task_details merged).
@@ -276,7 +304,7 @@ class TaskStore:
             finished_at = task.get("finished_at", "")
             if gmt_create and finished_at:
                 try:
-                    from chaos_agent.utils.time import now_iso, parse_iso_timestamp
+                    from chaos_agent.utils.time import parse_iso_timestamp
                     ct = parse_iso_timestamp(gmt_create)
                     ft = parse_iso_timestamp(finished_at)
                     duration_ms = int((ft - ct).total_seconds() * 1000)
@@ -297,6 +325,10 @@ class TaskStore:
             "phase": task.get("phase", "planning"),
             "fault_type": fault_type,
             "skill_name": task.get("skill_name", ""),
+            # LLM model frozen at task finalize time (snapshot of the
+            # at-run config, NOT live config) — empty for tasks archived
+            # before the model_name column existed.
+            "model_name": task.get("model_name") or "",
             "target": task.get("target"),
             "params": task.get("params"),
             "blade_uid": task.get("blade_uid", ""),
@@ -426,6 +458,15 @@ class TaskStore:
                 values["needs_confirmation"] = values["needs_confirm"]
 
             task_state = infer_task_state(values)
+            # Monotonicity guard: a terminal verdict never regresses to the
+            # "injecting" fallback ("no lifecycle evidence in the record") —
+            # a record that already proved injected/recovered/failed cannot
+            # un-prove it. Defense in depth on top of the full-record merge
+            # in upsert(); also protects state.py consumers that call this
+            # with a partial dict.
+            prev_state = (values.get("task_state") or "").strip()
+            if task_state == "injecting" and prev_state in _TERMINAL_TASK_STATES:
+                task_state = prev_state
             stage = infer_stage(values)
             phase = infer_phase(values)
 

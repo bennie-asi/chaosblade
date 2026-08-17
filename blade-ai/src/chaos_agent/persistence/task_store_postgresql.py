@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS task_details (
     target_health_report TEXT,
     feasibility_report  TEXT,
     execution_artifacts TEXT,
+    model_name          TEXT,
     total_token_input   INTEGER NOT NULL DEFAULT 0,
     total_token_output  INTEGER NOT NULL DEFAULT 0,
     total_llm_calls     INTEGER NOT NULL DEFAULT 0,
@@ -133,15 +134,26 @@ def _build_upsert_sql(table: str, columns: list[str], conflict_col: str = "task_
     positional ``$N`` placeholders used (for validation purposes).
 
     asyncpg uses ``$1``, ``$2``, … positional parameters.
+
+    When *columns* contains only the conflict key there is nothing to
+    update — ``DO UPDATE SET`` with an empty assignment list is a syntax
+    error in PostgreSQL (SQLite tolerates it). Fall back to ``DO NOTHING``:
+    the row already exists and carries every column being "upserted", so
+    the semantics are identical. This path is hit by bare existence
+    anchors such as ``tracer._persist_span`` calling ``store.upsert(task_id)``.
     """
     col_names = ", ".join(columns)
     placeholders = ", ".join(f"${i}" for i in range(1, len(columns) + 1))
-    update_clause = ", ".join(
-        f"{c}=EXCLUDED.{c}" for c in columns if c != conflict_col
-    )
+    update_cols = [c for c in columns if c != conflict_col]
+    if update_cols:
+        conflict_action = "DO UPDATE SET " + ", ".join(
+            f"{c}=EXCLUDED.{c}" for c in update_cols
+        )
+    else:
+        conflict_action = "DO NOTHING"
     sql = (
         f"INSERT INTO {table} ({col_names}) VALUES ({placeholders}) "
-        f"ON CONFLICT({conflict_col}) DO UPDATE SET {update_clause}"
+        f"ON CONFLICT({conflict_col}) {conflict_action}"
     )
     return sql, len(columns)
 
@@ -283,6 +295,13 @@ class PostgreSQLBackend:
                 pass
             try:
                 await conn.execute("ALTER TABLE task_details ADD COLUMN kubectl_exec_pod_name TEXT")
+            except Exception:
+                pass
+            try:
+                # LLM model frozen at task finalize time — synced from the
+                # session record by ``_finalize_session_store`` so the
+                # metric envelope can report which model ran the drill.
+                await conn.execute("ALTER TABLE task_details ADD COLUMN model_name TEXT")
             except Exception:
                 pass
             try:

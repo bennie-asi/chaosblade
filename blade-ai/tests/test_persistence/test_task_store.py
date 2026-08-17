@@ -81,6 +81,10 @@ class TestSchema:
         assert "gmt_create" in col_names
         assert "gmt_modified" in col_names
         assert "fault_spec" in col_names
+        # LLM model frozen at task finalize — the metric chain reads it
+        # from task_details; without the column the drill's model is
+        # invisible in every review surface.
+        assert "model_name" in col_names
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +166,20 @@ class TestUpsert:
         assert data["namespace"] == "prod"
         assert data["target_name"] == "pod1"
 
+    @pytest.mark.asyncio
+    async def test_update_task_state_updates_in_place_no_ghost_row(self, store):
+        """Regression: task_id must be part of the upsert column list.
+
+        Omitting it turned the upsert into a plain INSERT, creating a
+        NULL-task_id ghost row instead of updating the task (and blowing
+        up on PostgreSQL with a NOT NULL violation).
+        """
+        await store.upsert("task-t1", skill_name="pod-kill")
+        await store.update_task_state("task-t1", "recovering")
+        data = await store.get("task-t1")
+        assert data["task_state"] == "recovering"
+        assert await store.count() == 1  # no ghost row
+
 
 # ---------------------------------------------------------------------------
 # Infer fields
@@ -205,6 +223,63 @@ class TestInferFields:
         data = await store.get("task-t1")
         assert data["task_state"] == "recovered"
         assert data["stage"] == "recovery"
+
+
+class TestInferenceRegressionGuard:
+    """inject-9bf2dddd: a verified task was re-projected back to
+    ``injecting`` by the final tracer flush. The flush carries no lifecycle
+    fields, and inference used to merge only the ``tasks`` row — which has
+    no ``verification`` column (it lives in ``task_details``) — so it saw
+    "blade_uid without verification" and returned the ``injecting``
+    fallback over the stored ``injected`` verdict. Two defenses:
+    (1) inference merges the FULL logical record (tasks + details);
+    (2) a terminal verdict never regresses to the ``injecting`` fallback.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fieldless_upsert_keeps_injected(self, store):
+        """tracer._persist_span style: upsert(task_id) with no fields."""
+        verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
+        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc",
+                           verification=verification)
+        assert (await store.get("task-t1"))["task_state"] == "injected"
+        await store.upsert("task-t1")  # field-less flush
+        data = await store.get("task-t1")
+        assert data["task_state"] == "injected"
+        assert data["phase"] == "verification_passed"
+
+    @pytest.mark.asyncio
+    async def test_summary_only_upsert_keeps_injected(self, store):
+        """tracer._persist_summary style: metrics fields, no lifecycle."""
+        verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
+        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc",
+                           verification=verification)
+        await store.upsert("task-t1", total_token_input=100, total_llm_calls=3)
+        data = await store.get("task-t1")
+        assert data["task_state"] == "injected"
+        assert data["total_token_input"] == 100
+
+    @pytest.mark.asyncio
+    async def test_terminal_state_never_regresses_to_injecting(self, store):
+        """Monotonicity guard alone: verdict on record, no lifecycle fields
+        anywhere in the merged record (legacy/corrupted shape)."""
+        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc")
+        await store.update_task_state("task-t1", "injected")  # verdict, as-is
+        await store.upsert("task-t1", total_llm_calls=1)  # re-projection
+        assert (await store.get("task-t1"))["task_state"] == "injected"
+
+    @pytest.mark.asyncio
+    async def test_recovery_transition_not_blocked_by_guard(self, store):
+        """The guard blocks regressions to the fallback only — a genuine
+        injected -> recovered transition must still go through."""
+        verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
+        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc",
+                           verification=verification)
+        recover_verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
+        await store.upsert("task-t1", operation="recover",
+                           recover_verification=recover_verification,
+                           result={"recovered": True})
+        assert (await store.get("task-t1"))["task_state"] == "recovered"
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +627,22 @@ class TestMetricMethods:
     @pytest.mark.asyncio
     async def test_get_metric_nonexistent(self, store):
         assert await store.get_metric("nonexistent") is None
+
+    @pytest.mark.asyncio
+    async def test_get_metric_exposes_frozen_model_name(self, store):
+        """model_name rides the metric envelope as an at-run snapshot."""
+        await store.upsert("task-t1", skill_name="pod-kill",
+                           model_name="qwen3.8-max")
+        metric = await store.get_metric("task-t1")
+        assert metric["model_name"] == "qwen3.8-max"
+
+    @pytest.mark.asyncio
+    async def test_get_metric_model_name_empty_for_legacy_tasks(self, store):
+        """Tasks archived before the column existed yield "", never None
+        (renderers gate on truthiness)."""
+        await store.upsert("task-t1", skill_name="pod-kill")
+        metric = await store.get_metric("task-t1")
+        assert metric["model_name"] == ""
 
     @pytest.mark.asyncio
     async def test_get_metric_computes_fault_type(self, store):

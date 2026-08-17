@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS task_details (
     target_health_report TEXT,
     feasibility_report  TEXT,
     execution_artifacts TEXT,
+    model_name          TEXT,
     total_token_input   INTEGER NOT NULL DEFAULT 0,
     total_token_output  INTEGER NOT NULL DEFAULT 0,
     total_llm_calls     INTEGER NOT NULL DEFAULT 0,
@@ -271,6 +272,13 @@ class SQLiteBackend:
                 " WHERE injection_start_time IS NULL"
                 "   AND (target IS NOT NULL OR fault_spec IS NOT NULL)"
             )
+        except Exception:
+            pass
+        try:
+            # LLM model frozen at task finalize time — synced from the
+            # session record by ``_finalize_session_store`` so the metric
+            # envelope can report which model ran the drill.
+            await conn.execute("ALTER TABLE task_details ADD COLUMN model_name TEXT")
         except Exception:
             pass
         # Migration: add tenant_id column to tasks table for multi-tenant isolation
