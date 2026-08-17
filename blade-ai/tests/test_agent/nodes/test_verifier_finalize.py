@@ -12,6 +12,8 @@ from chaos_agent.agent.nodes.verify._verifier_finalize import (
     _cleanup_residuals,
     _retired_uids_from_residuals,
     _verify_replan_eligible,
+    _apply_step_coverage,
+    _enforce_disk_burn_facts,
 )
 from chaos_agent.agent.result.verdict import Layer1Result
 
@@ -349,3 +351,150 @@ class TestRetiredUidsFromResiduals:
              "cleanup_result": "Error: blade destroy failed"},
         ]
         assert _retired_uids_from_residuals(residuals) == ["uid-ok"]
+
+
+class TestApplyStepCoverageAnswerBased:
+    """Answer-based coverage: every step answered; discretion needs a reason."""
+
+    _SKILL = (
+        "## 注入验证\n"
+        "1. 检查目标内存占用是否升高\n"
+        "2. 检查 Pod 是否出现 OOMKilled 事件\n"
+        "3. 检查应用 A 的访问延迟\n"
+    )
+
+    def _verification(self, items):
+        return {
+            "level": "verified",
+            "layer2": {"status": "passed", "details": ""},
+            "warnings": [],
+            "checklist": {
+                "items": items,
+                "total_executed": len(items),
+                "total_count": len(items),
+            },
+        }
+
+    def test_justified_discretionary_answers_do_not_downgrade(self):
+        items = [
+            {"step": 1, "status": "passed", "category": "core",
+             "evidence": "memory 81% via kubectl top"},
+            {"step": 2, "status": "expected", "category": "impact",
+             "evidence": "no OOMKilled in events; mem-percent=80 below "
+                         "eviction threshold"},
+            {"step": 3, "status": "not_applicable", "category": "impact",
+             "evidence": "'应用 A' matches no workload in this cluster"},
+        ]
+        v = self._verification(items)
+        missing, expected_steps, executed = _apply_step_coverage(
+            v, {"skill_case_content": self._SKILL}, None, False,
+        )
+        assert not missing
+        assert expected_steps == 3
+        assert executed == 3
+        assert v["layer2"]["status"] == "passed"
+        assert v["level"] == "verified"
+
+    def test_expected_without_evidence_downgrades_to_partial(self):
+        items = [
+            {"step": 1, "status": "passed", "evidence": "memory 81%"},
+            {"step": 2, "status": "expected"},
+            {"step": 3, "status": "not_applicable",
+             "evidence": "no workload matches"},
+        ]
+        v = self._verification(items)
+        _apply_step_coverage(v, {"skill_case_content": self._SKILL}, None, False)
+        assert v["layer2"]["status"] == "partial"
+        assert v["level"] == "partial"
+        assert any("without evidence" in w for w in v["warnings"])
+
+    def test_silent_omission_still_flags_gap(self):
+        items = [{"step": 1, "status": "passed", "evidence": "memory 81%"}]
+        v = self._verification(items)
+        missing, _, _ = _apply_step_coverage(
+            v, {"skill_case_content": self._SKILL}, None, False,
+        )
+        assert missing == [2, 3]
+        assert v["layer2"]["status"] == "partial"
+
+
+class TestEnforceDiskBurnFactsImpactExclusion:
+    """Burn override must not flip IMPACT findings or let them gate level."""
+
+    def test_impact_items_survive_override_and_do_not_gate_level(self):
+        verification = {
+            "level": "partial",
+            "layer2": {"status": "failed", "details": ""},
+            "warnings": [],
+            "checklist": {"items": [
+                {"step": 1, "status": "failed", "category": "core",
+                 "evidence": "no I/O delta seen"},
+                {"step": 2, "status": "failed", "category": "impact",
+                 "evidence": "no latency increase observed"},
+            ]},
+        }
+        state = {"disk_burn_post_check": {
+            "burn_io_detected": True,
+            "active_partitions": [
+                {"name": "/dev/vdb", "write_throughput_mb_s": 120}],
+        }}
+        applied = _enforce_disk_burn_facts(verification, state)
+        assert applied
+        core_item, impact_item = verification["checklist"]["items"]
+        # CORE step overridden by the programmatic I/O evidence.
+        assert core_item["status"] == "passed"
+        assert "OVERRIDE" in core_item["evidence"]
+        # IMPACT finding preserved verbatim — never a fake pass.
+        assert impact_item["status"] == "failed"
+        assert "OVERRIDE" not in impact_item["evidence"]
+        assert verification["layer2"]["status"] == "passed"
+        # IMPACT failure does not gate the level.
+        assert verification["level"] == "verified"
+
+
+class TestSubmitArgsImpactEvidenceExclusion:
+    """IMPACT absence-phrasing evidence must not force auto-downgrade."""
+
+    def test_impact_absence_evidence_does_not_force_downgrade(self):
+        # CORE step failed (benign, timing lag) + IMPACT finding whose
+        # evidence carries an absence phrase. Only CORE evidence may
+        # trigger the objective-measurement auto-downgrade.
+        args = {
+            "overall": "verified",
+            "layer2_status": "passed",
+            "primary_evidence_observed": True,
+            "checklist": [
+                {"step": 1, "status": "failed", "category": "core",
+                 "evidence": "timing lag; retry confirmed effect later"},
+                {"step": 2, "status": "failed", "category": "impact",
+                 "evidence": "no observable business impact"},
+            ],
+        }
+        result = _verification_from_submit_args(args)
+        assert result["layer2"]["status"] == "passed"
+        assert any("inconsistency" in w for w in result["warnings"])
+
+
+class TestMode2CoverageDisabledContract:
+    """When the extractor cannot enumerate steps, the count fallback is off."""
+
+    _SKILL = "# 场景\n## 注入验证\n1.\n"  # counter counts 1, extractor yields []
+
+    def test_count_fallback_does_not_fire_without_parseable_steps(self):
+        # Checklist answers nothing numerically, yet no count-based gap or
+        # downgrade may fire — coverage validation is DISABLED per prompt.
+        v = {
+            "level": "verified",
+            "layer2": {"status": "passed", "details": ""},
+            "warnings": [],
+            "checklist": {"items": [
+                {"step": 1, "status": "passed", "evidence": "mem elevated"},
+            ], "total_executed": 1},
+        }
+        missing, expected_steps, executed = _apply_step_coverage(
+            v, {"skill_case_content": self._SKILL}, None, False,
+        )
+        assert expected_steps == 0
+        assert not missing
+        assert v["layer2"]["status"] == "passed"
+        assert not any("never attempted" in w for w in v["warnings"])

@@ -55,16 +55,13 @@ from chaos_agent.agent.nodes.verify._verifier_messages import (
     # noqa: F401  re-export for tests
     _build_layer2_messages,
     # noqa: F401
+    _verification_cycle_needs_context,
 )
 from chaos_agent.agent.nodes.verify._verifier_shared import (
     _compute_baseline_confidence,
     # noqa: F401
     # noqa: F401
 )
-
-# Backward-compat aliases (some tests still import these from verifier→baseline_capture)
-_parse_debug_pod_name = parse_debug_pod_name
-_delete_debug_pod = delete_debug_pod
 from chaos_agent.agent.nodes.execute.llm_step_helpers import (
     build_stagnation_hint,
     persist_corrective_hint,
@@ -83,6 +80,7 @@ from chaos_agent.agent.nodes.execute.react_helpers import (
 )
 from chaos_agent.agent.result.operation_outcome import write_inject_verification
 from chaos_agent.agent.prompts import build_system_prompt, PromptMode
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.spec.skill_identity import read_active_skill_name
 from chaos_agent.agent.state import AgentState
 from chaos_agent.config.settings import settings
@@ -93,6 +91,10 @@ from chaos_agent.observability.status_tracker import (
     StatusCategory,
 )
 from chaos_agent.agent.dispatch import dispatch_node_message
+
+# Backward-compat aliases (some tests still import these from verifier→baseline_capture)
+_parse_debug_pod_name = parse_debug_pod_name
+_delete_debug_pod = delete_debug_pod
 
 logger = logging.getLogger(__name__)
 
@@ -216,9 +218,9 @@ async def verifier(state: AgentState) -> dict:
             if layer1.is_passed()
             else (
                 [
-                    "Fault experiment expired (Destroyed/Revoked) before verification. "
-                    "The fault duration (--timeout) was too short for post-injection verification. "
-                    "Recommend --duration >= 60."
+                    "Fault experiment record expired (Destroyed/Revoked) before or during "
+                    "verification, so live fault effects could not be observed by Layer 1. "
+                    "Layer 2 was unavailable (no LLM) to judge cluster-level evidence."
                 ]
                 if _is_expired
                 else (
@@ -322,8 +324,18 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
             await sync_to_store(state, result_dict)
             return result_dict
 
-        # ---- Layer 1: blade_status + blade_query_k8s (only on first iteration) ----
-        if count == 1:
+        # ---- Cycle detection (position-based, NOT counter-based) ----
+        # "Is this the first turn of the CURRENT verification cycle?" is a
+        # fact about the message sequence: the cycle's marker-tagged context
+        # HumanMessage either exists in the current epoch or it does not.
+        # Every replan seam re-bases ``attribution_epoch_index``, so the old
+        # cycle's marker falls before the boundary and the new cycle re-arms
+        # — Layer 1 re-runs and a fresh context is injected — with no
+        # dependency on the seam resetting ``verifier_loop_count``.
+        _new_cycle = _verification_cycle_needs_context(state)
+
+        # ---- Layer 1: blade_status + blade_query_k8s (first turn of cycle) ----
+        if _new_cycle:
             # Save tracker state before Layer 1 sub-operations (defensive)
             _saved_tracker_state = tracker.save_state()
             layer1 = await run_layer1_for_state(
@@ -406,15 +418,17 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
         messages = _build_layer2_messages(
             state, layer1, blade_uid, skill_name, kubeconfig, count,
             tool_pod_name=tool_pod_name,
+            new_cycle=_new_cycle,
         )
 
         # Extract synthetic AIMessage+ToolMessage pairs from the local messages
-        # list for state persistence. On count==1, prepend them to
-        # result_update["messages"] BEFORE the response so that
+        # list for state persistence. On the cycle's first turn, prepend them
+        # to result_update["messages"] BEFORE the response so that
         # state["messages"][-1] remains the real AIMessage (routing-safe).
-        # On count>1, they are already in AgentState.messages (persisted
-        # from count==1) and _build_layer2_messages detected them via the
-        # _already_in_state check, so _synthetic_for_state is empty.
+        # On later turns, they are already in AgentState.messages (persisted
+        # from the cycle's first turn) and _build_layer2_messages detected
+        # them via the _already_in_state check, so _synthetic_for_state is
+        # empty.
         _synthetic_for_state = extract_synthetic_messages(messages, _SYNTHETIC_TOOL_CALL_IDS)
 
         # Extract the main verifier context HumanMessage for state persistence.
@@ -473,11 +487,11 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
         # Use JSON mode (response_format) when enabled for guaranteed structured output
         if count >= settings.max_verifier_loop and settings.verifier_json_mode:
             json_llm = llm.bind(response_format={"type": "json_object"})
-            json_reminder = HumanMessage(content=(
+            json_reminder = HumanMessage(content=wrap_system_reminder(
                 "You MUST output valid JSON matching this schema:\n"
                 "{\n"
                 '  "verification_checklist": [\n'
-                '    {"step": 1, "status": "passed|failed|skipped|recovered_before_observation", "evidence": "brief"},\n'
+                '    {"step": 1, "category": "core|impact", "status": "passed|failed|skipped|recovered_before_observation|expected|not_applicable", "evidence": "brief"},\n'
                 '    ...\n'
                 '  ],\n'
                 '  "layer1": "passed|failed|skipped",\n'

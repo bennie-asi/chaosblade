@@ -17,6 +17,10 @@ from chaos_agent.agent.prompts import (
 from chaos_agent.agent.prompts.sections.workflow import (
     get_verification_heuristics_compact_section,
 )
+from chaos_agent.agent.prompts.sections.execution import (
+    _execution_steps_only,
+    get_execution_directives_section,
+)
 from chaos_agent.agent.prompts.modes import PromptMode
 from chaos_agent.agent.prompts.sections.intent import (
     get_intent_role_section,
@@ -561,3 +565,73 @@ class TestBuildIntentClarificationPrompt:
         # catalog still complete
         assert "`k8s`: pod cpu pressure" in prompt
         assert "`host`: cpu pressure" in prompt
+
+
+class TestExecutorEffectObservationBoundary:
+    """inject-9bf2dddd: after a successful injection the executor spent 571s
+    watching the fault effect (waits + repeated sampling + stability checks)
+    and ate the fault's active window, leaving the verifier ~29s. The cause
+    was prompt-level: no positive exit criterion (the plan's 'Verification
+    Methods' numbers became the model's exit gate) plus wording that eroded
+    the receipt's authority ('do not treat a single command result as the
+    final verdict'). These tests freeze the fix: the receipt is the
+    executor's completion proof, effect observation belongs to verification,
+    and the plan is structurally sliced to its mutation steps.
+    """
+
+    def test_receipt_completion_rule_in_core_principles(self):
+        section = get_executor_core_principles_section()
+        # Receipt = proof a step was ISSUED (single source for the receipt
+        # concept); the STOP rule stays step-aware ("ALL steps"), so
+        # multi-step / hybrid injections never stop after the first receipt.
+        assert "A step is complete when its mutation is ISSUED" in section
+        assert "When ALL steps are issued, STOP" in section
+        assert "do not wait for, sample, or stabilize the fault effect" in section
+        # the replan channel is named so the right-to-switch-method survives
+        assert "returns to you through replan" in section
+
+    def test_receipt_completion_rule_in_remember(self):
+        # U-shaped attention: the recency anchor must carry the same rule.
+        section = get_executor_remember_section()
+        assert "A step is complete when its mutation is ISSUED" in section
+
+    def test_receipt_authority_wording_not_eroded(self):
+        # The old phrasing taught the model that its receipt cannot be
+        # trusted as proof of the real-world effect — driving post-injection
+        # effect observation. It must be gone from the Phase 2 tools section,
+        # which returns to its original read-only-context focus.
+        tools = get_tools_section(phase=2)
+        assert "final verdict on the real-world effect" not in tools
+        assert "verification and recovery lifecycle" in tools
+
+    def test_plan_sliced_to_execution_steps(self):
+        plan = (
+            "# Some fault\n\n"
+            "## Execution Steps\n"
+            "1. issue the mutation\n\n"
+            "## Verification Methods\n"
+            "observe 2 samples at 30s intervals until ~80%\n\n"
+            "## Rollback and Recovery\n"
+            "destroy the experiment\n"
+        )
+        directives = get_execution_directives_section(plan=plan, plan_path="/tmp/p.md")
+        assert "1. issue the mutation" in directives
+        assert "observe 2 samples" not in directives
+        assert "destroy the experiment" not in directives
+        # the textual ban is replaced by structural isolation
+        assert "do NOT execute them" not in directives
+
+    def test_plan_without_header_falls_back_to_full_text(self):
+        assert _execution_steps_only("the approved plan body") == "the approved plan body"
+
+    def test_slice_keeps_steps_drops_later_sections(self):
+        plan = (
+            "## Execution Steps\n"
+            "1. step one\n"
+            "2. step two\n"
+            "## Expected Impact\n"
+            "memory ~80%\n"
+        )
+        sliced = _execution_steps_only(plan)
+        assert "step one" in sliced and "step two" in sliced
+        assert "memory ~80%" not in sliced

@@ -252,7 +252,10 @@ def build_recover_graph(
             ),
         )
         graph.add_node("recover_verifier_screener", _recover_screener)
-        graph.add_node("recover_verifier_tools", ToolNode(verifier_tools, handle_tool_errors=True))
+        # Same unknown-tool rewrite as Phase 2: the LangGraph default lists
+        # every bound tool ("try one of [...]"), which hands the model a menu
+        # instead of the one fact it needs (task-ce9647931ce1 pattern).
+        graph.add_node("recover_verifier_tools", ToolNode(verifier_tools, handle_tool_errors=_phase2_handle_tool_error))
 
     graph.set_entry_point("recover_verifier_loop")
 
@@ -525,7 +528,9 @@ def build_pipeline_graph(
             ),
         )
         graph.add_node("verifier_screener", _verifier_screener)
-        graph.add_node("verifier_tools", ToolNode(verifier_tools, handle_tool_errors=True))
+        # Same unknown-tool rewrite as Phase 2 — the LangGraph default's
+        # "try one of [...]" list is the anti-pattern Layer D removed.
+        graph.add_node("verifier_tools", ToolNode(verifier_tools, handle_tool_errors=_phase2_handle_tool_error))
     graph.add_node("se_detect", with_phase_events("se_detect", "verify", se_detect_node))
 
     # End

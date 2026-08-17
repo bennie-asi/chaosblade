@@ -595,6 +595,12 @@ class TestBuildLayer1RecoveryPrompt:
         assert "deployment-specific" in prompt
         # Recovery must mirror the in-cluster injection channel
         assert "in-cluster channel" in prompt
+        # The recovery context message carries no persisted injection-pod
+        # field, so the template must not promise one unconditionally —
+        # only a conditional "when it is named" reference is honest.
+        assert "The recovery context below names the" not in prompt
+        assert "when it is named" in prompt
+        assert "may name no pod at all" in prompt
         # First-principles command authority: the tool's own help/usage and
         # runtime output are the ground truth — docs/history may lag
         assert "help/usage" in prompt

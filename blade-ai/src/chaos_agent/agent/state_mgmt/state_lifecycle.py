@@ -84,6 +84,7 @@ _STATE_FIELD_POLICY_LIST: tuple[StateFieldPolicy, ...] = (
     _p("plan_summary", "planning", batch=""),
     _p("plan_path", "planning", batch=None),
     _p("is_complex", "planning", batch=None),
+    _p("plan_verification", "planning", batch=None),
     _p("planning_rejected", "planning", batch=False),
     _p("_planning_rejection_reason", "planning", batch=None),
     _p("_planning_alternatives", "planning", batch=""),
@@ -135,6 +136,8 @@ _STATE_FIELD_POLICY_LIST: tuple[StateFieldPolicy, ...] = (
     # pods rotate between tasks) and not inherited by recover graphs.
     _p("known_vehicle_pods", "execution", batch=None, recover=False),
     _p("vehicle_probe_misses", "execution", batch=None, recover=False),
+    _p("exec_pod_node_bindings", "execution", batch=None, recover=False),
+    _p("selector_name_probes", "execution", batch=None, recover=False),
     _p("blade_parsed_flags", "execution", durable=True, batch=None),
     _p("direct", "execution", batch=False, recover=False),
     _p("original_replicas", "execution", durable=True, batch=None),

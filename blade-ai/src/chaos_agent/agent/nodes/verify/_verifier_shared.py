@@ -220,17 +220,30 @@ def parse_checklist_items(
     end_marker: str,
     patterns: list[re.Pattern],
     capture_evidence: bool = False,
+    category_group: int | None = None,
 ) -> list[dict]:
     """Parse verification checklist items from LLM output.
 
     Args:
         section_marker: e.g. "VERIFICATION_CHECKLIST:" or "RECOVERY_VERIFICATION_CHECKLIST:"
         end_marker: e.g. "VERIFICATION_RESULT:" or "RECOVERY_VERIFICATION_RESULT:"
-        patterns: compiled regex patterns (each must have group(1)=step, group(2)=status)
-        capture_evidence: if True, extract group(3) as 'evidence' when present
+        patterns: compiled regex patterns. By default each must have
+            group(1)=step, group(2)=status. When ``category_group`` is set,
+            that group holds an optional ``[CORE]``/``[IMPACT]`` tag and the
+            status/evidence groups shift to category_group+1/+2.
+        capture_evidence: if True, extract the evidence group as 'evidence'
+        category_group: 1-based group index holding an optional step
+            category tag ("core"/"impact"); None for patterns without it
     """
     items: list[dict] = []
     seen_steps: set[str] = set()
+
+    if category_group is not None:
+        status_idx = category_group + 1
+        evidence_idx = category_group + 2
+    else:
+        status_idx = 2
+        evidence_idx = 3
 
     checklist_section = text
     if section_marker in text:
@@ -244,12 +257,20 @@ def parse_checklist_items(
 
     for pattern in patterns:
         for match in pattern.finditer(checklist_section):
+            category = None
+            if category_group is not None and (match.lastindex or 0) >= category_group:
+                cat_raw = match.group(category_group)
+                if cat_raw:
+                    cat_norm = cat_raw.strip("[] \t").lower()
+                    if cat_norm in ("core", "impact"):
+                        category = cat_norm
+
             if "[skipped]" in match.group(0).lower():
                 step_str = match.group(1) if match.group(1) else str(len(seen_steps) + 1)
                 status = "skipped"
             else:
                 step_str = match.group(1)
-                status = match.group(2).lower()
+                status = match.group(status_idx).lower()
 
             if step_str in seen_steps:
                 continue
@@ -259,8 +280,10 @@ def parse_checklist_items(
             except ValueError:
                 step_num = len(items) + 1
             item: dict = {"step": step_num, "status": status}
+            if category:
+                item["category"] = category
             if capture_evidence:
-                evidence = match.group(3) if match.lastindex and match.lastindex >= 3 else None
+                evidence = match.group(evidence_idx) if match.lastindex and match.lastindex >= evidence_idx else None
                 if evidence:
                     item["evidence"] = evidence.strip()
             items.append(item)

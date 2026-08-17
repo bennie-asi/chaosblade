@@ -21,14 +21,18 @@ def get_tools_section(phase: int = 1) -> str:
    relevant knowledge document for domain context. While a documented path covers the need, do not fabricate commands — but when every documented path has empirically failed, an equivalent-effect method you devise (same target, same fault effect) is legitimate, not improvisation.
 3. **Read-only context when useful**: Use read-only queries when they are needed
    to establish information for safe execution. The system owns the post-execution
-   verification and recovery lifecycle; do not treat a single command result as the
-   final verdict on the real-world effect.
+   verification and recovery lifecycle.
 4. **Injection tools**: Use the injection tool specified by the skill case. Before invoking
    any tool, inspect its own help/usage output to confirm the flags and parameters it
    actually supports (runtime interface wins — see Runtime Feedback Priority). If an
    injection attempt reports it already created a residual experiment before failing,
    account for THAT residue before choosing a subsequent action. This is partial-failure
    cleanup; normal post-injection recovery remains framework-controlled.
+5. **Injection records are framework state, not your artifacts**: NEVER destroy or clean
+   up the record of a SUCCESSFUL injection — it is the recovery handle and evidence for
+   the stages after you, and an irreversible fault effect is exactly why it must survive.
+   Clean up only artifacts you brought in (debug pods, temp files) and residue from a
+   FAILED attempt.
 
 ### Parallel Calls
 - You MAY make multiple independent read-only queries in a single turn (e.g., inspect two independent targets simultaneously)
@@ -150,10 +154,12 @@ def get_execution_directives_section(
         "",
         "### Multi-Step Execution",
         "The approved mutation steps live in the plan's '## Execution Steps' section.",
-        "Run them through tool calls (never prose), using each result to decide whether",
-        "the next step still applies; a completed step is progress, not necessarily",
-        "completion. When the mutation work is done, output a brief evidence-based",
-        "conclusion and STOP — the system owns post-execution verification and recovery.",
+        "Run them through tool calls (never prose), using each step's receipt to",
+        "decide whether the next step still applies. Do not add effect observations",
+        "after an issued step — a later phase verifies the effect, and watching for",
+        "it here only consumes the fault's active window. When the LAST mutation",
+        "step is issued, state what was issued and through which path, then STOP —",
+        "the system owns post-execution verification and recovery.",
         "",
         "### Parameter Priority",
         "When conflicting sources specify a parameter value, follow this hierarchy",
@@ -187,7 +193,36 @@ def get_execution_directives_section(
         plan_ref = f" (saved at {plan_path})" if plan_path else ""
         parts.append("")
         parts.append(f"### EXECUTION PLAN{plan_ref}")
-        parts.append("This task was assessed as complex. Execute ONLY the '## Execution Steps' section from the plan below. Sections labeled 'Verification Methods', 'Rollback and Recovery', and 'Expected Impact' are for other phases — do NOT execute them.")
-        parts.append(f"---\n{plan}\n---")
+        parts.append("This task was assessed as complex. Execute ONLY the mutation steps below.")
+        parts.append(f"---\n{_execution_steps_only(plan)}\n---")
 
     return "\n".join(parts)
+
+
+def _execution_steps_only(plan: str) -> str:
+    """Slice the plan down to its '## Execution Steps' section.
+
+    Structural isolation instead of a textual ban: the full plan also carries
+    'Verification Methods' / 'Expected Impact' / 'Rollback' sections whose
+    numeric criteria (sample counts, thresholds, intervals) the executor
+    otherwise adopts as its own EXIT criteria and keeps observing the fault
+    effect to satisfy (task inject-9bf2dddd: 571s of post-injection watching).
+    Plans without the header fall back to the full text so non-standard
+    plans lose nothing.
+    """
+    lines = plan.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("## execution steps"):
+            start = i
+            break
+    if start is None:
+        return plan
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        stripped = lines[j].strip()
+        if stripped.startswith("## "):
+            end = j
+            break
+    section = "\n".join(lines[start:end]).strip()
+    return section or plan

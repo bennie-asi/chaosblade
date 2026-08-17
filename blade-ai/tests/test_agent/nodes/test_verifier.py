@@ -1084,16 +1084,17 @@ class TestExtractKubectlExecPodName:
         )
         assert _extract_kubectl_exec_pod_name(msgs) == "otel-c-tool-ws"
 
-    def test_v_args_starting_with_flag_returns_none(self):
-        """v_args starting with a flag → None (not a valid pod name)."""
+    def test_v_args_starting_with_flag_still_extracts_pod(self):
+        """v_args starting with `-n` is valid kubectl syntax — pod name must
+        still be extracted (task-2d612caa regression: losing the injection
+        pod made Layer 1 read an unrelated pod's empty local DB as failure)."""
         from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
         msgs = _make_kubectl_tool_call_pair(
             "tc6", "exec",
             "-n chaosblade otel-c-tool -- blade create k8s pod-cpu fullload",
             '{"code":200,"success":true,"result":"uid-flag"}',
         )
-        # First token is "-n" which starts with "-" → returns None
-        assert _extract_kubectl_exec_pod_name(msgs) is None
+        assert _extract_kubectl_exec_pod_name(msgs) == "otel-c-tool"
 
     def test_legacy_session_without_tool_call_id(self):
         """ToolMessage without tool_call_id → fallback to AIMessage scan."""
@@ -1172,6 +1173,38 @@ class TestLayer2ToolPodNamespace:
         assert "kubectl(" not in text
         assert "blade status" not in text
         assert "blade query" not in text
+
+
+class TestParsePodNameFromVArgs:
+    """Flag-order tolerance of _parse_pod_name_from_v_args (task-2d612caa)."""
+
+    def _parse(self, v_args):
+        from chaos_agent.agent.nodes.execute._injection_detection import _parse_pod_name_from_v_args
+        return _parse_pod_name_from_v_args(v_args)
+
+    def test_pod_first_classic_order(self):
+        assert self._parse("otel-c-tool -n chaosblade -- blade create mem load") == "otel-c-tool"
+
+    def test_namespace_flag_before_pod(self):
+        assert self._parse("-n chaosblade chaosblade-tool-krp7v -- blade create mem load") == "chaosblade-tool-krp7v"
+
+    def test_boolean_flags_before_pod(self):
+        assert self._parse("-it -n chaosblade otel-c-tool -- blade create mem load") == "otel-c-tool"
+
+    def test_long_flag_with_equals_value(self):
+        assert self._parse("--namespace=chaosblade otel-c-tool -- blade create mem load") == "otel-c-tool"
+
+    def test_container_flag_consumes_its_value(self):
+        assert self._parse("-c tool -n chaosblade otel-c-tool -- blade create mem load") == "otel-c-tool"
+
+    def test_empty_or_no_pod_before_separator(self):
+        assert self._parse("") is None
+        assert self._parse("-- blade create mem load") is None
+        assert self._parse("-n chaosblade -- blade create mem load") is None
+
+    def test_tokens_after_separator_are_ignored(self):
+        # pod-like tokens after `--` belong to the remote command, not the pod slot
+        assert self._parse("-n chaosblade -- blade create mem load --names node-x") is None
 
 
 class TestRunLayer1ViaKubectlExecWithOriginalPod:
@@ -1285,6 +1318,140 @@ class TestRunLayer1ViaKubectlExecWithOriginalPod:
         assert "blade query k8s" in result.details
         # 2 calls: discover + blade query k8s on discovered pod
         assert mock_run.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_discovery_record_not_found_tries_next_pod(self):
+        """task-2d612caa: a discovered pod whose LOCAL DB lacks the record is
+        not a verdict — the experiment lives in the injection pod's DB only,
+        so discovery must probe the next pod before failing."""
+        from chaos_agent.agent.nodes.verify._verifier_layer1 import _run_layer1_via_kubectl_exec
+        from chaos_agent.tools.shell import CommandResult
+
+        discover_result = CommandResult(
+            exit_code=0,
+            stdout=("chaosblade   chaosblade-tool-2l2gj   1/1   Running   0   1d\n"
+                    "chaosblade   chaosblade-tool-krp7v   1/1   Running   0   1d"),
+            stderr="",
+        )
+        # query k8s finds no CRD (operator path unavailable) -> unparseable verdict
+        query_no_crd = CommandResult(
+            exit_code=1,
+            stdout=json.dumps({"code": 63061, "success": False,
+                               "error": "chaosblades.chaosblade.io `exp-test` not found"}),
+            stderr="",
+        )
+        # first pod's local DB does not hold the record
+        status_wrong_pod = CommandResult(
+            exit_code=1,
+            stdout=json.dumps({"code": 67002, "success": False,
+                               "error": "`exp-test` record not found"}),
+            stderr="",
+        )
+        # second pod IS the injection pod — record found, experiment running
+        status_right_pod = CommandResult(
+            exit_code=0,
+            stdout=json.dumps({"code": 200, "success": True,
+                               "result": {"Uid": "exp-test", "Status": "Success"}}),
+            stderr="",
+        )
+        with patch("chaos_agent.transports.execute_via_transport", new_callable=AsyncMock) as mock_run:
+            mock_run.side_effect = [
+                discover_result,
+                query_no_crd, status_wrong_pod,   # pod 1: query k8s + status
+                query_no_crd, status_right_pod,   # pod 2: query k8s + status
+            ]
+            result = await _run_layer1_via_kubectl_exec(
+                "exp-test", "/path/to/kc", task_id="t4",
+                injection_pod_name=None,
+            )
+        assert result.status == "passed"
+        assert "chaosblade-tool-krp7v" in result.details
+        assert mock_run.call_count == 5
+
+    @pytest.mark.asyncio
+    async def test_discovery_finds_record_beyond_old_two_pod_cap(self):
+        """Discovery order is arbitrary: the injection pod may sit at
+        position 3+, past the former 2-pod cap. The sweep must keep probing
+        until the pod holding the record is reached."""
+        from chaos_agent.agent.nodes.verify._verifier_layer1 import _run_layer1_via_kubectl_exec
+        from chaos_agent.tools.shell import CommandResult
+
+        discover_result = CommandResult(
+            exit_code=0,
+            stdout=("chaosblade   chaosblade-tool-aaa   1/1   Running   0   1d\n"
+                    "chaosblade   chaosblade-tool-bbb   1/1   Running   0   1d\n"
+                    "chaosblade   chaosblade-tool-ccc   1/1   Running   0   1d"),
+            stderr="",
+        )
+        query_no_crd = CommandResult(
+            exit_code=1,
+            stdout=json.dumps({"code": 63061, "success": False,
+                               "error": "chaosblades.chaosblade.io `exp-deep` not found"}),
+            stderr="",
+        )
+        status_not_found = CommandResult(
+            exit_code=1,
+            stdout=json.dumps({"code": 67002, "success": False,
+                               "error": "`exp-deep` record not found"}),
+            stderr="",
+        )
+        status_found = CommandResult(
+            exit_code=0,
+            stdout=json.dumps({"code": 200, "success": True,
+                               "result": {"Uid": "exp-deep", "Status": "Success"}}),
+            stderr="",
+        )
+        with patch("chaos_agent.transports.execute_via_transport", new_callable=AsyncMock) as mock_run:
+            mock_run.side_effect = [
+                discover_result,
+                query_no_crd, status_not_found,   # pod 1
+                query_no_crd, status_not_found,   # pod 2 (old cap stopped here)
+                query_no_crd, status_found,       # pod 3 holds the record
+            ]
+            result = await _run_layer1_via_kubectl_exec(
+                "exp-deep", "/path/to/kc", task_id="t6",
+                injection_pod_name=None,
+            )
+        assert result.status == "passed"
+        assert "chaosblade-tool-ccc" in result.details
+
+    @pytest.mark.asyncio
+    async def test_discovery_record_not_found_everywhere_fails(self):
+        """Every probed pod answered but none holds the record → genuine
+        failure (experiment lost), not an infrastructure skip."""
+        from chaos_agent.agent.nodes.verify._verifier_layer1 import _run_layer1_via_kubectl_exec
+        from chaos_agent.tools.shell import CommandResult
+
+        discover_result = CommandResult(
+            exit_code=0,
+            stdout=("chaosblade   chaosblade-tool-aaa   1/1   Running   0   1d\n"
+                    "chaosblade   chaosblade-tool-bbb   1/1   Running   0   1d"),
+            stderr="",
+        )
+        query_no_crd = CommandResult(
+            exit_code=1,
+            stdout=json.dumps({"code": 63061, "success": False,
+                               "error": "chaosblades.chaosblade.io `exp-lost` not found"}),
+            stderr="",
+        )
+        status_not_found = CommandResult(
+            exit_code=1,
+            stdout=json.dumps({"code": 67002, "success": False,
+                               "error": "`exp-lost` record not found"}),
+            stderr="",
+        )
+        with patch("chaos_agent.transports.execute_via_transport", new_callable=AsyncMock) as mock_run:
+            mock_run.side_effect = [
+                discover_result,
+                query_no_crd, status_not_found,
+                query_no_crd, status_not_found,
+            ]
+            result = await _run_layer1_via_kubectl_exec(
+                "exp-lost", "/path/to/kc", task_id="t5",
+                injection_pod_name=None,
+            )
+        assert result.status == "failed"
+        assert "not found in any tool pod" in result.details
 
 
 # ---------------------------------------------------------------------------
@@ -3058,3 +3225,183 @@ class TestVerifierScreenerNode:
         node, _ = self._make()
         update = await node({"messages": [AIMessage(content="verdict text")]})
         assert update["screener_route"] == "pass"
+
+
+class TestVerifierScreenerTruthfulReasons:
+    """The verify-phase screener must surface the verdict the classifier
+    actually reached, not a template re-invented from the scope word —
+    the same truth-first contract phase1_screener locked in after task
+    inject-a9ea4da7. The old rendering consumed only (raw_command,
+    probe_reason) strings, silently dropping the recorded reject_detail
+    (host-escape primitive, banned carrier, ...) on this path."""
+
+    # Class-level access unwraps the staticmethods to plain functions; re-wrap
+    # so instance access here does not bind ``self`` as the first argument.
+    _make = staticmethod(TestVerifierScreenerNode._make)
+    _state = staticmethod(TestVerifierScreenerNode._state)
+
+    @pytest.mark.asyncio
+    async def test_escape_carrier_detail_survives_verify_phase(self):
+        node, _ = self._make()
+        state = self._state([{
+            "name": "kubectl", "id": "c1", "type": "tool_call",
+            "args": {"command": [
+                "exec", "pod-a", "-n", "ns", "--",
+                "chroot", "/host", "iptables", "-A", "INPUT", "-j", "DROP",
+            ]},
+        }])
+        update = await node(state)
+        assert update["screener_route"] == "retry"
+        content = update["messages"][0].content
+        # The classifier's recorded cause — not a generic "would mutate".
+        assert "host-escape primitive" in content
+        assert "'chroot'" in content
+        # No probe framing: this is a deliberate escape, not a shape issue.
+        assert "COMMAND SHAPE" not in content
+
+    @pytest.mark.asyncio
+    async def test_malformed_probe_carries_shape_frame_in_verify(self):
+        node, _ = self._make()
+        state = self._state([{
+            "name": "kubectl_read", "id": "c1", "type": "tool_call",
+            "args": {
+                "subcommand": "exec",
+                "v_args": "pod-x -n ns -- sh -c 'echo A; which stress-ng'",
+            },
+        }])
+        update = await node(state)
+        assert update["screener_route"] == "retry"
+        content = update["messages"][0].content
+        assert "not a valid read-only probe" in content
+        assert "shell control operator" in content
+        assert "COMMAND SHAPE" in content
+        assert "-- which stress-ng" in content
+
+    @pytest.mark.asyncio
+    async def test_genuine_mutation_names_the_call_without_fake_fix(self):
+        node, _ = self._make()
+        state = self._state([{
+            "name": "kubectl", "id": "c1", "type": "tool_call",
+            "args": {"command": ["delete", "pod", "pod-a", "-n", "default"]},
+        }])
+        update = await node(state)
+        content = update["messages"][0].content
+        # Truth-first level 3: the raw command is the most truthful thing
+        # held; a genuine mutation in a read-only phase gets NO "How to
+        # fix" (no compliant reshape exists here — pairing rule).
+        assert "kubectl(command=" in content
+        assert "would mutate" in content
+        assert "How to fix" not in content
+        assert "COMMAND SHAPE" not in content
+
+
+class TestVerificationCycleDetection:
+    """Position-based verification-cycle detection: whether the main context
+    message is injected is decided by WHERE the marker-tagged HumanMessage
+    sits relative to the attribution epoch — never by the loop counter.
+    Aligned with execute_loop's Phase-2 kickoff."""
+
+    @staticmethod
+    def _marker(content="## Layer 1 Result (cycle context)"):
+        from chaos_agent.agent.nodes.verify._verifier_messages import (
+            _VERIFIER_CONTEXT_KWARGS_KEY,
+        )
+        return HumanMessage(
+            content=content,
+            additional_kwargs={_VERIFIER_CONTEXT_KWARGS_KEY: True},
+        )
+
+    def _needs(self, messages, epoch=None):
+        from chaos_agent.agent.nodes.verify._verifier_messages import (
+            _verification_cycle_needs_context,
+        )
+        state = {"messages": messages}
+        if epoch is not None:
+            state["attribution_epoch_index"] = epoch
+        return _verification_cycle_needs_context(state)
+
+    def test_first_cycle_no_marker_needs_context(self):
+        assert self._needs([HumanMessage(content="inject")]) is True
+
+    def test_marker_in_epoch_suppresses_reinjection(self):
+        # Mid-cycle: the marker from this cycle's first turn is present in
+        # the current epoch → no re-injection (even if the counter says 1).
+        msgs = [HumanMessage(content="inject"), self._marker()]
+        assert self._needs(msgs) is False
+        assert self._needs(msgs, epoch=1) is False
+
+    def test_marker_before_epoch_re_arms_after_replan(self):
+        # Replan re-based the attribution epoch AFTER the old cycle's
+        # marker: the marker falls outside the current epoch → the new
+        # cycle re-arms, regardless of any loop counter value.
+        msgs = [self._marker(), HumanMessage(content="replanned run")]
+        assert self._needs(msgs, epoch=1) is True
+
+    def test_invalid_epoch_falls_back_to_full_scan(self):
+        msgs = [HumanMessage(content="inject"), self._marker()]
+        assert self._needs(msgs, epoch="bogus") is False
+        assert self._needs(msgs, epoch=999) is False
+
+    def _layer2_context_count(self, state, count):
+        from chaos_agent.agent.nodes.verify._verifier_messages import (
+            _build_layer2_messages,
+            _VERIFIER_CONTEXT_KWARGS_KEY,
+        )
+        layer1 = Layer1Result(status="passed", affected_count=1, raw_output="Success")
+        state_msgs = state.get("messages", [])
+        msgs = _build_layer2_messages(
+            state, layer1, "uid-x", "cpu-fullload", "/path/to/kc", count,
+        )
+        # Count only NEWLY injected context messages: the returned list
+        # starts with state's own messages (same object references), and a
+        # pre-existing marker must not be counted as an injection.
+        return sum(
+            1 for m in msgs
+            if isinstance(m, HumanMessage)
+            and getattr(m, "additional_kwargs", {}).get(_VERIFIER_CONTEXT_KWARGS_KEY)
+            and not any(m is s for s in state_msgs)
+        )
+
+    def test_layer2_reinjects_on_late_count_after_replan(self):
+        # The failure mode of count==1 gating: a new cycle entered at a
+        # counter value > 1 (reset missed / resume) would skip the context.
+        # Position detection keys off the epoch, not the counter.
+        state = {
+            "messages": [self._marker(), HumanMessage(content="new cycle start")],
+            "attribution_epoch_index": 1,
+            "blade_parsed_flags": {},
+            "params": {},
+        }
+        assert self._layer2_context_count(state, count=5) == 1
+
+    def test_layer2_skips_when_marker_current(self):
+        state = {
+            "messages": [HumanMessage(content="inject"), self._marker()],
+            "blade_parsed_flags": {},
+            "params": {},
+        }
+        assert self._layer2_context_count(state, count=2) == 0
+
+    def test_extract_persistent_hm_epoch_bounded(self):
+        # The persistence dedup must not let a PRE-replan marker suppress
+        # the NEW cycle's context message from entering state.
+        from chaos_agent.agent.nodes.execute.react_helpers import (
+            extract_persistent_hm,
+        )
+        from chaos_agent.agent.nodes.verify._verifier_messages import (
+            _VERIFIER_CONTEXT_KWARGS_KEY,
+        )
+        fresh = self._marker("## Layer 1 Result (fresh cycle)")
+        # Old marker at idx 0, epoch re-based past it → fresh IS extracted.
+        state = {
+            "messages": [self._marker("old cycle"), HumanMessage(content="x")],
+            "attribution_epoch_index": 1,
+        }
+        assert extract_persistent_hm(
+            [fresh], state, _VERIFIER_CONTEXT_KWARGS_KEY,
+        ) == [fresh]
+        # Marker inside the current epoch → dedup suppresses.
+        state["attribution_epoch_index"] = None
+        assert extract_persistent_hm(
+            [fresh], state, _VERIFIER_CONTEXT_KWARGS_KEY,
+        ) == []

@@ -15,6 +15,7 @@ from chaos_agent.agent.nodes.verify._verifier_hints import (
     _get_fault_verification_hints,
 )
 from chaos_agent.agent.nodes.verify._verifier_layer1 import Layer1Result
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.nodes.verify._verifier_layer2_parse import (
     _extract_verification_step_descriptions,
     _has_injection_verification_section,
@@ -33,9 +34,40 @@ _SYNTHETIC_TOOL_CALL_IDS = frozenset({
 })
 
 # Marker for the main verifier context HumanMessage — used to identify
-# the ephemeral HumanMessage that should be persisted to AgentState on
-# count==1 so it remains visible on subsequent iterations.
+# the ephemeral HumanMessage that should be persisted to AgentState on the
+# cycle's first turn so it remains visible on subsequent iterations.
 _VERIFIER_CONTEXT_KWARGS_KEY = "_verifier_main_context"
+
+
+def _verification_cycle_needs_context(state: AgentState) -> bool:
+    """True when the CURRENT verification cycle has no main-context message yet.
+
+    Position-based detection, aligned with execute_loop's Phase-2 kickoff:
+    a phase transition is a fact about the message sequence (was the
+    transition message emitted for THIS cycle?), never about loop counters —
+    counting couples injection to seam-side counter resets and silently
+    breaks when a reset is missed, conditional, or a resume lands mid-cycle.
+
+    The current cycle is the slice at/after ``attribution_epoch_index``:
+    every replan seam re-bases the boundary via ``reset_attribution_state``,
+    so a context message from a PRE-replan cycle sits before the boundary and
+    re-arms the injection for the new cycle — no counter involvement. With
+    no boundary set (first cycle / flows that never rebase) the whole
+    history is the current cycle.
+    """
+    messages = state.get("messages", [])
+    boundary = state.get("attribution_epoch_index")
+    try:
+        start = int(boundary) if boundary else 0
+    except (TypeError, ValueError):
+        start = 0
+    if start > len(messages):
+        start = 0
+    return not any(
+        isinstance(m, HumanMessage)
+        and getattr(m, "additional_kwargs", {}).get(_VERIFIER_CONTEXT_KWARGS_KEY)
+        for m in messages[start:]
+    )
 
 # ---------------------------------------------------------------------------
 # Baseline data → synthetic ToolMessage injection
@@ -242,11 +274,16 @@ def _build_layer2_messages(
     kubeconfig: str,
     count: int,
     tool_pod_name: str | None = None,
+    new_cycle: bool | None = None,
 ) -> list:
     """Build messages for Layer 2 LLM invocation.
 
-    On first iteration, injects the full Layer 1 context.
-    On subsequent iterations approaching the limit, injects a convergence hint.
+    On the FIRST TURN OF THE CURRENT CYCLE, injects the full Layer 1
+    context — detected POSITIONALLY (no marker-tagged context message in
+    the current epoch) rather than by ``count == 1``, so a replan that
+    re-bases the attribution epoch re-arms the injection even if the loop
+    counter were not reset. On subsequent iterations approaching the limit,
+    injects a convergence hint.
     """
     messages = list(state.get("messages", []))
     convergence_hint = _build_convergence_hint(count)
@@ -254,11 +291,12 @@ def _build_layer2_messages(
     # ── Position-optimized synthetic message injection ──
     # Baseline ToolMessages before the HumanMessage or convergence hint
     # (Lost in the Middle: early placement gets higher attention).
-    # Inject on EVERY iteration, not just count==1, because they are NOT
-    # persisted in AgentState.messages by default (result_update only
-    # contains the LLM's response).  Without this, LLM loses baseline
-    # data on count > 1.  When already in state history (persisted from
-    # count==1 via result_update), skip to avoid duplication.
+    # Inject on EVERY iteration, not just the cycle's first turn, because
+    # they are NOT persisted in AgentState.messages by default
+    # (result_update only contains the LLM's response). Without this, LLM
+    # loses baseline data on later turns. When already in state history
+    # (persisted from the cycle's first turn via result_update), skip to
+    # avoid duplication.
     # State-derived variables needed by _build_baseline_tool_messages.
     from chaos_agent.agent.spec.fault_spec import read_fault_spec as _rfs_vm
     _spec_vm = _rfs_vm(state)
@@ -276,7 +314,9 @@ def _build_layer2_messages(
             messages.extend(_build_baseline_tool_messages(
                 _baseline, _blade_target, _blade_action, _blade_parsed,
             ))
-    if count == 1:
+    if new_cycle is None:
+        new_cycle = _verification_cycle_needs_context(state)
+    if new_cycle:
         context = _build_first_iteration_context(
             state, layer1, blade_uid, skill_name, kubeconfig,
             tool_pod_name, convergence_hint,
@@ -287,7 +327,7 @@ def _build_layer2_messages(
         ))
     elif convergence_hint:
         # Subsequent iterations approaching limit: inject convergence nudge
-        messages.append(HumanMessage(content=convergence_hint.strip()))
+        messages.append(HumanMessage(content=wrap_system_reminder(convergence_hint)))
 
     # Final-iteration conclusion prompt (tools will be unbound at this count).
     # Skipped when verifier_json_mode is on: verifier.py appends the JSON
@@ -295,7 +335,7 @@ def _build_layer2_messages(
     # — injecting both would give the model two mutually exclusive format
     # contracts in one call. The JSON reminder is the single format source.
     if count >= settings.max_verifier_loop and not settings.verifier_json_mode:
-        messages.append(HumanMessage(content=(
+        messages.append(HumanMessage(content=wrap_system_reminder(
             f"**FINAL VERIFICATION ITERATION**: This is iteration {count} of max {settings.max_verifier_loop}. "
             f"NO more iterations available. Tools are no longer available.\n"
             f"You MUST provide your final verification conclusion NOW in this EXACT format:\n\n"
@@ -388,8 +428,8 @@ def _build_first_iteration_context(
         )
         layer2_instruction = (
             "This is a non-ChaosBlade fault injection. "
-            "Perform Layer 2 verification: use kubectl tools to verify "
-            "the fault is actually in effect on the target.\n"
+            "Perform Layer 2 verification: use the available observation "
+            "tools to verify the fault is actually in effect on the target.\n"
         )
     else:
         layer1_context = (
@@ -409,7 +449,8 @@ def _build_first_iteration_context(
         else:
             layer2_instruction = (
                 "Layer 1 is PASSED. Now perform Layer 2 verification: "
-                "use kubectl tools to verify the fault is actually in effect on the target.\n"
+                "use the available observation tools to verify the fault "
+                "is actually in effect on the target.\n"
             )
 
     # Resource coverage from blade_query_k8s (if available)
@@ -670,6 +711,21 @@ def _build_first_iteration_context(
             f"You MUST follow its verification approach as the primary reference.\n\n"
             f"<skill-case>\n{skill_case}\n</skill-case>\n\n"
         )
+    # Planner's environment-adapted verification strategy (saved plan):
+    # probed facts and anticipated negatives override the generic
+    # skill-case steps when they conflict. Absent for simple tasks.
+    plan_verification = state.get("plan_verification", "") or ""
+    if plan_verification:
+        context += (
+            "### Planner's Verification Strategy (environment-adapted)\n"
+            "The Phase 1 planner probed THIS environment and adapted the "
+            "verification strategy below. Where it conflicts with the skill "
+            "case's generic steps, the planner's environment-specific "
+            "conclusions prevail (e.g. an anticipated negative result). The "
+            "skill case still defines which steps to verify.\n\n"
+            f"<planner-verification>\n{plan_verification}\n</planner-verification>\n\n"
+        )
+    if skill_case:
         # Four-tier verification mode based on skill case structure:
         # Mode 0 (Multi-candidate): multiple candidates → LLM chooses
         # Mode 1 (Template): 注入验证 has parseable numbered/bullet steps → pre-filled checklist
@@ -696,11 +752,15 @@ def _build_first_iteration_context(
                 f"step and its result before VERIFICATION_RESULT\n\n"
                 f"Rules:\n"
                 f"1. Replace [status] with: passed, failed, skipped, "
-                f"recovered_before_observation, or expected\n"
+                f"recovered_before_observation, expected, or not_applicable\n"
                 f"2. After [status], write \" — \" followed by brief "
                 f"evidence\n"
                 f"3. If a step cannot be executed, mark as skipped "
-                f"with reason\n"
+                f"with reason. Steps observing the injection itself "
+                f"taking effect decide the verdict; propagated effects "
+                f"(OOM, latency, business impact) are drill FINDINGS — "
+                f"record faithfully (absence included), never downgrade "
+                f"the verdict\n"
                 f"4. **MANDATORY OUTPUT**: You MUST output a "
                 f"'VERIFICATION_CHECKLIST:' section BEFORE your final "
                 f"'VERIFICATION_RESULT:' section.\n"
@@ -714,34 +774,59 @@ def _build_first_iteration_context(
             has_section = _has_injection_verification_section(skill_case)
 
         if not is_multi_candidate and step_descs:
-            # ═══ Mode 1: TEMPLATE — structured steps extracted ═══
+            # ═══ Mode 1: TEMPLATE — structured steps, two-tier verdict ═══
+            # Core/Impact split (first principles): every successful injection
+            # has decisive anchor evidence (the mutation itself, measured on
+            # the right target) — that alone decides the verdict. Propagation
+            # effects described by the case (OOM, latency, business impact)
+            # are drill FINDINGS: recorded faithfully (absence included — a
+            # negative observation is resilience evidence), but never gate
+            # the verdict.
             template_lines = []
             for i, desc in enumerate(step_descs, start=1):
-                template_lines.append(f"- Step {i}: [status] — {desc}")
+                template_lines.append(
+                    f"- Step {i}: [category] [status] — {desc}"
+                )
             template_str = "\n".join(template_lines)
             context += (
-                f"### Verification Strategy (Structured)\n"
-                f"The skill case defines the following verification steps. "
-                f"You MUST complete EVERY step. Do NOT invent, merge, skip, "
-                f"or reorder steps.\n\n"
-                f"**Pre-defined Verification Checklist** "
-                f"(fill in [status] and evidence for each):\n"
+                f"### Verification Strategy (Two-Tier: Core / Impact)\n"
+                f"Steps from the skill case:\n"
                 f"{template_str}\n\n"
+                f"Classify each step FIRST:\n"
+                f"- `[CORE]` — a direct, measurable consequence of the\n"
+                f"  injection itself on the target, consistent with the\n"
+                f"  actual injection parameters. If direct measurement is\n"
+                f"  impossible, verify the mechanism anchor instead (the\n"
+                f"  rule/config/process state installed on the right\n"
+                f"  target) and label the evidence tier. CORE steps alone\n"
+                f"  decide the verdict.\n"
+                f"- `[IMPACT]` — propagated effects the case describes\n"
+                f"  (OOM/eviction, latency, business impact). These are\n"
+                f"  drill FINDINGS, never verdict criteria.\n\n"
+                f"Obligations:\n"
+                f"- `[CORE]`: MUST verify with evidence.\n"
+                f"- `[IMPACT]`: one cheap observation, then record\n"
+                f"  faithfully whatever you see — absence included (e.g.\n"
+                f"  'expected — no OOMKilled: node stable under 80%\n"
+                f"  pressure'). Whether the phenomenon is even expected\n"
+                f"  depends on the actual injection parameters. If the\n"
+                f"  step's target cannot be instantiated here (placeholder\n"
+                f"  like '应用 A'), mark it `not_applicable` with the\n"
+                f"  reason; do NOT fabricate a target.\n\n"
                 f"Rules:\n"
-                f"1. Replace [status] with: passed, failed, skipped, "
-                f"recovered_before_observation, or expected\n"
-                f"2. After [status], write \" — \" followed by brief evidence "
-                f"(what command you ran and what you observed)\n"
-                f"3. If a step cannot be executed, mark as skipped with reason: "
-                f"\"Step N: skipped — <reason>\"\n"
-                f"4. **MANDATORY**: Your VERIFICATION_CHECKLIST MUST contain "
-                f"ALL {len(step_descs)} steps exactly as listed. "
-                f"Omitting steps is a protocol violation.\n"
-                f"5. **DEVIATION DOCUMENTATION**: If you use a DIFFERENT method "
-                f"than the one specified in a step (e.g., skill says 'ping' but "
-                f"you use 'wget'), you MUST document the deviation reason: "
-                f"\"Step N: passed — <what you did> (deviation: <why you deviated>)\". "
-                f"If you execute the step as specified, no deviation note is needed.\n"
+                f"1. Line format: `Step N: [CORE|IMPACT] <status> — <evidence>`,\n"
+                f"   keeping the case's step numbering.\n"
+                f"2. <status> ∈ passed, failed, skipped,\n"
+                f"   recovered_before_observation, expected, not_applicable.\n"
+                f"3. Every status needs evidence; `expected` without an\n"
+                f"   observation is invalid — use `skipped` if unchecked.\n"
+                f"4. ANSWER all {len(step_descs)} steps — any status with a\n"
+                f"   reason counts; silent omission is the only violation.\n"
+                f"5. Verdict: 'passed' requires ALL CORE steps passed; a\n"
+                f"   failed CORE step means the fault may not be in effect\n"
+                f"   ('failed'/'partial'). IMPACT never downgrades the\n"
+                f"   verdict — findings go into the report.\n"
+                f"6. Different method than specified? Note '(deviation: <why>)'.\n"
             )
         elif not is_multi_candidate and has_section:
             # ═══ Mode 2: GUIDED — 注入验证 exists but unparseable ═══
@@ -756,11 +841,18 @@ def _build_first_iteration_context(
                 "1. Each checklist item must map to a distinct check "
                 "described in the 注入验证 section\n"
                 "2. Mark steps you cannot execute as: "
-                "\"Step N: skipped — <reason>\"\n"
+                "\"Step N: skipped — <reason>\". If a step's target cannot "
+                "be instantiated in this environment (placeholder like "
+                "'应用 A', unnamed service), mark it \"Step N: not_applicable — "
+                "<reason>\" instead of fabricating a target\n"
                 "3. Do NOT add checks that are not mentioned in the skill case\n"
-                "4. **Programmatic note**: Step coverage validation is "
+                "4. Verdict principle: steps observing the injection itself "
+                "taking effect decide the verdict; propagated effects (OOM, "
+                "latency, business impact) are drill FINDINGS — record "
+                "faithfully (absence included), never downgrade the verdict\n"
+                "5. **Programmatic note**: Step coverage validation is "
                 "DISABLED for this mode — we trust your extraction\n"
-                "5. **MANDATORY OUTPUT**: You MUST output a "
+                "6. **MANDATORY OUTPUT**: You MUST output a "
                 "'VERIFICATION_CHECKLIST:' section BEFORE your final "
                 "'VERIFICATION_RESULT:' section.\n"
             )
@@ -768,20 +860,25 @@ def _build_first_iteration_context(
             # ═══ Mode 3: FREE — no 注入验证 section at all ═══
             context += (
                 "### Verification Strategy:\n"
-                "1. Follow the **注入验证** section in the skill case above. "
-                "You MUST execute EVERY verification step it lists — do not "
-                "skip any step.\n"
+                "1. The skill case has no 注入验证 section — design your own "
+                "verification checklist for this fault type. The decisive "
+                "check is whether the fault's expected EFFECT is observable "
+                "on the target. You MUST execute EVERY step you list — do "
+                "not skip any step.\n"
                 "2. If a step cannot be executed (e.g., no Ingress configured "
                 "in this cluster), you MUST explicitly note: '[SKIPPED] "
                 "Step N: <reason>'. Do NOT silently omit steps.\n"
                 "3. Before your final conclusion, output a **Verification "
                 "Checklist** listing each step and its result:\n"
-                "   - Step 1: passed/failed/skipped — brief evidence\n"
-                "   - Step 2: passed/failed/skipped — brief evidence\n"
+                "   - Step 1: passed/failed/skipped/expected/not_applicable — brief evidence\n"
+                "   - Step 2: passed/failed/skipped/expected/not_applicable — brief evidence\n"
                 "   - ...\n"
-                "4. If ALL steps pass → Layer2 'passed'. If ANY step fails → "
-                "Layer2 'failed'. If mandatory steps are skipped without "
-                "equivalent alternatives → Layer2 'partial'.\n"
+                "4. Verdict principle: steps observing the injection itself "
+                "taking effect decide the verdict — ALL pass → 'passed'; ANY "
+                "fails → 'failed'; decisive steps skipped without alternatives "
+                "→ 'partial'. Propagated effects (OOM, latency, business "
+                "impact) are drill FINDINGS — record faithfully (absence "
+                "included), never downgrade the verdict.\n"
                 "5. **MANDATORY OUTPUT**: You MUST output a "
                 "'VERIFICATION_CHECKLIST:' section BEFORE your final "
                 "'VERIFICATION_RESULT:' section. This checklist will be "
@@ -790,17 +887,17 @@ def _build_first_iteration_context(
                 "from 'verified' to 'partial'.\n"
             )
         pass  # NEGATIVE EVIDENCE moved to core behavioral rules (outside if/else)
-        # Mode 1 only: step completeness tracking
-        if not is_multi_candidate and step_descs:
-            context += (
-                "Note — Step completeness: your VERIFICATION_CHECKLIST MUST cover ALL "
-                f"{len(step_descs)} steps listed above. Any step not executed must appear "
-                "as '[SKIPPED] Step N: <reason>'. Omitting steps is a protocol violation.\n\n"
-            )
         context += (
             "**Checklist Status Choice**:\n"
             "- The checklist reports OBSERVED FACTS, not predictions.\n"
-            "- Did you call a kubectl command for this step? Yes → 'passed' or 'failed'. No → 'skipped'.\n"
+            "- Did you perform the check? Yes → 'passed'/'failed'/'expected' "
+            "by what you OBSERVED. No → 'skipped'.\n"
+            "- 'expected': you CHECKED and the phenomenon is absent, and the "
+            "actual injection parameters make that the anticipated outcome. "
+            "Requires the observation.\n"
+            "- 'not_applicable': the step's target cannot exist in this "
+            "environment (placeholder target, unnamed service). Do NOT "
+            "fabricate a target.\n"
             "- Timing uncertainty belongs in Warnings, not in checklist status.\n"
             "- 'recovered_before_observation': the fault was transient and had dissipated "
             "by the time you checked — distinct from 'failed' (checked, fault absent).\n\n"
@@ -838,15 +935,24 @@ def _build_first_iteration_context(
         "the conclusion that the fault is in effect. For each item, either:\n"
         "(a) Dismiss it with factual basis (not speculation), or\n"
         "(b) Accept it as valid counter-evidence.\n"
-        "If ANY verification criterion is demonstrably NOT met, you MUST "
-        "conclude Layer2 as 'partial' or 'failed' — NOT 'passed'.\n\n"
+        "If ANY CORE verification criterion is demonstrably NOT met, you MUST "
+        "conclude Layer2 as 'partial' or 'failed' — NOT 'passed'. "
+        "(Absence of propagated IMPACT effects is a drill finding, "
+        "NOT counter-evidence against the fault being in effect.)\n\n"
     )
     context += (
-        "**POLLING STRATEGY (CRITICAL)**: Fault effect may take 5-30s to appear. "
-        "Check at least 3 times before concluding. If any check shows the fault IS "
-        "in effect, conclude 'passed' immediately.\n"
-        "If after 3 checks NO evidence found → Layer2 'failed', Overall 'unverified'. "
-        "Do NOT conclude 'partial' when NO evidence exists.\n\n"
+        "**EVIDENCE CONVERGENCE (CRITICAL)**: fault effects take time to propagate — "
+        "sample until evidence is DECISIVE; there is no fixed check count.\n"
+        "- Qualitative faults (process gone / NotReady / unreachable / error present): "
+        "one clear observation is decisive — conclude.\n"
+        "- Quantitative targets (declared magnitude, e.g. --mem-percent 80): a value "
+        "MOVING TOWARD the target proves the mechanism is active, NOT that the target "
+        "is reached — keep sampling while it trends; 'passed' needs convergence at or "
+        "near the declared value.\n"
+        "- Plateau BELOW the declared target across repeated samples: fault in effect "
+        "but capped → 'partial' with the plateau value as evidence.\n"
+        "- No effect evidence after repeated samples → Layer2 'failed', Overall "
+        "'unverified' (never 'partial' with zero evidence).\n\n"
         "**STEP CONCLUSION RULE**:\n"
         "You may conclude any step early if continued attempts are unlikely to yield new information.\n"
         "When concluding early, you MUST provide:\n"

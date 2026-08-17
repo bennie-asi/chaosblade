@@ -13,6 +13,7 @@ from chaos_agent.agent.nodes.verify._verifier_layer2_parse import (
     cross_check_evidence,
     _determine_level,
     _detect_checklist_conclusion_inconsistency,
+    _parse_checklist_items,
     _parse_verification_result,
     _try_parse_json,
     _count_verification_steps_in_skill_case,
@@ -198,6 +199,98 @@ class TestDetectChecklistConclusionInconsistency:
         warning, downgrade = _detect_checklist_conclusion_inconsistency(items, "passed")
         assert warning is None
         assert downgrade is False
+
+    def test_impact_failed_does_not_trigger_inconsistency(self):
+        # Two-tier verdict: IMPACT items are drill findings and never gate
+        # the verdict — even 'failed' with absence evidence.
+        items = [
+            {"step": 1, "status": "passed", "category": "core"},
+            {"step": 2, "status": "failed", "category": "impact",
+             "evidence": "no OOMKilled events, no change observed"},
+        ]
+        warning, downgrade = _detect_checklist_conclusion_inconsistency(
+            items, "passed", "no OOMKilled events, no change observed",
+        )
+        assert warning is None
+        assert downgrade is False
+
+    def test_core_failed_still_triggers_downgrade(self):
+        items = [
+            {"step": 1, "status": "failed", "category": "core",
+             "evidence": "memory at 2%, no increase observed"},
+        ]
+        warning, downgrade = _detect_checklist_conclusion_inconsistency(
+            items, "passed", "memory at 2%, no increase observed",
+        )
+        assert warning is not None
+        assert downgrade is True
+
+
+class TestTwoTierChecklistParsing:
+    """Core/Impact two-tier checklist format (Mode 1 rewrite)."""
+
+    _TEXT = (
+        "VERIFICATION_CHECKLIST:\n"
+        "- Step 1: [CORE] passed — kubectl top node shows 81% memory\n"
+        "- Step 2: [IMPACT] expected — checked events, no OOMKilled in window\n"
+        "- Step 3: [IMPACT] not_applicable — '应用 A' matches no workload\n"
+        "VERIFICATION_RESULT:\n"
+    )
+
+    def test_category_status_evidence_parsed(self):
+        items = _parse_checklist_items(self._TEXT)
+        assert len(items) == 3
+        assert items[0]["step"] == 1
+        assert items[0]["status"] == "passed"
+        assert items[0]["category"] == "core"
+        assert "81%" in items[0]["evidence"]
+        assert items[1]["status"] == "expected"
+        assert items[1]["category"] == "impact"
+        assert items[2]["status"] == "not_applicable"
+        assert items[2]["category"] == "impact"
+
+    def test_bare_category_without_brackets_parses(self):
+        # The model may drop the brackets around the category tag.
+        text = (
+            "VERIFICATION_CHECKLIST:\n"
+            "- Step 1: CORE passed — memory elevated to 81%\n"
+            "- Step 2: IMPACT expected — no OOMKilled in events\n"
+            "VERIFICATION_RESULT:\n"
+        )
+        items = _parse_checklist_items(text)
+        assert len(items) == 2
+        assert items[0]["category"] == "core"
+        assert items[0]["status"] == "passed"
+        assert items[1]["category"] == "impact"
+        assert items[1]["status"] == "expected"
+
+    def test_legacy_format_without_category_still_parses(self):
+        text = (
+            "VERIFICATION_CHECKLIST:\n"
+            "- Step 1: passed — memory elevated\n"
+            "- Step 2: skipped — no ingress configured\n"
+            "VERIFICATION_RESULT:\n"
+        )
+        items = _parse_checklist_items(text)
+        assert len(items) == 2
+        assert items[0]["status"] == "passed"
+        assert "category" not in items[0]
+        assert items[1]["status"] == "skipped"
+
+    def test_impact_findings_do_not_downgrade_overall(self):
+        text = (
+            "Layer1: passed\n"
+            "Layer2: passed — memory at 81%\n"
+            "VERIFICATION_CHECKLIST:\n"
+            "- Step 1: [CORE] passed — memory 81% via kubectl top\n"
+            "- Step 2: [IMPACT] failed — no OOMKilled events, no change observed\n"
+            "VERIFICATION_RESULT:\n"
+            "Overall: verified\n"
+            "PrimaryEvidenceObserved: true\n"
+        )
+        result = _parse_verification_result(text)
+        assert result["layer2"]["status"] == "passed"
+        assert result["level"] == "verified"
 
 
 class TestParseVerificationResult:

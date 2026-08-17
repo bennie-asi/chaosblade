@@ -25,6 +25,7 @@ import logging
 
 from langchain_core.messages import HumanMessage
 
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.result.operation_outcome import write_recover_verification
 from chaos_agent.agent.nodes.execute._kubeconfig_inject import _resolve_kubeconfig, sync_kubewiz_runtime
 from chaos_agent.agent.nodes.recover._recover_layer1 import (
@@ -209,7 +210,7 @@ def make_finalize_recover_verification(registry=None):
                 "Layer 2 conclusion without verification commands — forcing re-check",
                 {"guard": "no_verification_commands"},
             )
-            result_update["messages"] = [HumanMessage(content=(
+            result_update["messages"] = [HumanMessage(content=wrap_system_reminder(
                 f"⚠️ {_GUARD_MARKER}: Your recovery verdict was rejected because you did NOT "
                 "execute a bound observation tool to observe the CURRENT post-recovery "
                 "state. Baseline / injection-phase data is NOT current.\n\n"
@@ -249,7 +250,7 @@ def make_finalize_recover_verification(registry=None):
                     from chaos_agent.tools.blade import blade_destroy as _blade_destroy
                     retry_output = await _blade_destroy.ainvoke({"uid": blade_uid, "kubeconfig": kubeconfig})
                     retry_raw = retry_output if isinstance(retry_output, str) else str(retry_output)
-                    result_update["messages"] = [HumanMessage(content=(
+                    result_update["messages"] = [HumanMessage(content=wrap_system_reminder(
                         f"**{_RETRY_MARKER} executed**\n"
                         f"blade_destroy output: {retry_raw[:500]}\n\n"
                         f"Please verify again whether the fault has been removed, then call "
@@ -265,7 +266,7 @@ def make_finalize_recover_verification(registry=None):
                     task_id,
                 )
                 tracker.update("Fault still active, injecting recovery retry prompt", {"retry": True})
-                result_update["messages"] = [HumanMessage(content=(
+                result_update["messages"] = [HumanMessage(content=wrap_system_reminder(
                     f"**{_RETRY_MARKER} required**: The fault effect is STILL PRESENT.\n"
                     "Re-attempt recovery using an alternative currently bound method when the "
                     "evidence supports it. After re-attempting, verify again "

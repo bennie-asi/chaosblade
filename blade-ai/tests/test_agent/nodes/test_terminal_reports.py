@@ -229,6 +229,46 @@ class TestInferFailureDetailGuard:
         inferred = _infer_failure_detail(state)
         assert inferred["failure_detail"]["category"] == "replan_exhausted"
 
+    def test_expired_layer1_overridden_by_verified_layer2_is_not_failed(self):
+        """Expired-record Layer1 failure must not veto a Layer2-verified
+        verdict (task inject-e47de3e8: executor cleanup destroyed the record,
+        Layer2 verified the restarts, task was wrongly failed)."""
+        from chaos_agent.agent.nodes.store.memory_nodes import (
+            _infer_failure_detail,
+        )
+
+        state = {
+            "task_id": "task-guard03",
+            "confirmed_intent": "inject",
+            "verification": {
+                "level": "verified",
+                "layer1": {"status": "failed", "expired": True, "details": "Destroyed"},
+                "layer2": {"status": "passed", "details": "restarts +4"},
+            },
+            "messages": [],
+        }
+        assert _infer_failure_detail(state) == {}
+
+    def test_expired_layer1_without_layer2_confirmation_still_fails(self):
+        """Contrast: exemption only applies when Layer2 passed AND level is
+        verified — a bare expired Layer1 failure still fails the task."""
+        from chaos_agent.agent.nodes.store.memory_nodes import (
+            _infer_failure_detail,
+        )
+
+        state = {
+            "task_id": "task-guard04",
+            "confirmed_intent": "inject",
+            "verification": {
+                "level": "partial",
+                "layer1": {"status": "failed", "expired": True, "details": "Destroyed"},
+                "layer2": {"status": "unknown", "details": ""},
+            },
+            "messages": [],
+        }
+        inferred = _infer_failure_detail(state)
+        assert inferred["failure_detail"]["category"] == "verification_failed"
+
 
 class TestR11AlwaysWrite:
     @pytest.mark.asyncio

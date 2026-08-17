@@ -56,6 +56,8 @@ class ChecklistItemStatus(str, Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
     RECOVERED_BEFORE_OBSERVATION = "recovered_before_observation"
+    EXPECTED = "expected"
+    NOT_APPLICABLE = "not_applicable"
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +148,10 @@ class ChecklistItem(BaseModel):
     description: str = ""
     status: ChecklistItemStatus
     evidence: str = ""
+    # Two-tier verification (Core/Impact): "core" items decide the verdict;
+    # "impact" items are drill findings that never gate it. Empty when the
+    # mode does not classify steps.
+    category: str = ""
 
 
 class Checklist(BaseModel):

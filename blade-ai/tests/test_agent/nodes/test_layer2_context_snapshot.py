@@ -161,6 +161,24 @@ class TestLayer2ContextSnapshot:
         got = _build_first_iteration_context(st, l1, uid, skill, kc, tp, ch)
         assert got == _golden_map()[("context", label)]
 
+    def test_planner_verification_block_rendered(self):
+        """plan_verification (planner's environment-adapted strategy) renders
+        into the Layer-2 context with override semantics; absent → no block."""
+        label, st, l1, uid, skill, kc, tp, ch = _MATRIX[6]  # pod-mem-load
+        got_plain = _build_first_iteration_context(st, l1, uid, skill, kc, tp, ch)
+        assert "<planner-verification>" not in got_plain
+
+        st = dict(st)
+        st["plan_verification"] = (
+            "## Verification Methods\nMemoryPressure may NOT flip on this "
+            "30.1Gi node (ACK eviction threshold) — rely on usage sampling."
+        )
+        got = _build_first_iteration_context(st, l1, uid, skill, kc, tp, ch)
+        assert "Planner's Verification Strategy (environment-adapted)" in got
+        assert "<planner-verification>" in got
+        assert "MemoryPressure may NOT flip" in got
+        assert "planner's environment-specific conclusions prevail" in got
+
     @pytest.mark.parametrize("row", _BASELINE_MATRIX, ids=[r[0] for r in _BASELINE_MATRIX])
     def test_baseline_tool_messages_match_golden(self, row):
         label, bl, tgt, act, parsed = row

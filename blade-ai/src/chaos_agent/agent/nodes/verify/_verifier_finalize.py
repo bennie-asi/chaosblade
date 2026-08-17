@@ -31,6 +31,7 @@ from chaos_agent.agent.evidence import EvidenceProfile, host_evidence_supplement
 from chaos_agent.agent.replan import ReplanRequest
 from chaos_agent.transports import PROFILE_HOST, profile_of, resolve_channel_name
 from chaos_agent.agent.node_names import FINALIZE_VERIFICATION
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.result.operation_outcome import write_inject_verification
 from chaos_agent.agent.nodes.execute._debug_pod import parse_debug_pod_info, delete_debug_pod
 from chaos_agent.agent.nodes.execute._kubeconfig_inject import _resolve_kubeconfig, sync_kubewiz_runtime
@@ -39,6 +40,7 @@ from chaos_agent.agent.nodes.verify._verifier_layer1 import _layer1_to_dict, _re
 from chaos_agent.agent.nodes.verify._verifier_layer2_parse import (
     _count_verification_steps_in_skill_case,
     _detect_checklist_conclusion_inconsistency,
+    _extract_verification_step_descriptions,
     _parse_verification_result,
     _split_candidates,
     _try_parse_json,
@@ -55,12 +57,12 @@ from chaos_agent.agent.execution_artifacts import cleanup_debug_pod_artifacts
 from chaos_agent.agent.spec.skill_identity import read_active_skill_name
 from chaos_agent.config.settings import settings
 from chaos_agent.memory.session_store import get_global_session_store
+from chaos_agent.agent.state import AgentState
+from chaos_agent.observability.status_tracker import get_tracker, StatusCategory
 
 # Backward-compat aliases
 _parse_debug_pod_info = parse_debug_pod_info
 _delete_debug_pod = delete_debug_pod
-from chaos_agent.agent.state import AgentState
-from chaos_agent.observability.status_tracker import get_tracker, StatusCategory
 
 logger = logging.getLogger(__name__)
 
@@ -161,9 +163,12 @@ def _verification_from_submit_args(args: dict) -> dict:
             "total_executed": len(checklist),
         }
         if l2_status == "passed":
+            # IMPACT items are drill findings — their absence-phrasing
+            # evidence must not pollute inconsistency auto-downgrade.
             _non_passed_ev = " ".join(
                 c.get("evidence", "") for c in checklist
                 if isinstance(c, dict) and c.get("status") in ("failed", "partial", "recovered_before_observation")
+                and c.get("category") != "impact"
             )
             inc_warning, should_downgrade = _detect_checklist_conclusion_inconsistency(
                 checklist, l2_status, _non_passed_ev,
@@ -216,10 +221,11 @@ def _format_verification_detail(verification: dict, layer1) -> str:
     warnings = verification.get("warnings", [])
 
     icon_map = {"passed": "✓", "failed": "✗", "partial": "◐",
-                "skipped": "○", "recovered_before_observation": "◇"}
+                "skipped": "○", "recovered_before_observation": "◇",
+                "expected": "◌", "not_applicable": "–"}
     level_icon = {"verified": "✓", "partial": "◐", "unverified": "✗"}.get(level, "·")
 
-    lines = [f"{level_icon} Verification: {level} (Layer1: {layer1.status}, Layer2: {l2_status})"]
+    lines = [f"{level_icon} Verification: {level} (Layer1: {layer1.status.value}, Layer2: {l2_status})"]
 
     if l2_details:
         lines.append(f"  {l2_details}")
@@ -488,7 +494,10 @@ def _enforce_disk_burn_facts(verification: dict, state: AgentState) -> bool:
         ) or "measured"
         _io_overridden = False
         for _ci in verification.get("checklist", {}).get("items", []):
-            if _ci.get("status") in ("failed", "recovered_before_observation", "partial"):
+            # IMPACT items are drill findings (e.g. an honestly recorded
+            # absent phenomenon) — never flip them into fake passes.
+            if _ci.get("status") in ("failed", "recovered_before_observation", "partial") \
+                    and _ci.get("category") != "impact":
                 _ci["status"] = "passed"
                 _ci["evidence"] = (
                     f"[OVERRIDE] Programmatic I/O check confirmed ACTIVE "
@@ -531,9 +540,11 @@ def _enforce_disk_burn_facts(verification: dict, state: AgentState) -> bool:
     if _enforcement_applied:
         _all_items = verification.get("checklist", {}).get("items", [])
         if _all_items:
+            # IMPACT items are drill findings — they never gate the level.
             _remaining_bad = sum(
                 1 for _ci in _all_items
                 if _ci.get("status") in ("failed", "recovered_before_observation", "partial")
+                and _ci.get("category") != "impact"
             )
             if _remaining_bad == 0 and verification.get("layer2", {}).get("status") == "passed":
                 verification["level"] = "verified"
@@ -548,9 +559,15 @@ def _apply_step_coverage(
 ) -> tuple[list | None, int, int]:
     """Validate checklist step coverage against the skill case.
 
+    Answer-based coverage: every skill-case step must be ANSWERED in the
+    checklist — any status with evidence counts (passed/failed as well as
+    the discretionary expected/not_applicable/skipped). Only SILENT omission
+    of a step is a coverage gap. Discretionary statuses without evidence
+    are not valid answers: they downgrade 'passed' to 'partial' but do NOT
+    trigger a re-verification loop.
+
     Returns ``(missing_step_nums, expected_steps, executed_steps)`` and mutates
-    ``verification`` in place (warnings / layer2 downgrade to partial). Pure
-    extraction from ``finalize_verification`` — behaviour unchanged.
+    ``verification`` in place (warnings / layer2 downgrade to partial).
     """
     skill_case = state.get("skill_case_content", "")
     missing_step_nums = None
@@ -566,11 +583,36 @@ def _apply_step_coverage(
                 _skill_for_validation = _candidates[_chosen - 1]
 
         expected_steps = _count_verification_steps_in_skill_case(_skill_for_validation)
+        # Mode 2/3 contract: coverage validation is DISABLED when the case
+        # has no parseable steps — the count fallback must not fire on
+        # prose/bullet content the extractor could not enumerate.
+        if not _extract_verification_step_descriptions(_skill_for_validation):
+            expected_steps = 0
         executed_steps = verification["checklist"].get("total_executed", 0)
         checklist_items = verification["checklist"].get("items", [])
         missing_step_nums, _deviated = _validate_step_number_coverage(
             _skill_for_validation, checklist_items,
         )
+        # Discretionary answers must carry a reason: 'expected' and
+        # 'not_applicable' without evidence are judgments without
+        # observation — downgrade, but do not re-verify on this alone.
+        _unjustified = sorted(
+            it.get("step") for it in checklist_items
+            if it.get("status") in ("expected", "not_applicable")
+            and not (it.get("evidence") or "").strip()
+            and isinstance(it.get("step"), int)
+        )
+        if _unjustified:
+            _ulist = ", ".join(str(s) for s in _unjustified)
+            verification.setdefault("warnings", []).append(
+                f"Step coverage: step(s) {_ulist} marked expected/not_applicable "
+                f"without evidence. Discretionary statuses require an "
+                f"observation or a reason."
+            )
+            if not enforcement_applied and verification["layer2"]["status"] == "passed":
+                verification["layer2"]["status"] = "partial"
+                if verification.get("level") == "verified":
+                    verification["level"] = "partial"
         if missing_step_nums:
             step_list = ", ".join(str(s) for s in missing_step_nums)
             verification.setdefault("warnings", []).append(
@@ -604,7 +646,6 @@ def make_finalize_verification(registry=None):
         blade_uid = state.get("blade_uid", "")
         kubeconfig = _resolve_kubeconfig(state)
         sync_kubewiz_runtime(state)
-        count = state.get("verifier_loop_count", 0)
         messages = state.get("messages", [])
 
         tracker = get_tracker(task_id)
@@ -619,7 +660,6 @@ def make_finalize_verification(registry=None):
 
         # ---- Source the verdict: submit_verification args > text fallback ----
         submit_args = _extract_submit_args(messages)
-        is_text_source = submit_args is None
         if submit_args is not None:
             verification = _verification_from_submit_args(submit_args)
             content = ""
@@ -837,7 +877,7 @@ def make_finalize_verification(registry=None):
                 # Clean message handling: append only the reverify prompt; the
                 # prior response + ToolMessages are already in state. Do NOT set
                 # verification → route_after_finalize sends us back to verifier_loop.
-                result_update["messages"] = [HumanMessage(content=reverify_msg)]
+                result_update["messages"] = [HumanMessage(content=wrap_system_reminder(reverify_msg))]
                 result_update["reverify_count"] = reverify_count + 1
                 result_update["reverify_gaps"] = [g.gap_type for g in gaps]
                 sync_node_status_to_session(
@@ -985,7 +1025,7 @@ def make_finalize_verification(registry=None):
                             "verify_replan_count": verify_replan_count + 1},
                 )
                 tracker.complete(
-                    f"Verify-replan triggered: level=unverified, L2=failed"
+                    "Verify-replan triggered: level=unverified, L2=failed"
                 )
                 # Clean up debug pods created by the verifier (same as
                 # the normal finalize path — early return would skip it).
@@ -1015,7 +1055,7 @@ def make_finalize_verification(registry=None):
         )
 
         level = verification["level"]
-        l1_status = layer1.status
+        l1_status = layer1.status.value
         l2_status = verification.get("layer2", {}).get("status", "unknown")
         warnings = verification.get("warnings", [])
         status_msg = f"Verification: {level} (Layer1: {l1_status}, Layer2: {l2_status})"

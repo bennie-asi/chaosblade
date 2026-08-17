@@ -50,6 +50,7 @@ class TestEnumValues:
         assert set(v.value for v in ChecklistItemStatus) == {
             "passed", "partial", "failed", "skipped",
             "recovered_before_observation",
+            "expected", "not_applicable",
         }
 
     def test_warning_code_count(self):

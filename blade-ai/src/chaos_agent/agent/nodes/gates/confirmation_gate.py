@@ -31,12 +31,31 @@ def _build_plan_preview_markdown(state: dict) -> str:
 
     Uses only the restricted Markdown subset (## / ### / - / **bold** / `code`).
     Returns an empty string when there is nothing to preview.
+
+    Only the review-relevant sections are surfaced: ``## Task Summary``
+    (what/why in a few lines) + ``## Execution Steps`` (what the approver
+    actually sanctions). The complex-track plan now lives FULL in
+    ``state["plan"]`` (50-70 lines in practice); rendering it inline
+    recreates the Ink cursor desync that killed the original inline
+    plan_summary body. Verification Methods / Expected Impact travel to
+    the verifier instead of the card; the full markdown stays one
+    ``cat <plan_path>`` away. Plans without the headers (simple track,
+    legacy) fall back to the full text so nothing is lost.
     """
+    from chaos_agent.agent.nodes.planning.extract_planning_metadata import (
+        _plan_section,
+    )
+
     parts: list[str] = []
 
     plan = state.get("plan", "")
     if plan:
-        parts.append(f"## Plan Overview\n\n{plan}")
+        sections = [
+            _plan_section(plan, header)
+            for header in ("task summary", "execution steps")
+        ]
+        preview = "\n\n".join(p for p in sections if p) or plan
+        parts.append(f"## Plan Overview\n\n{preview}")
 
     scope = state.get("blast_radius_scope", "")
     detail = state.get("blast_radius_detail", "")
@@ -167,11 +186,19 @@ async def confirmation_gate(state: AgentState) -> dict:
         "skill_name": skill_name,
         "fault_intent": fault_intent_brief,
         "target": target,
-        "plan_summary": plan[:500] if plan else "",
+        # Human-facing summary first (finish_planning's summary, stored by
+        # extract_planning_metadata); the head-of-plan slice is only a
+        # fallback for legacy/direct paths that never produced one.
+        "plan_summary": state.get("plan_summary") or (plan[:500] if plan else ""),
         "safety_status": safety_status,
         "safety_reason": state.get("safety_reason"),
         "safety_checked_detail": state.get("safety_checked_detail"),
         "params": dict(spec.params),
+        # Duration contract: params no longer carry ``timeout``, so the
+        # effective bound must be surfaced explicitly — this is the last
+        # gate before execution and the operator must see how long the
+        # fault will live.
+        "duration_seconds": spec.duration_seconds,
         "target_health_report": state.get("target_health_report"),
         "conflict_uids": list(state.get("conflict_uids") or []),
         "pipeline_attempt": int(state.get("pipeline_attempt") or 0),

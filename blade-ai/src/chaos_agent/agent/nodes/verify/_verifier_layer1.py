@@ -7,6 +7,7 @@ and Layer 1 result serialization/restoration).
 
 import json
 import logging
+import re
 from collections import namedtuple
 
 from langchain_core.messages import ToolMessage
@@ -23,6 +24,13 @@ from chaos_agent.observability.status_tracker import get_tracker
 logger = logging.getLogger(__name__)
 
 # Layer1Result is now a Pydantic model imported from chaos_agent.agent.result.verdict
+
+# Upper bound on how many discovered tool pods Layer 1 probes for the
+# experiment record. Exec-carrier records live in one pod's local DB and
+# discovery order is arbitrary, so we sweep broadly; this cap only bounds
+# worst-case probe time on very large clusters (definitive results return
+# early). See task-2d612caa.
+_MAX_DISCOVERY_PROBES = 8
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +91,58 @@ def _extract_json_object(raw: str) -> dict | None:
     return None
 
 
+def _parse_iso_ts_seconds(ts_value, created_value) -> float | None:
+    """Return (UpdateTime - CreateTime) in seconds, or None if unparseable."""
+    from datetime import datetime
+
+    def _parse(ts) -> datetime | None:
+        if not isinstance(ts, str) or not ts.strip():
+            return None
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    updated = _parse(ts_value)
+    created = _parse(created_value)
+    if updated is None or created is None:
+        return None
+    return (updated - created).total_seconds()
+
+
+def _is_early_destroy(res: dict, exp_status: str) -> bool:
+    """True when an expired record was destroyed BEFORE its --timeout elapsed.
+
+    Distinguishes timeout expiry (record lives out its full window) from an
+    external destroy — e.g. the executor cleaning up its own injection record
+    after a one-shot fault (task inject-e47de3e8: destroyed +20.4s after
+    creation with --timeout=600). The two need different verdicts: expiry
+    means the fault window closed and live observation is impossible, while an
+    early destroy says nothing about the fault's actual effects.
+    """
+    flag = str(res.get("Flag", "") or "")
+    match = re.search(r"--timeout[=\s]+(\d+)", flag)
+    if not match:
+        return False
+    try:
+        timeout_seconds = int(match.group(1))
+    except ValueError:
+        return False
+    if timeout_seconds <= 0:
+        return False
+    elapsed = _parse_iso_ts_seconds(
+        res.get("UpdateTime") or res.get("update_time"),
+        res.get("CreateTime") or res.get("create_time"),
+    )
+    if elapsed is None:
+        return False
+    logger.info(
+        "Layer1 expired-record attribution: status=%s elapsed=%.1fs timeout=%ss",
+        exp_status, elapsed, timeout_seconds,
+    )
+    return elapsed < timeout_seconds
+
+
 def _parse_blade_status_output(raw: str) -> tuple[str, str, bool]:
     """Parse blade_status JSON output into (status, details, expired).
 
@@ -116,11 +176,20 @@ def _parse_blade_status_output(raw: str) -> tuple[str, str, bool]:
     if exp_status in _RUNNING_STATES:
         return "passed", f"blade_status: {exp_status} (experiment running)", False
     if exp_status in _EXPIRED_STATES:
+        if _is_early_destroy(res, exp_status):
+            return (
+                "warning",
+                f"Experiment record is '{exp_status}' before its --timeout elapsed — "
+                f"the record was destroyed externally (e.g. post-injection cleanup), "
+                f"not by timeout expiry. Record liveness cannot judge the fault's "
+                f"actual effects; Layer 2 will verify cluster-level evidence.",
+                True,
+            )
         return (
             "failed",
-            f"Experiment status: {exp_status} — the fault has already expired (likely "
-            f"due to --timeout being too short). Verification cannot observe fault effects "
-            f"because they have already dissipated. Recommend increasing --duration to >= 60s.",
+            f"Experiment status: {exp_status} — the fault window has expired "
+            f"(--timeout elapsed), so live fault effects can no longer be observed. "
+            f"Layer 2 may still find residual evidence.",
             True,
         )
     # Transient state: the experiment is mid-transition, either because the
@@ -449,11 +518,16 @@ async def _run_layer1_via_kubectl_exec(
             )
 
         # Step 2: Try blade query k8s (primary) then blade status (fallback)
-        # via kubectl exec on each pod (up to 2)
+        # via kubectl exec on each discovered pod. Exec-carrier experiments
+        # live in ONE pod's local DB and discovery order is arbitrary, so
+        # every candidate must be probed before a "record not found" verdict
+        # (task-2d612caa: a 2-pod cap read the wrong pod's empty DB as
+        # experiment failure). The bound only limits worst-case probe time on
+        # very large clusters; a definitive result always returns early.
         # NOTE: blade status v1.8.0 does NOT support --kubeconfig flag.
         # Inside the pod, blade can access the API server directly without kubeconfig.
         last_error = None
-        for pod_name, pod_ns in pods_with_ns[:2]:
+        for pod_name, pod_ns in pods_with_ns[:_MAX_DISCOVERY_PROBES]:
             # PRIMARY: blade query k8s (queries CRD, works with CRD UID)
             query_cmd = build_kubectl_cmd("exec", [
                 pod_name, "-n", pod_ns,
@@ -507,6 +581,15 @@ async def _run_layer1_via_kubectl_exec(
                     last_error = f"cannot exec into pod {pod_name}"
                     continue
 
+                # Per-pod local DB guard: an experiment created via exec on
+                # one tool pod lives in THAT pod's local DB only — every
+                # other tool pod reports "record not found". A discovered
+                # pod's empty DB is therefore not a verdict; the next pod
+                # may be the injection pod (task-2d612caa).
+                if "record not found" in raw:
+                    last_error = f"record not found in pod {pod_name} local DB"
+                    continue
+
                 # Type B: Parse blade status output (experiment status)
                 status, details, expired = _parse_blade_status_output(raw)
                 if tracker:
@@ -524,7 +607,20 @@ async def _run_layer1_via_kubectl_exec(
                 last_error = str(e)
                 continue
 
-        # All pods failed -- Type A (infrastructure failure) -> skipped
+        # All pods failed. Distinguish an experiment-level verdict from an
+        # infrastructure failure: if every probed pod answered (exit code and
+        # parseable JSON) but none holds the record, the experiment genuinely
+        # cannot be found anywhere — that is a failure, not a skip.
+        if last_error and "record not found" in last_error:
+            msg = f"kubectl exec: experiment record not found in any tool pod's local DB ({last_error})"
+            if tracker:
+                tracker.update(
+                    "Layer 1 (kubectl exec): record not found in all tool pods -> failed",
+                    {"step": "blade_status_kubectl", "status": "failed"},
+                )
+            return Layer1Result(status="failed", details=msg)
+
+        # Type A (infrastructure failure) -> skipped
         msg = f"kubectl exec: could not execute blade status in any tool pod ({last_error})"
         if tracker:
             tracker.update(
@@ -868,5 +964,10 @@ def _restore_layer1_from_state(state: AgentState) -> Layer1Result:
 
 
 def _layer1_to_dict(result: Layer1Result) -> dict:
-    """Convert Layer1Result to the verification.layer1 dict."""
-    return result.model_dump()
+    """Convert Layer1Result to the verification.layer1 dict.
+
+    mode="json" renders enum members (status/expected) as plain string values
+    so downstream comparisons and persistence never see ``Layer1Status.FAILED``
+    enum reprs (task inject-e47de3e8).
+    """
+    return result.model_dump(mode="json")

@@ -24,6 +24,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from chaos_agent.agent.nodes.execute._injection_detection import (
     _was_blade_create_attempted,
 )
+from chaos_agent.agent.prompts.reminder import SYSTEM_REMINDER_DECLARATION
 from chaos_agent.agent.result.verdict import Layer1Result
 from chaos_agent.transports import PROFILE_K8S
 
@@ -298,12 +299,13 @@ Your single objective: restore the target to its pre-fault state.
 - DO NOT verify the fault has been removed — that is Layer 2's job, not yours.
 - DO NOT use interactive commands — they do not work in automation; translate
   them into programmatic equivalents.
+- {SYSTEM_REMINDER_DECLARATION}
 
 {capability_fragment}
 
 ## How to derive recovery commands
-- WHAT to undo comes from the recovery context below: the experiment UID,
-  the original injection pod, and the recorded impact.
+- WHAT to undo comes from the recovery context below: the experiment UID and
+  the recorded impact — and the original injection pod, when it is named.
 - WHERE to run it comes from live cluster queries — discover the current
   state first; never assume it.
 - HOW comes from the tools you actually hold: inspect a tool's own
@@ -312,11 +314,11 @@ Your single objective: restore the target to its pre-fault state.
   be outdated — the tool's runtime behavior is the ground truth.
 
 ## Recovery Procedure
-1. Locate a currently running tool pod. The recovery context below names the
-   original injection pod — prefer it, and identify its namespace before use
-   (it is deployment-specific — NEVER assume it). Tool pods rotate, so if
-   that pod no longer exists, discover a running one ACROSS ALL NAMESPACES
-   by its tool label, using live cluster queries.
+1. Locate a currently running tool pod. If the recovery context below names
+   the original injection pod, prefer it, and identify its namespace before
+   use (it is deployment-specific — NEVER assume it). Tool pods rotate, and
+   the context may name no pod at all — then discover a running one by its
+   tool label ACROSS ALL NAMESPACES, using live cluster queries.
 2. Inside the located tool pod, in ITS own namespace, run the
    experiment-destroy command for the experiment UID. Confirm the exact
    destroy syntax from the injection tool's own help/usage inside the pod
@@ -369,6 +371,7 @@ verifying — Layer 2 owns outcome verification.
 - If an action fails, use another supported recovery approach only when new
   evidence justifies it; otherwise report the blocker precisely, and do not
   broaden scope to compensate for an error.
+- {SYSTEM_REMINDER_DECLARATION}
 
 ## Instructions
 1. Use the Recovery Actions and injection context to determine what must be undone.

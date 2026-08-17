@@ -64,7 +64,7 @@ __all__ = [
     "get_intent_tools_section", "get_intent_reflection_section",
     "get_intent_capability_boundary_section", "get_intent_output_section",
     "get_intent_completeness_section", "get_intent_reminder_section",
-    "get_role_section", "get_env_section",
+    "get_role_section", "get_executor_role_section", "get_env_section",
     "get_knowledge_summary_section", "get_domain_knowledge_section", "get_skill_index_section",
     "get_experience_section",
     "get_workflow_section",

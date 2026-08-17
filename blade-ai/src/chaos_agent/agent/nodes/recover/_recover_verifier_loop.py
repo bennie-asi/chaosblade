@@ -60,6 +60,7 @@ from chaos_agent.agent.nodes.execute.react_helpers import (
     record_system_prompt,
     summarize_llm_response,
 )
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.result.operation_outcome import write_recover_verification
 from chaos_agent.agent.nodes.verify._verifier_submit import SUBMIT_RECOVER_VERIFICATION_TOOL_NAME
 from chaos_agent.agent.spec.skill_identity import read_active_skill_name
@@ -518,7 +519,7 @@ async def _run_layer1_recovery(
 
                 # Deadline/final prompts for edge case where max == 1
                 if is_last_l1:
-                    messages.append(HumanMessage(content=(
+                    messages.append(HumanMessage(content=wrap_system_reminder(
                         "**RECOVERY EXECUTION DEADLINE**: This is the ONLY iteration available.\n"
                         "Tools are unavailable. You MUST provide your recovery execution conclusion "
                         "in this EXACT format:\n\n"
@@ -643,7 +644,7 @@ async def _run_layer1_recovery(
                         _guard_feedback = _layer1_success_guard_feedback(layer1, state)
                         if _guard_feedback and settings.max_recover_layer1_iterations > 1:
                             result_update["messages"] = msg_list + [
-                                HumanMessage(content=_guard_feedback)
+                                HumanMessage(content=wrap_system_reminder(_guard_feedback))
                             ]
                             result_update["_layer1_success_guard_fired"] = True
                             result_update["recover_layer1_cache"] = {
@@ -748,14 +749,14 @@ async def _run_layer1_recovery(
 
         # Convergence hint: encourage conclusion if already several iterations
         if layer1_iteration >= 3:
-            messages.append(HumanMessage(content=(
+            messages.append(HumanMessage(content=wrap_system_reminder(
                 "You have already executed several recovery actions. If the actions are complete, "
                 "output your RECOVERY_EXECUTION_RESULT summary now rather than taking more actions."
             )))
 
         # Deadline prompt: tools will be unbound next iteration
         if layer1_iteration >= max_l1 - 1:
-            messages.append(HumanMessage(content=(
+            messages.append(HumanMessage(content=wrap_system_reminder(
                 f"**RECOVERY EXECUTION DEADLINE**: This is iteration {layer1_iteration} of max {max_l1}.\n"
                 f"Based on ALL actions executed so far:\n"
                 f"  - If recovery actions are complete, output the RECOVERY_EXECUTION_RESULT format NOW.\n"
@@ -767,7 +768,7 @@ async def _run_layer1_recovery(
 
         # Final iteration: no tools, force structured output
         if layer1_iteration >= max_l1:
-            messages.append(HumanMessage(content=(
+            messages.append(HumanMessage(content=wrap_system_reminder(
                 f"**FINAL RECOVERY EXECUTION ITERATION**: This is iteration {layer1_iteration} of max {max_l1}. "
                 f"NO more iterations available. Tools are no longer available.\n"
                 f"You MUST provide your final recovery execution conclusion NOW in this EXACT format:\n\n"
@@ -780,7 +781,7 @@ async def _run_layer1_recovery(
 
         # Per-iteration kubeconfig reminder
         if kubeconfig and capability_context.profile == PROFILE_K8S:
-            messages.append(HumanMessage(content=(
+            messages.append(HumanMessage(content=wrap_system_reminder(
                 f"**Reminder**: You MUST pass kubeconfig='{kubeconfig}' to every bound tool call."
             )))
 
@@ -854,7 +855,7 @@ async def _run_layer1_recovery(
                 _guard_feedback = _layer1_success_guard_feedback(layer1, state)
                 if _guard_feedback and not is_last_l1:
                     result_update["messages"] = [
-                        response, HumanMessage(content=_guard_feedback)
+                        response, HumanMessage(content=wrap_system_reminder(_guard_feedback))
                     ]
                     result_update["_layer1_success_guard_fired"] = True
                     result_update["recover_layer1_cache"] = {
@@ -1283,13 +1284,13 @@ async def _run_layer2_verification(
 
     # Convergence hint preserves model discretion while making remaining evidence explicit.
     if count >= 4:
-        messages.append(HumanMessage(content=(
+        messages.append(HumanMessage(content=wrap_system_reminder(
             "You have gathered sufficient CURRENT (post-recovery) evidence across multiple iterations. "
             "If your observations clearly show recovery, call submit_recover_verification now. "
             "Do NOT repeat the same check — conclude based on evidence already collected in THIS Layer 2 iteration."
         )))
     if count >= settings.max_recover_verifier_loop - 1:
-        messages.append(HumanMessage(content=(
+        messages.append(HumanMessage(content=wrap_system_reminder(
             f"**RECOVERY VERIFICATION DEADLINE**: This is iteration {count} of max {settings.max_recover_verifier_loop}. "
             f"Tools are already unavailable — conclude from the evidence gathered.\n"
             f"Based on ALL evidence gathered so far, output the RECOVERY_VERIFICATION_RESULT format NOW.\n\n"
@@ -1305,7 +1306,7 @@ async def _run_layer2_verification(
         and kubeconfig
         and capability_context.profile == PROFILE_K8S
     ):
-        messages.append(HumanMessage(content=(
+        messages.append(HumanMessage(content=wrap_system_reminder(
             f"**Reminder**: You MUST pass kubeconfig='{kubeconfig}' to every bound tool call."
         )))
 
@@ -1315,7 +1316,7 @@ async def _run_layer2_verification(
         # below): the raw blade_uid heuristic mislabels kubectl-blade/combo
         # recoveries, whose Layer 1 is LLM-driven despite a live UID.
         layer1_label = "blade_destroy" if _layer1_is_deterministic else "recovery execution"
-        messages.append(HumanMessage(content=(
+        messages.append(HumanMessage(content=wrap_system_reminder(
             f"**FINAL RECOVERY VERIFICATION ITERATION**: This is iteration {count} of max {settings.max_recover_verifier_loop}. "
             f"NO more iterations available. Tools are no longer available.\n"
             f"You MUST provide your final recovery verification conclusion NOW in this EXACT format:\n\n"

@@ -105,6 +105,70 @@ class TestConfirmationGate:
         assert call_args["plan_summary"] == ""
 
     @pytest.mark.asyncio
+    async def test_plan_summary_prefers_state_summary(self, sample_agent_state):
+        """finish_planning's human-facing summary (stored by
+        extract_planning_metadata) wins over the head-of-plan slice —
+        the full complex-track plan must not bleed into the compact
+        summary field."""
+        state = sample_agent_state
+        state["skill_name"] = "pod-delete"
+        state["target"] = {"namespace": "default"}
+        state["plan"] = "x" * 1000
+        state["plan_summary"] = "compact human summary"
+        state["safety_status"] = "safe"
+
+        with patch("chaos_agent.agent.nodes.gates.confirmation_gate.interrupt", return_value="approved") as mock_interrupt:
+            await confirmation_gate(state)
+
+        call_args = mock_interrupt.call_args[0][0]
+        assert call_args["plan_summary"] == "compact human summary"
+
+    @pytest.mark.asyncio
+    async def test_preview_slices_review_sections_only(self, sample_agent_state):
+        """The confirm-card preview carries Task Summary + Execution Steps
+        only — Verification Methods / Rollback stay off the card (they
+        travel to the verifier / plan file); a 50-70-line full plan
+        rendered inline recreates the Ink cursor desync incident."""
+        state = sample_agent_state
+        state["skill_name"] = "pod-delete"
+        state["target"] = {"namespace": "default"}
+        state["plan"] = (
+            "## Task Summary\ninject mem load on node-a\n\n"
+            "## Execution Steps\n1. blade create k8s node-mem load\n\n"
+            "## Expected Impact\nmemory pressure visible in top\n\n"
+            "## Verification Methods\nsample kubectl top node twice\n\n"
+            "## Rollback and Recovery\nblade destroy <uid>"
+        )
+        state["safety_status"] = "safe"
+
+        with patch("chaos_agent.agent.nodes.gates.confirmation_gate.interrupt", return_value="approved") as mock_interrupt:
+            await confirmation_gate(state)
+
+        preview = mock_interrupt.call_args[0][0]["plan_preview_markdown"]
+        assert "inject mem load on node-a" in preview
+        assert "blade create k8s node-mem load" in preview
+        assert "Verification Methods" not in preview
+        assert "sample kubectl top node twice" not in preview
+        assert "Rollback and Recovery" not in preview
+        assert "Expected Impact" not in preview
+
+    @pytest.mark.asyncio
+    async def test_preview_headerless_plan_falls_back_to_full(self, sample_agent_state):
+        """Simple-track / legacy plans carry no ``##`` headers → the whole
+        text renders (it is already compact); nothing is lost."""
+        state = sample_agent_state
+        state["skill_name"] = "pod-delete"
+        state["target"] = {"namespace": "default"}
+        state["plan"] = "Delete pod my-pod in namespace default"
+        state["safety_status"] = "safe"
+
+        with patch("chaos_agent.agent.nodes.gates.confirmation_gate.interrupt", return_value="approved") as mock_interrupt:
+            await confirmation_gate(state)
+
+        preview = mock_interrupt.call_args[0][0]["plan_preview_markdown"]
+        assert "Delete pod my-pod in namespace default" in preview
+
+    @pytest.mark.asyncio
     async def test_safety_reason_included(self, sample_agent_state):
         state = sample_agent_state
         state["skill_name"] = "pod-delete"

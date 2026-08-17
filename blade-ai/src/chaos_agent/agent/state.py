@@ -612,6 +612,7 @@ class AgentState(MessagesState):
     plan_summary: str = ""               # Human-facing execution preview / dry-run summary
     plan_path: Optional[str] = None      # saved plan file path (memory/plan/{task_id}.md)
     is_complex: Optional[bool] = None    # True if task requires a formal plan document
+    plan_verification: Optional[str] = None  # plan's Verification Methods + Expected Impact slices for the verifier
     planning_rejected: bool = False      # No catalogue case loaded; edge routes back
     _planning_rejection_reason: Optional[str] = None  # LLM rejection_reason for fail diagnosis
     _planning_alternatives: str = ""     # LLM-proposed alternatives after planning rejection

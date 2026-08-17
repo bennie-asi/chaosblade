@@ -13,6 +13,8 @@ from chaos_agent.agent.nodes.planning.extract_planning_metadata import (
     _extract_skill_case_from_messages,
     _derive_scope_target_action,
     _derive_scope_from_resource_path,
+    _extract_plan_verification_slices,
+    _find_saved_plan,
     _has_browsed_catalogue,
     extract_planning_metadata,
 )
@@ -562,3 +564,134 @@ class TestCatalogueRejectionGuard:
         assert result.get("planning_rejected") is True
         assert result.get("error") == "Really not supported"
         assert result.get("_planning_rejection_reason") == "Really not supported"
+
+
+class TestSavedPlanHydration:
+    """state["plan"] must carry the FULL saved plan — the Phase 2 system
+    prompt carrier — instead of the LLM-compressed finish_planning summary,
+    which may drop exact commands, vehicle names, or preconditions."""
+
+    FULL_PLAN = (
+        "## Task Summary\ncomplex multi-step\n\n"
+        "## Execution Steps\n1. kubectl exec tool-pod -- blade create mem load\n\n"
+        "## Verification Methods\nmulti-round sampling"
+    )
+
+    def _plan_messages(self, echo_body: bool = True) -> list:
+        result_content = (
+            f"Plan saved to /tmp/plan/task-1.md\n\n{self.FULL_PLAN}"
+            if echo_body else "Plan saved to /tmp/plan/task-1.md"
+        )
+        return [
+            HumanMessage(content="inject memory fault"),
+            AIMessage(content="", tool_calls=[{
+                "name": "save_fault_plan", "id": "sp1", "type": "tool_call",
+                "args": {"task_id": "task-1", "plan_content": self.FULL_PLAN},
+            }]),
+            ToolMessage(content=result_content, tool_call_id="sp1",
+                        name="save_fault_plan"),
+            AIMessage(content="", tool_calls=[{
+                "name": "finish_planning", "id": "fp1", "type": "tool_call",
+                "args": {"summary": "short summary only"},
+            }]),
+            ToolMessage(content="Planning finalized. Summary: short summary only",
+                        tool_call_id="fp1", name="finish_planning"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_full_plan_beats_summary(self):
+        """Normal flow (save_fault_plan then finish_planning): the full
+        plan wins over the summary; is_complex/plan_path come along."""
+        state = AgentState(task_id="t", skill_case_content="case",
+                           messages=self._plan_messages())
+        result = await extract_planning_metadata(state)
+        assert result["plan"] == self.FULL_PLAN
+        assert result.get("is_complex") is True
+        assert result.get("plan_path") == "/tmp/plan/task-1.md"
+
+    @pytest.mark.asyncio
+    async def test_hydration_independent_of_echo(self):
+        """Slim tool result (no body echo) → content still hydrates from
+        the save_fault_plan tool-call args."""
+        state = AgentState(task_id="t", skill_case_content="case",
+                           messages=self._plan_messages(echo_body=False))
+        result = await extract_planning_metadata(state)
+        assert result["plan"] == self.FULL_PLAN
+
+    @pytest.mark.asyncio
+    async def test_summary_used_without_saved_plan(self):
+        """Simple task (no save_fault_plan) → summary remains the plan."""
+        msgs = [
+            HumanMessage(content="inject cpu fault"),
+            AIMessage(content="", tool_calls=[{
+                "name": "finish_planning", "id": "fp1", "type": "tool_call",
+                "args": {"summary": "simple one-shot plan"},
+            }]),
+            ToolMessage(content="Planning finalized. Summary: simple one-shot plan",
+                        tool_call_id="fp1", name="finish_planning"),
+        ]
+        state = AgentState(task_id="t", skill_case_content="case", messages=msgs)
+        result = await extract_planning_metadata(state)
+        assert result["plan"] == "simple one-shot plan"
+
+    @pytest.mark.asyncio
+    async def test_existing_state_plan_not_overwritten(self):
+        """Direct mode (plan already in state) → node leaves it alone."""
+        state = AgentState(task_id="t", skill_case_content="case",
+                           plan="direct mode plan",
+                           messages=self._plan_messages())
+        result = await extract_planning_metadata(state)
+        assert result.get("plan") in (None, "direct mode plan")
+
+    def test_find_saved_plan_empty_history(self):
+        content, path = _find_saved_plan([])
+        assert content == ""
+        assert path == ""
+
+    @pytest.mark.asyncio
+    async def test_plan_summary_stored_from_finish_planning(self):
+        """finish_planning's summary lands in state['plan_summary'] on the
+        complex track too — state['plan'] carries the FULL plan there, so
+        the summary is the confirm card / CLI prompt's only compact
+        rendering of intent."""
+        state = AgentState(task_id="t", skill_case_content="case",
+                           messages=self._plan_messages())
+        result = await extract_planning_metadata(state)
+        assert result["plan"] == self.FULL_PLAN
+        assert result.get("plan_summary") == "short summary only"
+
+    @pytest.mark.asyncio
+    async def test_plan_summary_not_overwriting_state(self):
+        """plan_summary already in state (direct mode) → untouched."""
+        state = AgentState(task_id="t", skill_case_content="case",
+                           plan_summary="direct summary",
+                           messages=self._plan_messages())
+        result = await extract_planning_metadata(state)
+        assert result.get("plan_summary") is None
+
+    @pytest.mark.asyncio
+    async def test_plan_verification_sliced_from_full_plan(self):
+        """The verifier-facing slice carries Verification Methods (and
+        Expected Impact when present) but never Execution Steps."""
+        state = AgentState(task_id="t", skill_case_content="case",
+                           messages=self._plan_messages())
+        result = await extract_planning_metadata(state)
+        pv = result.get("plan_verification", "")
+        assert "## Verification Methods" in pv
+        assert "multi-round sampling" in pv
+        assert "Execution Steps" not in pv
+        assert "blade create mem load" not in pv
+
+    def test_extract_plan_verification_slices(self):
+        plan = (
+            "## Task Summary\ns\n\n"
+            "## Verification Methods\nvm-body\n\n"
+            "## Expected Impact\nei-body\n"
+        )
+        pv = _extract_plan_verification_slices(plan)
+        assert pv.startswith("## Verification Methods")
+        assert "vm-body" in pv and "ei-body" in pv
+        assert "Task Summary" not in pv
+        # No verification sections → empty (simple prose plan).
+        assert _extract_plan_verification_slices("just a summary") == ""
+        assert _extract_plan_verification_slices("") == ""

@@ -305,9 +305,25 @@ def _infer_failure_detail(state: AgentState) -> dict:
         l1 = verification.get("layer1", {})
         l2 = verification.get("layer2", {})
         level = verification.get("level", "")
-        if level in ("unverified",) or l1.get("status") == "failed" or l2.get("status") == "failed":
-            l1_status = l1.get("status", "unknown")
-            l2_status = l2.get("status", "unknown")
+        l1_status = l1.get("status", "unknown")
+        l2_status = l2.get("status", "unknown")
+        # Defense-in-depth exemption: an expired Layer1 record (Destroyed before
+        # or after its timeout) only proves the RECORD is gone, not that the
+        # fault never took effect. When Layer 2 independently verified the fault
+        # effects on the cluster (verified + passed), the Layer1 failure must
+        # not veto the verdict (task inject-e47de3e8: executor cleanup destroyed
+        # the record, Layer2 verified the restarts, task was wrongly failed).
+        layer1_expired_overridden = (
+            l1_status == "failed"
+            and bool(l1.get("expired"))
+            and l2_status == "passed"
+            and level == "verified"
+        )
+        if (
+            level in ("unverified",)
+            or (l1_status == "failed" and not layer1_expired_overridden)
+            or l2_status == "failed"
+        ):
             return fail_state(
                 FailureCategory.VERIFICATION_FAILED,
                 f"Layer1={l1_status}, Layer2={l2_status}, level={level}",
@@ -380,6 +396,24 @@ async def _finalize_session_store(
                 # when update_progress had been used.
                 progress_ledger=merged.get("progress_ledger"),
             )
+            # Sync the frozen model name into the metric store. finalize_session
+            # snapshots ``settings.model_name`` (or the result-carried value for
+            # multi-model runs) into the session record; the task_details row is
+            # the only place the metric chain (blade-ai metric / TUI review card /
+            # trace preview) can read it from. Fire-and-forget: a sync failure
+            # must never break save_memory.
+            try:
+                from chaos_agent.persistence.task_store import get_task_store
+
+                frozen = (store.read_session(task_id) or {}).get("model_name") or ""
+                if frozen:
+                    task_store = await get_task_store()
+                    await task_store.upsert(task_id, model_name=frozen)
+            except Exception:
+                logger.debug(
+                    "model_name sync to TaskStore failed for %s (non-critical)",
+                    task_id, exc_info=True,
+                )
     except Exception:
         logger.warning(
             "Failed to finalize task session for %s in save_memory; "

@@ -34,6 +34,36 @@ class TestParseBladeStatusOutput:
         assert expired is True
         assert "expired" in details.lower()
 
+    def test_destroyed_early_cleanup_is_warning(self):
+        """Record destroyed well before its --timeout ⇒ external cleanup, not
+        timeout expiry. Must NOT be failed (task inject-e47de3e8: executor
+        destroyed the record +20.4s after creation with --timeout=600)."""
+        raw = json.dumps({"code": 200, "success": True, "result": {
+            "Status": "Destroyed",
+            "CreateTime": "2026-08-16T16:22:07.49559281Z",
+            "UpdateTime": "2026-08-16T16:22:27.880948049Z",
+            "Flag": " --timeout=600 --signal=15 --pid=3456823",
+        }})
+        status, details, expired = _parse_blade_status_output(raw)
+        assert status == "warning"
+        assert expired is True
+        assert "timeout" not in details.lower() or "not by timeout" in details.lower()
+        # Must not carry the misleading "increase --duration" advice.
+        assert "increasing" not in details.lower()
+
+    def test_destroyed_after_timeout_is_failed(self):
+        """Record lived out its full --timeout window ⇒ genuine expiry stays failed."""
+        raw = json.dumps({"code": 200, "success": True, "result": {
+            "Status": "Destroyed",
+            "CreateTime": "2026-08-16T16:22:07.000000Z",
+            "UpdateTime": "2026-08-16T16:32:08.000000Z",
+            "Flag": " --timeout=600 --signal=15",
+        }})
+        status, details, expired = _parse_blade_status_output(raw)
+        assert status == "failed"
+        assert expired is True
+        assert "--timeout elapsed" in details
+
     def test_revoked_expired(self):
         raw = json.dumps({"code": 200, "success": True, "result": {"Status": "Revoked"}})
         status, details, expired = _parse_blade_status_output(raw)

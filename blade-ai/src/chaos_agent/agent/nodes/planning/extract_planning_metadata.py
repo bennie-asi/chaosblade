@@ -20,6 +20,7 @@ import re
 from langchain_core.messages import AIMessage, ToolMessage
 
 from chaos_agent.agent.node_names import TOOL_RESULT
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.spec.skill_identity import has_active_skill
 from chaos_agent.agent.state import AgentState
 
@@ -275,6 +276,72 @@ def _find_planning_exit_tool_message(messages: list) -> ToolMessage | None:
     return None
 
 
+def _find_saved_plan(messages: list) -> tuple[str, str]:
+    """Locate the last saved fault plan in message history.
+
+    Returns ``(plan_content, plan_path)``; either may be empty when no
+    plan was saved (simple tasks). Content is read from the
+    ``save_fault_plan`` tool-call ARGS (the authoritative copy that is
+    always present in history), never from the tool-result echo, so
+    hydration stays independent of the result format.
+    """
+    content = ""
+    path = ""
+    for msg in reversed(messages):
+        if not path and isinstance(msg, ToolMessage) \
+                and (getattr(msg, "name", "") or "") == "save_fault_plan":
+            tm_text = msg.content if isinstance(msg.content, str) else ""
+            if tm_text.startswith("Plan saved to "):
+                path = tm_text.split("\n")[0].replace("Plan saved to ", "").strip()
+        if not content and isinstance(msg, AIMessage):
+            for tc in getattr(msg, "tool_calls", None) or []:
+                if tc.get("name") == "save_fault_plan":
+                    _pc = (tc.get("args") or {}).get("plan_content") or ""
+                    if isinstance(_pc, str) and _pc.strip():
+                        content = _pc
+                    break
+        if content and path:
+            break
+    return content, path
+
+
+# Markdown sections of the saved plan that carry verification value.
+# Order matters: the strategy first, the anticipated effect second.
+_PLAN_VERIFIER_SECTIONS = ("verification methods", "expected impact")
+
+
+def _plan_section(plan: str, header: str) -> str:
+    """Slice one ``## `` section out of a markdown plan (empty if absent)."""
+    lines = plan.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith(f"## {header}"):
+            start = i
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].strip().startswith("## "):
+            end = j
+            break
+    return "\n".join(lines[start:end]).strip()
+
+
+def _extract_plan_verification_slices(plan: str) -> str:
+    """Verifier-facing slice of the plan: Verification Methods + Expected Impact.
+
+    The planner's environment-adapted verification strategy (probed
+    facts, anticipated negatives) overrides generic skill-case steps at
+    Layer 2 — but only these two sections are surfaced; execution steps
+    and rollback stay executor-only.
+    """
+    if not plan:
+        return ""
+    parts = [_plan_section(plan, header) for header in _PLAN_VERIFIER_SECTIONS]
+    return "\n\n".join(p for p in parts if p)
+
+
 async def extract_planning_metadata(state: AgentState) -> dict:
     """Extract planning metadata from agent_loop messages into State.
 
@@ -315,15 +382,18 @@ async def extract_planning_metadata(state: AgentState) -> dict:
                     )
                     result["_catalogue_rejection_nudged"] = True
                     result["planning_rejected"] = True
-                    result["messages"] = [HumanMessage(content=(
+                    result["messages"] = [HumanMessage(content=wrap_system_reminder(
                         "**REJECTION NOT ACCEPTED**: You concluded this fault "
-                        "scenario is unsupported WITHOUT browsing the skill "
-                        "catalogue. The catalogue contains kubectl-native "
-                        "injection use cases beyond ChaosBlade primitives.\n\n"
-                        "You MUST first browse the catalogue:\n"
-                        "1. `read_skill_resource(resource_path='references/catalogue/')`\n"
-                        "2. Find the directory matching the fault symptom\n"
-                        "3. Read the specific use-case .md file\n\n"
+                        "scenario is unsupported WITHOUT browsing the active "
+                        "skill's resources. The skill bundles injection use "
+                        "cases beyond what general command references "
+                        "cover.\n\n"
+                        "You MUST first browse them:\n"
+                        "1. Follow the discovery flow described in SKILL.md, "
+                        "using `read_skill_resource` (a directory path yields "
+                        "a listing)\n"
+                        "2. Find the use case matching the fault symptom\n"
+                        "3. Read the specific use-case file\n\n"
                         "If a matching use case exists, follow it. "
                         "If no matching use case exists, design your own "
                         "injection plan based on the fault description and "
@@ -362,6 +432,12 @@ async def extract_planning_metadata(state: AgentState) -> dict:
                 summary = tm_content.replace("Planning finalized. Summary: ", "")
                 if summary and not state.get("plan"):
                     result["plan"] = summary
+                # Human-facing summary for the confirm card / CLI prompt /
+                # experiment listing. On the complex track state["plan"]
+                # carries the FULL saved plan, so this summary is the only
+                # compact rendering of intent — do not drop it.
+                if summary and not state.get("plan_summary"):
+                    result.setdefault("plan_summary", summary)
 
         elif tm_name == "save_fault_plan":
             if not tm_content.startswith("Plan saved to "):
@@ -374,6 +450,20 @@ async def extract_planning_metadata(state: AgentState) -> dict:
             if plan_body and not state.get("plan"):
                 result["plan"] = plan_body
 
+    # Complex-task precedence: the saved FULL plan beats the
+    # finish_planning summary for ``state["plan"]``. Phase 2's system
+    # prompt must carry the exact '## Execution Steps' (sliced by
+    # _execution_steps_only), not an LLM-compressed summary that may
+    # drop commands, vehicle names, or preconditions — the message
+    # history echo is a weaker carrier (compaction / attention decay).
+    if not state.get("plan"):
+        _saved_plan, _saved_path = _find_saved_plan(messages)
+        if _saved_plan:
+            result["plan"] = _saved_plan
+            result.setdefault("is_complex", True)
+            if _saved_path:
+                result.setdefault("plan_path", _saved_path)
+
     # Fallback: if no exit TM found but skill is activated, use the last
     # AIMessage's text content as plan (LLM output pure text summary
     # without calling finish_planning).
@@ -385,6 +475,15 @@ async def extract_planning_metadata(state: AgentState) -> dict:
                     if _content and not getattr(msg, "tool_calls", None):
                         result["plan"] = _content
                     break
+
+    # Verifier-facing slice of the final plan: the planner's probed,
+    # environment-adapted verification strategy feeds Layer 2 (empty for
+    # simple tasks with no saved plan).
+    if not state.get("plan_verification"):
+        _plan_for_slice = result.get("plan") or state.get("plan") or ""
+        _pv = _extract_plan_verification_slices(_plan_for_slice)
+        if _pv:
+            result["plan_verification"] = _pv
 
     # 1. skill_case_content — needed by baseline_capture's LLM strategy.
     #    Primary: agent specifies skill_case_resource in finish_planning.
@@ -425,10 +524,10 @@ async def extract_planning_metadata(state: AgentState) -> dict:
         )
         result["planning_rejected"] = True
         result["messages"] = [SystemMessage(content=(
-            "[PLANNING REJECTED] No catalogue use-case was loaded during planning.\n\n"
+            "[PLANNING REJECTED] No skill use-case was loaded during planning.\n\n"
             "You must either:\n"
             "  1. Follow the skill discovery flow described in SKILL.md: "
-            "use read_skill_resource to browse the catalogue directory, "
+            "use read_skill_resource to browse the skill's resources, "
             "locate a matching use-case file, and load its full content.\n"
             "  2. If no matching use case exists, design your own injection "
             "plan and proceed with finish_planning.\n\n"
