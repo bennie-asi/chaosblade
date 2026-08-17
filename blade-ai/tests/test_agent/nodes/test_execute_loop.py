@@ -1,7 +1,7 @@
 """Tests for execute_loop node."""
 
 import pytest
-from langchain_core.messages import ToolMessage, AIMessage
+from langchain_core.messages import ToolMessage, AIMessage, HumanMessage
 
 from chaos_agent.agent.nodes.execute.execute_loop import (
     execute_loop,
@@ -907,3 +907,225 @@ class TestShouldRedetectInjectionMethod:
         # candidacy (the rare host+blade_uid hybrid). Pure host (no uid) still
         # short-circuits to False above.
         assert _should_redetect_injection_method("host_native", "uid-1") is True
+
+
+def _finalized_msg(summary: str = "inject mem load on pod-x") -> ToolMessage:
+    return ToolMessage(
+        content=f"Planning finalized. Summary: {summary}",
+        name="finish_planning", tool_call_id="fp1",
+    )
+
+
+class TestPhase2Kickoff:
+    """Phase 1 → Phase 2 seam kickoff: one explicit transition message per
+    plan finalization (fresh ``Planning finalized`` ToolMessage with no
+    kickoff / nudge / productive turn after it). Positional detection must
+    re-arm after a replan produces a NEW finalization."""
+
+    def _build(self, messages):
+        from chaos_agent.agent.nodes.execute.execute_loop import (
+            _maybe_build_phase2_kickoff,
+        )
+        return _maybe_build_phase2_kickoff(messages)
+
+    def test_fires_on_fresh_finalization(self):
+        msgs = [
+            AIMessage(content="", tool_calls=[
+                {"name": "finish_planning", "args": {"summary": "x"}, "id": "fp1"},
+            ]),
+            _finalized_msg(),
+        ]
+        kickoff = self._build(msgs)
+        assert kickoff is not None
+        assert "PHASE 2" in kickoff.content
+        assert "approved" in kickoff.content
+
+    def test_no_fire_without_finalization(self):
+        msgs = [AIMessage(content="still planning", tool_calls=[
+            {"name": "read_skill_resource", "args": {}, "id": "r1"},
+        ])]
+        assert self._build(msgs) is None
+
+    def test_no_fire_on_rejected_planning(self):
+        msgs = [ToolMessage(
+            content="Planning rejected. Reason: unsafe target",
+            name="finish_planning", tool_call_id="fp1",
+        )]
+        assert self._build(msgs) is None
+
+    def test_no_double_fire_when_kickoff_present(self):
+        first = self._build([_finalized_msg()])
+        msgs = [_finalized_msg(), first]
+        assert self._build(msgs) is None
+
+    def test_no_fire_after_productive_ai_turn(self):
+        msgs = [
+            _finalized_msg(),
+            AIMessage(content="", tool_calls=[
+                {"name": "blade_create", "args": {}, "id": "b1"},
+            ]),
+        ]
+        assert self._build(msgs) is None
+
+    def test_no_fire_after_stall_nudge(self):
+        # The EXECUTION REQUIRED nudge already announced the transition —
+        # a kickoff after it would be a duplicate signal.
+        msgs = [
+            _finalized_msg(),
+            AIMessage(content="Plan complete. Summary: ..."),
+            HumanMessage(content="**EXECUTION REQUIRED**: You output text ..."),
+        ]
+        assert self._build(msgs) is None
+
+    def test_text_only_ai_turn_does_not_disarm(self):
+        # The measured failure mode: the model answered the finalization with
+        # prose. That text-only turn must NOT count as a handled transition.
+        msgs = [_finalized_msg(), AIMessage(content="Plan complete. Summary: ...")]
+        assert self._build(msgs) is not None
+
+    def test_refires_after_replan_finalization(self):
+        # Old kickoff + productive work belong to the PRE-replan plan; a NEW
+        # finalization after them must re-arm the kickoff.
+        first = self._build([_finalized_msg("plan v1")])
+        msgs = [
+            _finalized_msg("plan v1"),
+            first,
+            AIMessage(content="", tool_calls=[
+                {"name": "blade_create", "args": {}, "id": "b1"},
+            ]),
+            AIMessage(content="", tool_calls=[
+                {"name": "finish_planning", "args": {"summary": "v2"}, "id": "fp2"},
+            ]),
+            _finalized_msg("plan v2"),
+        ]
+        again = self._build(msgs)
+        assert again is not None
+        assert again is not first
+
+
+class TestPhase2KickoffIntegration:
+    """End-to-end wiring through make_execute_loop: the kickoff reaches
+    the LLM call, is persisted into ``result["messages"]`` (LangGraph state)
+    and is written directly to the session store (task JSON)."""
+
+    class _FakeStore:
+        def __init__(self):
+            self.appended = []
+
+        def append_messages(self, task_id, messages, node_name=""):
+            for msg in messages:
+                if node_name:
+                    msg.additional_kwargs.setdefault("_node", node_name)
+                self.appended.append(msg)
+
+    class _FakeHook:
+        def __init__(self):
+            self.session_store = TestPhase2KickoffIntegration._FakeStore()
+
+        async def __call__(self, state):
+            return {}
+
+    class _FakeLLM:
+        def __init__(self):
+            self.seen = None
+
+        def bind_tools(self, tools):
+            return self
+
+        async def ainvoke(self, messages):
+            self.seen = messages
+            # Productive turn: carries tool_calls so the stall guard stays quiet.
+            return AIMessage(content="", tool_calls=[
+                {"name": "kubectl", "args": {"subcommand": "get", "v_args": "pods"},
+                 "id": "c1"},
+            ])
+
+    @staticmethod
+    def _kickoffs(messages):
+        return [
+            m for m in messages
+            if isinstance(m, HumanMessage) and "PHASE 2" in (m.content or "")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_kickoff_reaches_llm_state_and_store(self, sample_agent_state):
+        from chaos_agent.agent.nodes.execute.execute_loop import make_execute_loop
+        from chaos_agent.agent.node_names import EXECUTE_LOOP
+
+        hook = self._FakeHook()
+        llm = self._FakeLLM()
+        node = make_execute_loop(
+            hook=hook, llm=llm, tools=[], env_info={"context": "test"},
+        )
+        state = sample_agent_state
+        state["execute_loop_count"] = 0
+        state["task_id"] = "test-task"
+        state["messages"] = [_finalized_msg()]
+
+        result = await node(state)
+
+        # Visible to the LLM on the seam turn.
+        assert self._kickoffs(llm.seen)
+        # Persisted into LangGraph state (ahead of this turn's response).
+        result_msgs = result.get("messages", [])
+        kickoffs = self._kickoffs(result_msgs)
+        assert len(kickoffs) == 1
+        assert result_msgs.index(kickoffs[0]) == 0
+        # Written directly to the session store (task JSON), node-stamped.
+        store_kickoffs = self._kickoffs(hook.session_store.appended)
+        assert len(store_kickoffs) == 1
+        assert store_kickoffs[0].additional_kwargs.get("_node") == EXECUTE_LOOP
+
+    @pytest.mark.asyncio
+    async def test_kickoff_not_repeated_next_iteration(self, sample_agent_state):
+        from chaos_agent.agent.nodes.execute.execute_loop import (
+            make_execute_loop, _maybe_build_phase2_kickoff,
+        )
+
+        hook = self._FakeHook()
+        llm = self._FakeLLM()
+        node = make_execute_loop(
+            hook=hook, llm=llm, tools=[], env_info={"context": "test"},
+        )
+        state = sample_agent_state
+        state["execute_loop_count"] = 0
+        state["task_id"] = "test-task"
+        kickoff = _maybe_build_phase2_kickoff([_finalized_msg()])
+        state["messages"] = [
+            _finalized_msg(),
+            kickoff,
+            AIMessage(content="", tool_calls=[
+                {"name": "blade_create", "args": {}, "id": "b1"},
+            ]),
+        ]
+
+        result = await node(state)
+        assert not self._kickoffs(result.get("messages", []))
+
+    @pytest.mark.asyncio
+    async def test_kickoff_refires_after_replan(self, sample_agent_state):
+        from chaos_agent.agent.nodes.execute.execute_loop import (
+            make_execute_loop, _maybe_build_phase2_kickoff,
+        )
+
+        hook = self._FakeHook()
+        llm = self._FakeLLM()
+        node = make_execute_loop(
+            hook=hook, llm=llm, tools=[], env_info={"context": "test"},
+        )
+        state = sample_agent_state
+        state["execute_loop_count"] = 0
+        state["task_id"] = "test-task"
+        kickoff = _maybe_build_phase2_kickoff([_finalized_msg("plan v1")])
+        state["messages"] = [
+            _finalized_msg("plan v1"),
+            kickoff,
+            AIMessage(content="", tool_calls=[
+                {"name": "blade_create", "args": {}, "id": "b1"},
+            ]),
+            # Replan re-ran planning and produced a NEW finalization.
+            _finalized_msg("plan v2"),
+        ]
+
+        result = await node(state)
+        assert len(self._kickoffs(result.get("messages", []))) == 1

@@ -48,6 +48,7 @@ from chaos_agent.agent.replan import (
     ReplanRequest,
     parse_replan_request,
 )
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.spec.skill_identity import read_active_skill_name
 from chaos_agent.agent.state import AgentState
 from chaos_agent.agent.state_mgmt.state_helpers import fail_state
@@ -64,6 +65,15 @@ from chaos_agent.utils.time import now_iso
 logger = logging.getLogger(__name__)
 
 MAX_EXECUTE_LOOP = settings.max_execute_loop
+
+# Phase 1 → Phase 2 seam detection: the anchor ``finish_planning`` returns on
+# success (factory.py) and the marker identifying the kickoff message this
+# module emits right after a fresh finalization (see _maybe_build_phase2_kickoff).
+_PLANNING_FINALIZED_PREFIX = "Planning finalized"
+_PHASE2_KICKOFF_MARKER = "**PHASE 2 — EXECUTE NOW**"
+# The stall-guard nudge (_detect_terminal_conclusion) already announces the
+# phase transition; a kickoff after it would be a duplicate signal.
+_EXECUTION_REQUIRED_MARKER = "**EXECUTION REQUIRED**"
 
 
 def _extract_original_replicas_from_messages(messages: list, resource_name: str) -> int | None:
@@ -856,6 +866,63 @@ def _process_response_tool_calls(
     post_invoke_debug(tracker, response, count, "Iteration")
 
 
+def _phase2_kickoff_needed(messages: list) -> bool:
+    """True when the newest plan finalization has no phase-transition signal after it.
+
+    Reverse-scans for the LAST ToolMessage whose content starts with
+    ``Planning finalized`` (the ``finish_planning`` success answer). The
+    transition has already been announced if anything AFTER that message is a
+    kickoff marker, an ``EXECUTION REQUIRED`` stall-nudge, or a productive
+    AIMessage (one carrying tool_calls). Otherwise the model enters Phase 2
+    staring at a plan summary as the newest signal — measured in
+    task-3198b391 / task-ccfadf7d as a text-only "report to the user" turn
+    that only the stall guard corrected, burning one LLM round-trip per task.
+
+    The check is POSITIONAL, which makes replan support automatic: a replan
+    produces a NEW ``Planning finalized`` ToolMessage after the old kickoff,
+    so the scan re-arms and emits a fresh kickoff for the new plan.
+    """
+    finalized_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = msg.content if isinstance(msg.content, str) else ""
+        if content.startswith(_PLANNING_FINALIZED_PREFIX):
+            finalized_idx = i
+            break
+    if finalized_idx is None:
+        return False
+    for msg in messages[finalized_idx + 1:]:
+        if isinstance(msg, AIMessage):
+            if getattr(msg, "tool_calls", None):
+                return False
+        elif isinstance(msg, HumanMessage):
+            content = msg.content if isinstance(msg.content, str) else ""
+            if _PHASE2_KICKOFF_MARKER in content:
+                return False
+            if _EXECUTION_REQUIRED_MARKER in content:
+                return False
+    return True
+
+
+def _maybe_build_phase2_kickoff(messages: list) -> HumanMessage | None:
+    """Build the Phase 1 → Phase 2 kickoff message, or None when not needed.
+
+    The wording says "the next unexecuted step" (not "start the injection")
+    so a mid-execution resume through this seam still reads correctly.
+    """
+    if not _phase2_kickoff_needed(messages):
+        return None
+    return HumanMessage(content=wrap_system_reminder(
+        f"{_PHASE2_KICKOFF_MARKER} Phase 1 (planning) is OVER and the plan "
+        "is approved — you are now in Phase 2 (execution). Immediately call "
+        "the tool that performs the next unexecuted step of the approved "
+        "plan. Do NOT restate the plan, do NOT output a summary, do NOT "
+        "wait for confirmation. Execute now."
+    ))
+
+
 def _detect_terminal_conclusion(
     response,
     state: AgentState,
@@ -920,7 +987,7 @@ def _detect_terminal_conclusion(
                 "before allowing text-only exit"
             )
             result.setdefault("messages", []).append(
-                HumanMessage(content=_selfcheck)
+                HumanMessage(content=wrap_system_reminder(_selfcheck))
             )
             # Give the LLM one more turn to act on the self-check (route
             # "continue" via should_continue_execute_loop:336). The one-shot
@@ -957,7 +1024,7 @@ def _detect_terminal_conclusion(
         stall_count = state.get("_execute_text_stall_count", 0) + 1
         if stall_count < max_stalls:
             result.setdefault("messages", []).append(
-                HumanMessage(content=(
+                HumanMessage(content=wrap_system_reminder(
                     "**EXECUTION REQUIRED**: You output text instead of "
                     "calling a tool. You are in Phase 2 (execution) — "
                     "the plan is already approved. Call the injection "
@@ -1204,7 +1271,7 @@ def _handle_replan(
                 # iteration emits it once, then clears the flag.
                 result["_replan_review_rejection"] = review_reason
             return
-        result.setdefault("messages", []).append(HumanMessage(content=(
+        result.setdefault("messages", []).append(HumanMessage(content=wrap_system_reminder(
             f"[LIFECYCLE REVIEW] Continue execution: {review_reason} A tool result "
             "is evidence about that call, not by itself a conclusion that the "
             "approved plan is infeasible."
@@ -1475,7 +1542,7 @@ def _maybe_auto_trigger_replan(state: AgentState, result: dict) -> None:
         # would bounce the run back to agent_loop and reject instantly.
         result["error"] = None
         result["failure_detail"] = None
-        result.setdefault("messages", []).append(HumanMessage(content=(
+        result.setdefault("messages", []).append(HumanMessage(content=wrap_system_reminder(
             f"[LIFECYCLE REVIEW] Continue execution: {review_reason} A terminal "
             "error describing a problem is evidence about that call, not by "
             "itself a conclusion that the approved plan is infeasible."
@@ -1680,13 +1747,34 @@ def make_execute_loop(hook=None, llm=None, tools=None, skill_catalog="", env_inf
             )
             messages.extend(hints)
 
+            # --- Phase 1 → Phase 2 kickoff (planning → execution seam) ---
+            # A fresh "Planning finalized" with no transition signal after it
+            # makes the model treat this turn as the wrap-up of planning and
+            # output prose instead of calling the injection tool (the stall
+            # guard then spent a whole round-trip correcting it). Emit one
+            # explicit kickoff per finalization — positional detection also
+            # re-arms after a replan produces a new finalization.
+            # Persistence: ``_hints_for_state`` carries it into
+            # ``result["messages"]`` (LangGraph state), and the direct write
+            # below lands it in the task JSON immediately (the hook flush at
+            # the next pre_reason_hook sees the same message again — the
+            # session store's dedup key makes the double write idempotent).
+            _kickoff = _maybe_build_phase2_kickoff(messages)
+            if _kickoff is not None:
+                messages.append(_kickoff)
+                _hints_for_state.append(_kickoff)
+                if hook and getattr(hook, "session_store", None) and task_id:
+                    _kickoff.additional_kwargs.setdefault("_node", EXECUTE_LOOP)
+                    hook.session_store.append_messages(task_id, [_kickoff])
+                logger.info("Phase 2 kickoff emitted (planning → execution seam)")
+
             # --- Deferred replan-review rejection (tool-channel adjacency) ---
             # A plan_invalid replan rejected by _review_replan_request reaches
             # the model one iteration later: by now phase2_tools has created
             # the ToolMessage, so this review no longer breaks tool-response
             # adjacency. Emitted once, then the flag is cleared below.
             if state.get("_replan_review_rejection"):
-                _rejection_msg = HumanMessage(content=(
+                _rejection_msg = HumanMessage(content=wrap_system_reminder(
                     f"[LIFECYCLE REVIEW] Replan rejected: {state['_replan_review_rejection']} "
                     "The approved plan remains authoritative — continue executing it."
                 ))

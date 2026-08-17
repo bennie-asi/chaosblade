@@ -233,20 +233,27 @@ def extract_persistent_hm(
 ) -> list:
     """Extract the main context HumanMessage for state persistence.
 
-    On the first iteration, this HumanMessage was JUST built and appended
+    On a cycle's first turn, this HumanMessage was JUST built and appended
     to the local ``messages`` list.  We extract it and prepend to
     ``result_update["messages"]`` so it enters AgentState via the
-    add_messages reducer.  On subsequent iterations, the HumanMessage is
-    already in AgentState.messages (persisted from iteration 1), so we
-    skip extraction to avoid wasteful re-injection.
+    add_messages reducer.  On later turns of the SAME cycle, the
+    HumanMessage is already in AgentState.messages, so we skip extraction
+    to avoid wasteful re-injection.
+
+    The "already persisted" scan is bounded by ``attribution_epoch_index``:
+    a marker from a PRE-replan cycle sits before the epoch boundary and
+    must NOT suppress the NEW cycle's context message — without this, the
+    fresh context would be visible for one turn and silently dropped from
+    state (the dedup counterpart of position-based cycle detection, aligned
+    with execute_loop's kickoff).
 
     Parameters
     ----------
     messages : list[BaseMessage]
         The local messages list for this iteration.
     state : dict
-        AgentState dict — reads ``messages`` to check if the HM already
-        exists in persisted state.
+        AgentState dict — reads ``messages`` (epoch-bounded) to check if
+        the HM already exists in persisted state.
     kwargs_key : str
         The ``additional_kwargs`` key used to tag this HumanMessage.
         Different for verifier (``_verifier_main_context``) vs
@@ -257,9 +264,17 @@ def extract_persistent_hm(
     list[HumanMessage]
         The tagged HumanMessage, or [] if it already exists in state.
     """
+    _state_messages = state.get("messages", [])
+    _boundary = state.get("attribution_epoch_index")
+    try:
+        _start = int(_boundary) if _boundary else 0
+    except (TypeError, ValueError):
+        _start = 0
+    if _start > len(_state_messages):
+        _start = 0
     already_in_state = any(
         getattr(m, "additional_kwargs", {}).get(kwargs_key)
-        for m in state.get("messages", [])
+        for m in _state_messages[_start:]
         if isinstance(m, HumanMessage)
     )
     if already_in_state:
