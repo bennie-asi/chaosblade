@@ -18,6 +18,7 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
+from langchain_core.callbacks import BaseCallbackHandler
 from opentelemetry import trace, metrics
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -216,12 +217,17 @@ def get_task_span_manager() -> TaskSpanManager:
 # OTelGenAICallback (LangChain BaseCallbackHandler)
 # ---------------------------------------------------------------------------
 
-class OTelGenAICallback:
+class OTelGenAICallback(BaseCallbackHandler):
     """LangChain callback that emits OTel GenAI spans and metrics.
 
     Runs in parallel with the existing _DynamicTracingCallback.
     Span dicts are instance-scoped; keyed by unique run_id so concurrent
     tasks sharing this callback instance don't collide.
+
+    MUST subclass BaseCallbackHandler: langchain-core validates the
+    ``callbacks`` list with ``isinstance(..., BaseCallbackHandler)`` and
+    raises ValidationError for duck-typed objects (verified against
+    ChatOpenAI in langchain-openai 1.x).
     """
 
     def __init__(self):
@@ -275,7 +281,46 @@ class OTelGenAICallback:
             "server.port": self._server_port,
         }
 
+    def on_chat_model_start(
+        self, serialized: Any, messages: Any, *, run_id, **kwargs
+    ) -> None:
+        """Start hook for chat models (ChatOpenAI et al.).
+
+        REQUIRED for the main path: langchain-core dispatches
+        ``on_chat_model_start`` for BaseChatModel subclasses and NEVER
+        calls ``on_llm_start`` for them (verified against langchain-core
+        1.3). Without this method every chat span is lost — ``on_llm_end``
+        pops an empty dict and silently no-ops, so no spans, token
+        attributes, or histograms are ever recorded.
+        """
+        if not _initialized:
+            return
+        tracer = get_otel_tracer()
+
+        run_key = str(run_id)
+        # serialized["kwargs"] carries the chat-model constructor kwargs;
+        # fall back to the instance-level default when absent.
+        model = ""
+        if isinstance(serialized, dict):
+            model = (serialized.get("kwargs") or {}).get("model_name", "") or ""
+        model = model or self._model
+
+        task_id = _current_otel_task_id.get()
+        ctx = _task_span_manager.get_current_context(task_id)
+        span = tracer.start_span(
+            f"chat {model}",
+            kind=SpanKind.CLIENT,
+            attributes=self._common_attributes(),
+            context=ctx,
+        )
+        span.set_attribute("gen_ai.request.model", model)
+        if task_id:
+            span.set_attribute("gen_ai.conversation.id", task_id)
+        self._llm_spans[run_key] = span
+        self._llm_start_times[run_key] = time.perf_counter()
+
     def on_llm_start(self, serialized: Any, prompts: Any, *, run_id, **kwargs) -> None:
+        """Start hook for legacy (non-chat) LLM classes."""
         if not _initialized:
             return
         tracer = get_otel_tracer()
@@ -308,7 +353,7 @@ class OTelGenAICallback:
         span.set_attribute("gen_ai.usage.output_tokens", completion_tokens)
         span.end()
 
-        duration = time.perf_counter() - start_time if start_time else 0.0
+        duration = time.perf_counter() - start_time if start_time is not None else 0.0
         metric_attrs = {
             "gen_ai.operation.name": "chat",
             "gen_ai.provider.name": self._provider,

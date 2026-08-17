@@ -201,6 +201,63 @@ class TestOTelWithSDK:
 
         provider.shutdown()
 
+    def test_chat_model_dispatch_creates_span(self, monkeypatch):
+        """Regression: langchain-core 1.x dispatches ``on_chat_model_start``
+        (never ``on_llm_start``) for BaseChatModel subclasses like ChatOpenAI.
+        Drive a real chat-model invoke through the callback and assert the
+        span survives end-to-end.
+        """
+        provider, exporter = self._make_provider()
+
+        import chaos_agent.observability.otel_genai as mod
+        monkeypatch.setattr(mod, "_initialized", True)
+        monkeypatch.setattr(mod, "_tracer_provider", provider)
+        monkeypatch.setattr(mod, "get_otel_tracer", lambda: provider.get_tracer("test"))
+
+        cb = mod.OTelGenAICallback()
+        cb._token_usage_histogram = None
+        cb._operation_duration_histogram = None
+
+        from langchain_core.language_models.fake_chat_models import FakeListChatModel
+        llm = FakeListChatModel(responses=["ok"], callbacks=[cb])
+        llm.invoke("hello")
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        assert "chat" in spans[0].name
+        assert spans[0].attributes["gen_ai.operation.name"] == "chat"
+
+        provider.shutdown()
+
+    def test_chat_model_start_extracts_model_from_serialized(self, monkeypatch):
+        provider, exporter = self._make_provider()
+
+        import chaos_agent.observability.otel_genai as mod
+        monkeypatch.setattr(mod, "_initialized", True)
+        monkeypatch.setattr(mod, "_tracer_provider", provider)
+        monkeypatch.setattr(mod, "get_otel_tracer", lambda: provider.get_tracer("test"))
+
+        cb = mod.OTelGenAICallback()
+        cb._token_usage_histogram = None
+        cb._operation_duration_histogram = None
+
+        run_id = uuid.uuid4()
+        cb.on_chat_model_start(
+            {"kwargs": {"model_name": "qwen-max-latest"}}, [["hi"]], run_id=run_id
+        )
+        response = MagicMock()
+        response.llm_output = {"token_usage": {"prompt_tokens": 7, "completion_tokens": 3}}
+        cb.on_llm_end(response, run_id=run_id)
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        span = spans[0]
+        assert span.name == "chat qwen-max-latest"
+        assert span.attributes["gen_ai.request.model"] == "qwen-max-latest"
+        assert span.attributes["gen_ai.usage.input_tokens"] == 7
+
+        provider.shutdown()
+
     def test_tool_span_lifecycle(self, monkeypatch):
         provider, exporter = self._make_provider()
 
