@@ -20,7 +20,12 @@ import uuid
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import interrupt
 
-from chaos_agent.agent.spec.fault_spec import FaultSpec, read_fault_spec
+from chaos_agent.agent.spec.fault_spec import (
+    FaultSpec,
+    _with_default_duration,
+    read_fault_spec,
+)
+from chaos_agent.utils.fault_type import ensure_min_duration
 from chaos_agent.agent.spec.plan_generator import generate_injection_plan
 from chaos_agent.agent.capabilities import (
     build_capability_context,
@@ -250,9 +255,20 @@ def make_plan_builder(llm=None, tools: list = None, hook=None, registry=None):
                     "planning_mode": planning_mode,
                     "plan_builder_round": plan_builder_round + rounds_this_invoke + 1,
                 }
-                # Store full batch args when multiple faults submitted
+                # Store full batch args when multiple faults submitted.
+                # Duration contract: every stored fault carries a positive
+                # duration so the confirm card and the execution stage agree.
                 faults = submit_args.get("faults", [])
                 if len(faults) > 1:
+                    for f in faults:
+                        try:
+                            _dur = max(int(str(f.get("duration_seconds", 0)).strip()), 0)
+                        except (TypeError, ValueError):
+                            _dur = 0
+                        f["duration_seconds"] = _dur or ensure_min_duration(
+                            0, f.get("scope", ""), f.get("target", ""),
+                            f.get("action", ""),
+                        )
                     result_dict["batch_submit_args"] = {
                         "faults": faults,
                         "execution_order": submit_args.get("execution_order", "serial"),
@@ -509,7 +525,17 @@ def _build_spec_from_submit(
             "names %s -> %s basis=submit_plan faults[0]['names']",
             list(spec.names), list(names),
         )
-    return FaultSpec(
+    # Duration contract: honour the model's submitted duration when present;
+    # otherwise inherit the reviewed value. ``_with_default_duration`` below
+    # fills the recommended default when neither source carries one.
+    duration = spec.duration_seconds
+    raw_duration = first.get("duration_seconds")
+    if raw_duration is not None:
+        try:
+            duration = max(int(str(raw_duration).strip()), 0)
+        except (TypeError, ValueError):
+            duration = 0
+    return _with_default_duration(FaultSpec(
         namespace=first.get("namespace") or spec.namespace,
         scope=first.get("scope") or spec.scope,
         names=names,
@@ -518,10 +544,10 @@ def _build_spec_from_submit(
         blade_action=first.get("action") or spec.blade_action,
         params=dict(first.get("params") or dict(spec.params)),
         params_flags=spec.params_flags,
-        duration_seconds=spec.duration_seconds,
+        duration_seconds=duration,
         source=spec.source or "tui",
         user_description=spec.user_description,
-    )
+    ))
 
 
 def _format_final_plan(submit_args: dict, state: dict, spec: FaultSpec) -> str:

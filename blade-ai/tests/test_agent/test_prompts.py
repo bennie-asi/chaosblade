@@ -295,6 +295,20 @@ class TestIntentClarificationSectionFunctions:
         assert "action" in section
         assert "target identity fields" in section
 
+    def test_parameter_model_requires_duration(self):
+        """Duration is a mandatory presentation item of the intent summary.
+
+        Guards the duration contract: the model must surface a duration
+        (user's value or the system recommended default, stating which),
+        and must never smuggle it into ``params`` as ``timeout`` — that
+        key is rejected by the submission chain.
+        """
+        section = get_intent_parameter_model_section()
+        assert "duration" in section
+        assert "system recommended default" in section
+        assert "duration_seconds" in section
+        assert "rejected" in section
+
     def test_parameter_model_states_params_provenance_rule(self):
         """Intent accuracy: the probed environment is the ONLY authority.
 

@@ -41,6 +41,7 @@ from chaos_agent.agent.spec.fault_spec import (
     FaultSpec,
     is_full_fault_spec_proposal,
     read_fault_spec,
+    strip_timeout_alias,
 )
 from chaos_agent.agent.state import AgentState
 from chaos_agent.config.settings import settings
@@ -343,7 +344,9 @@ def _planning_contract_route(
             "(the tool reply should have listed the missing fields)",
         )
         return AGENT_LOOP
-    actual = FaultSpec.from_intent_args(raw_fault, existing=expected)
+    actual = FaultSpec.from_intent_args(
+        strip_timeout_alias(raw_fault), existing=expected,
+    )
     if not actual.is_complete:
         logger.warning(
             "planning route: propose_plan_change proposal failed FaultSpec "

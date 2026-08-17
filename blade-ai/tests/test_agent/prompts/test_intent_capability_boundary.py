@@ -197,7 +197,7 @@ class TestPlanningPhaseCarriesTheSameRule:
         documented AND devised path before a reject is legal."""
         planning = self._planning()
         assert "target absent after verification" in planning
-        assert "no matching use-case in the catalogue" in planning
+        assert "no matching use-case in the skill's resources" in planning
         assert "documented and devised injection path unviable" in planning
 
     def test_it_does_not_reuse_the_conversational_wording(self):

@@ -1,5 +1,6 @@
 """Tests for intent_clarification node — dialogue, routing, and fault convergence."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 from types import SimpleNamespace
 
@@ -8,8 +9,13 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from tests._helpers import intent_dict_from_result
 from chaos_agent.agent.nodes.planning.intent_clarification import (
+    _advance_fault_spec,
     _allocate_operation_task_id,
+    _clarification_bump,
+    _confirmation_refund,
     _extract_recover_task_id,
+    _normalise_fault_args,
+    _params_carry_timeout,
     submit_fault_intent,
     recover_task,
     MAX_DIALOGUE_ROUNDS,
@@ -18,6 +24,7 @@ from chaos_agent.agent.nodes.planning.intent_clarification import (
 from chaos_agent.agent.prompts.sections.intent import (
     get_intent_completeness_section,
 )
+from chaos_agent.agent.spec.fault_spec import FaultSpec
 
 
 def _make_llm_response(tool_calls=None, content=""):
@@ -112,6 +119,40 @@ class TestExtractRecoverTaskId:
         assert _extract_recover_task_id([]) == ""
 
 
+class TestDurationContractHelpers:
+    """Unit tests for the duration-contract normalisation helpers."""
+
+    def test_normalise_passes_duration_through(self):
+        normalized = _normalise_fault_args({
+            "scope": "pod", "target": "cpu", "action": "fullload",
+            "duration_seconds": 900,
+        })
+        assert normalized["duration_seconds"] == 900
+
+    def test_normalise_coerces_str_duration(self):
+        normalized = _normalise_fault_args({
+            "scope": "pod", "target": "cpu", "action": "fullload",
+            "duration_seconds": "300",
+        })
+        assert normalized["duration_seconds"] == 300
+
+    def test_normalise_absent_duration_stays_absent(self):
+        # Presence-only pass-through: ``from_intent_args`` treats a
+        # missing key as "inherit from the existing spec". Normalising
+        # an absent duration to 0 would wipe a previously reviewed value
+        # on every resubmit.
+        normalized = _normalise_fault_args({
+            "scope": "pod", "target": "cpu", "action": "fullload",
+        })
+        assert "duration_seconds" not in normalized
+
+    def test_params_carry_timeout_detection(self):
+        assert _params_carry_timeout({"params": {"timeout": "600"}})
+        assert not _params_carry_timeout({"params": {"percent": "80"}})
+        assert not _params_carry_timeout({})
+        assert not _params_carry_timeout({"params": None})
+
+
 class TestRecoverTaskTool:
     """Tests for the recover_task @tool function."""
 
@@ -136,7 +177,8 @@ class TestSubmitFaultIntentTool:
 
     def test_submit_fault_intent_with_optional_args(self):
         # Full structured submission with every optional field — what
-        # the prompt now instructs the LLM to do.
+        # the prompt now instructs the LLM to do. Duration travels via
+        # duration_seconds (params.timeout is rejected downstream).
         result = submit_fault_intent.invoke({
             "fault_type": "pod-network-drop",
             "scope": "pod",
@@ -145,7 +187,8 @@ class TestSubmitFaultIntentTool:
             "fault_revision": 0,
             "namespace": "cms-demo",
             "labels": {"app": "nginx"},
-            "params": {"interface": "eth0", "timeout": "600"},
+            "params": {"interface": "eth0"},
+            "duration_seconds": 600,
             "user_description": "给 nginx 注入网络丢包",
         })
         assert "intent submitted" in result
@@ -170,7 +213,8 @@ class TestSubmitFaultIntentTool:
         props = set(schema.get("properties", {}).keys())
         required = set(schema.get("required", []))
         assert {"fault_type", "scope", "target", "action"} <= required
-        assert {"namespace", "names", "labels", "params", "user_description"} <= props
+        assert {"namespace", "names", "labels", "params", "user_description",
+                "duration_seconds"} <= props
 
     def test_schema_still_advertises_typed_collections_to_llm(self):
         # The BeforeValidator must NOT leak into the JSON schema the LLM
@@ -600,6 +644,85 @@ class TestIntentClarificationNode:
         mock_llm.bind_tools.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_fast_path_rejects_params_timeout(self):
+        """Duration contract gate: a submission smuggling duration as
+        ``params.timeout`` is rejected before bootstrap/contract
+        construction, with a corrective message for the ReAct loop."""
+        mock_llm = AsyncMock()
+        mock_llm.bind_tools = MagicMock(
+            return_value=AsyncMock(ainvoke=AsyncMock(return_value=_make_llm_response())))
+
+        human_msg = HumanMessage(content="执行", id="human_1")
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[_submit_fault_tc(
+                namespace="production",
+                params={"percent": "80", "timeout": "600"},
+            )],
+            id="ai_submit_timeout",
+        )
+        submit_tool_msg = ToolMessage(
+            content="✓ Fault-injection intent submitted",
+            name="submit_fault_intent",
+            tool_call_id="call_submit_1",
+        )
+        messages = [human_msg, ai_msg, submit_tool_msg]
+
+        node = make_intent_clarification(llm=mock_llm)
+        state = {
+            "confirmed_intent": None,
+            "messages": messages,
+            "clarification_round": 0,
+            "dialogue_round": 2,
+            "fault_intent": {},
+        }
+        result = await node(state)
+        # Not injected — the turn ends in a corrective rejection.
+        assert result.get("confirmed_intent") != "inject"
+        rejection = result["messages"][0]
+        assert "duration_seconds" in rejection.content
+        assert "params.timeout" in rejection.content
+
+    @pytest.mark.asyncio
+    async def test_fast_path_rejects_stringified_params_timeout(self):
+        """Gate must also catch ``params`` smuggled as a JSON string —
+        qwen-style models emit ``params='{"timeout": "600"}'`` instead of
+        a structured dict, and the rejection must not depend on shape."""
+        mock_llm = AsyncMock()
+        mock_llm.bind_tools = MagicMock(
+            return_value=AsyncMock(ainvoke=AsyncMock(return_value=_make_llm_response())))
+
+        human_msg = HumanMessage(content="执行", id="human_1")
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[_submit_fault_tc(
+                namespace="production",
+                params='{"percent": "80", "timeout": "600"}',
+            )],
+            id="ai_submit_timeout_str",
+        )
+        submit_tool_msg = ToolMessage(
+            content="✓ Fault-injection intent submitted",
+            name="submit_fault_intent",
+            tool_call_id="call_submit_1",
+        )
+        messages = [human_msg, ai_msg, submit_tool_msg]
+
+        node = make_intent_clarification(llm=mock_llm)
+        state = {
+            "confirmed_intent": None,
+            "messages": messages,
+            "clarification_round": 0,
+            "dialogue_round": 2,
+            "fault_intent": {},
+        }
+        result = await node(state)
+        assert result.get("confirmed_intent") != "inject"
+        rejection = result["messages"][0]
+        assert "duration_seconds" in rejection.content
+        assert "params.timeout" in rejection.content
+
+    @pytest.mark.asyncio
     async def test_recover_task_tool_message_routes_correctly(self):
         """recover_task ToolMessage should set confirmed_intent='recover'."""
         mock_llm = AsyncMock()
@@ -648,7 +771,9 @@ class TestIntentClarificationNode:
                  "clarification_round": 0, "dialogue_round": 0}
         result = await node(state)
         assert "confirmed_intent" not in result
-        assert result["clarification_round"] == 1
+        # New semantics: counts user turns that REVISED the proposal —
+        # no proposal under review here, so nothing is counted.
+        assert result["clarification_round"] == 0
         assert result["dialogue_round"] == 1
 
     @pytest.mark.asyncio
@@ -715,7 +840,8 @@ class TestIntentClarificationNode:
         # submit_fault_intent is a real tool → has_tool_calls path
         # No confirmed_intent yet (that happens after ToolNode + fast-path)
         assert "confirmed_intent" not in result
-        assert result["clarification_round"] == 1
+        # No proposal under review at entry → not a clarification round.
+        assert result["clarification_round"] == 0
         # submit_fault_intent tool_call should be preserved in the message
         msg = result["messages"][0]
         assert any(tc["name"] == "submit_fault_intent" for tc in msg.tool_calls)
@@ -738,7 +864,8 @@ class TestIntentClarificationNode:
         result = await node(state)
         # Both are real tools → has_tool_calls path, no confirmed_intent
         assert "confirmed_intent" not in result
-        assert result["clarification_round"] == 1
+        # No proposal under review at entry → not a clarification round.
+        assert result["clarification_round"] == 0
         msg = result["messages"][0]
         # Both tool calls should be preserved for ToolNode
         assert any(tc["name"] == "submit_fault_intent" for tc in msg.tool_calls)
@@ -766,7 +893,8 @@ class TestIntentClarificationNode:
         result = await node(state)
 
         assert "confirmed_intent" not in result
-        assert result["clarification_round"] == 1
+        # Cluster probing is not a user clarification round.
+        assert result["clarification_round"] == 0
         assert result["dialogue_round"] == 1
         # kubectl tool_call must remain so ToolNode picks it up.
         msg = result["messages"][0]
@@ -795,9 +923,165 @@ class TestIntentClarificationNode:
         result = await node(state)
 
         assert "confirmed_intent" not in result
-        assert result["clarification_round"] == 1
+        # Capability probing is not a user clarification round.
+        assert result["clarification_round"] == 0
         msg = result["messages"][0]
         assert any(tc["name"] == "read_skill_resource" for tc in msg.tool_calls)
+
+
+def _raw_fault(names: list) -> dict:
+    """Minimal proposal payload accepted by ``FaultSpec.from_intent_args``."""
+    return {
+        "fault_type": "node-mem-load",
+        "scope": "node",
+        "target": "mem",
+        "action": "load",
+        "namespace": "",
+        "names": names,
+        "duration_seconds": 600,
+        "params": {"mode": "ram", "mem-percent": 80},
+    }
+
+
+def _proposal_text(reply: str, names: list) -> str:
+    payload = json.dumps({"faults": [_raw_fault(names)]}, ensure_ascii=False)
+    return f"{reply}<blade-fault-proposal>{payload}</blade-fault-proposal>"
+
+
+class TestClarificationBumpHelper:
+    """Unit rules for ``_clarification_bump`` / ``_confirmation_refund``."""
+
+    def test_fresh_turn_after_opening_counts_once(self):
+        assert _clarification_bump(True, 2, 0) == 1
+
+    def test_fresh_turn_accumulates(self):
+        assert _clarification_bump(True, 5, 3) == 4
+
+    def test_phase_opening_turn_does_not_count(self):
+        # dialogue_round == 0 at entry: the first utterance IS the intent.
+        assert _clarification_bump(True, 0, 0) == 0
+
+    def test_tool_loop_reentry_does_not_count(self):
+        assert _clarification_bump(False, 2, 1) == 1
+
+    def test_refund_gives_back_the_confirmation_bump(self):
+        assert _confirmation_refund(2) == 1
+
+    def test_refund_never_goes_negative(self):
+        # A one-shot session can reach submission without any bump firing.
+        assert _confirmation_refund(0) == 0
+
+
+class TestClarificationRoundSemantics:
+    """clarification_round = user turns spent clarifying before submission."""
+
+    @staticmethod
+    def _node_with(response):
+        mock_llm = AsyncMock()
+        mock_llm.bind_tools = MagicMock(
+            return_value=AsyncMock(ainvoke=AsyncMock(return_value=response)))
+        return make_intent_clarification(llm=mock_llm)
+
+    @staticmethod
+    def _state(messages, spec=None, dialogue_round=2, clarification_round=0):
+        state = {
+            "confirmed_intent": None,
+            "messages": messages,
+            "clarification_round": clarification_round,
+            "dialogue_round": dialogue_round,
+            "task_id": "",
+            "tui_session_id": "",
+        }
+        if spec is not None:
+            state["fault_spec"] = spec.to_dict()
+        return state
+
+    @pytest.mark.asyncio
+    async def test_user_revision_turn_counts_one_round(self):
+        """Trace replay: user switches the target node → exactly 1 round."""
+        existing = _advance_fault_spec(None, _raw_fault(["node-118"]))
+        node = self._node_with(_make_llm_response(
+            content=_proposal_text("好的，目标节点已更新。", ["node-119"])))
+        result = await node(self._state(
+            [HumanMessage(content="换成 119", id="h-turn-2")], spec=existing))
+        assert result["clarification_round"] == 1
+        assert result["fault_spec"]["revision"] == 2
+
+    @pytest.mark.asyncio
+    async def test_question_answer_turn_counts_one_round(self):
+        """Answering the agent's A/B question is clarification even though
+        no proposal existed at turn entry (task turn-73d42254e303: the old
+        revision-based counter showed 0 for exactly this flow)."""
+        node = self._node_with(_make_llm_response(
+            content=_proposal_text("明白，采用持续杀进程模式。", ["node-118"])))
+        result = await node(self._state(
+            [HumanMessage(content="进程被反复杀死", id="h-turn-2")]))
+        assert result["clarification_round"] == 1
+
+    @pytest.mark.asyncio
+    async def test_text_turn_after_opening_counts_even_without_revision(self):
+        """Any fresh post-opening turn that gets a substantive reply counts
+        — the metric measures turns spent, not contract deltas."""
+        existing = _advance_fault_spec(None, _raw_fault(["node-118"]))
+        node = self._node_with(_make_llm_response(
+            content=_proposal_text("好的，按当前方案提交。", ["node-118"])))
+        result = await node(self._state(
+            [HumanMessage(content="确认", id="h-turn-2")], spec=existing))
+        assert result["clarification_round"] == 1
+        assert result["fault_spec"]["revision"] == 1
+
+    @pytest.mark.asyncio
+    async def test_phase_opening_turn_counts_nothing(self):
+        """The turn that opens the phase is the intent itself."""
+        node = self._node_with(_make_llm_response(
+            content=_proposal_text("已识别注入意图。", ["node-118"])))
+        result = await node(self._state(
+            [HumanMessage(content="对一个 node 注入内存故障", id="h-turn-1")],
+            dialogue_round=0))
+        assert result["clarification_round"] == 0
+        assert result["fault_spec"]["revision"] == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_loop_reentry_does_not_double_count(self):
+        """Only the fresh user turn's entry counts; tool-loop passes never do."""
+        existing = _advance_fault_spec(None, _raw_fault(["node-118"]))
+        human = HumanMessage(content="换成 119", id="h-turn-2")
+        ai = AIMessage(content="", tool_calls=[_ask_human_tc()], id="ai-1")
+        tool = ToolMessage(content="ok", tool_call_id="call_ask_1",
+                           name="ask_human", id="tool-1")
+        node = self._node_with(_make_llm_response(
+            content=_proposal_text("已更新。", ["node-119"]),
+            tool_calls=[_submit_fault_tc()]))
+        result = await node(self._state([human, ai, tool], spec=existing))
+        assert result["fault_spec"]["revision"] == 2
+        assert result["clarification_round"] == 0
+
+    @pytest.mark.asyncio
+    async def test_successful_submit_refunds_the_confirmation_turn(self):
+        """The confirming turn's entry bump is given back by the fast path:
+        user says 确认 → model calls submit → re-entry commits the intent
+        with the count refunded (net 0 for a pure confirmation)."""
+        spec = _advance_fault_spec(None, _raw_fault(["node-118"]))
+        submit = _submit_fault_tc(
+            fault_type="node-mem-load", scope="node", target="mem",
+            action="load", namespace="", names=["node-118"],
+            duration_seconds=600,
+            params={"mode": "ram", "mem-percent": 80},
+            user_description="对 node-118 注入内存故障",
+            fault_revision=spec.revision,
+        )
+        messages = [
+            HumanMessage(content="确认", id="h-confirm"),
+            AIMessage(content="", tool_calls=[submit], id="ai-submit"),
+            ToolMessage(content="✓ Fault-injection intent submitted",
+                        name="submit_fault_intent",
+                        tool_call_id="call_submit_1", id="tool-submit"),
+        ]
+        node = make_intent_clarification(llm=AsyncMock())
+        result = await node(self._state(
+            messages, spec=spec, clarification_round=1))
+        assert result["confirmed_intent"] == "inject"
+        assert result["clarification_round"] == 0
 
 
 class TestExtractSubmitArgsCoercion:
@@ -851,9 +1135,11 @@ class TestExtractSubmitArgsCoercion:
             "target": "cpu",
             "action": "fullload",
             "namespace": "cms-demo",
-            # JSON-stringified — the bug shape.
+            # JSON-stringified — the bug shape. Duration travels via
+            # duration_seconds, never params.timeout (rejected upstream).
             "names": '["cn-hongkong.10.0.1.63"]',
-            "params": '{"percent": "80", "timeout": "600"}',
+            "params": '{"percent": "80"}',
+            "duration_seconds": 600,
             "user_description": "对节点 cn-hongkong.10.0.1.63 注入 CPU 满载",
         })
         node = make_intent_clarification(llm=mock_llm)
@@ -867,7 +1153,8 @@ class TestExtractSubmitArgsCoercion:
         assert result["confirmed_intent"] == "inject"
         fi = intent_dict_from_result(result)
         assert fi["names"] == ["cn-hongkong.10.0.1.63"]
-        assert fi["params"] == {"percent": "80", "timeout": "600"}
+        assert fi["params"] == {"percent": "80"}
+        assert fi["duration_seconds"] == 600
         # LLM should NOT have been re-invoked — fast-path committed.
         mock_llm.bind_tools.assert_not_called()
 
@@ -943,7 +1230,10 @@ class TestExtractSubmitArgsCoercion:
             "action": "drop",
             "namespace": "cms-demo",
             "names": ["nginx"],
-            "params": {"percent": 80, "timeout": 600, "verbose": True},
+            # timeout is NOT allowed in params (duration contract) — the
+            # numeric-coercion coverage moves to another int param.
+            "params": {"percent": 80, "retry": 3, "verbose": True},
+            "duration_seconds": 600,
         })
         node = make_intent_clarification(llm=mock_llm)
         result = await node({
@@ -956,7 +1246,7 @@ class TestExtractSubmitArgsCoercion:
         assert result["confirmed_intent"] == "inject"
         assert intent_dict_from_result(result)["params"] == {
             "percent": "80",
-            "timeout": "600",
+            "retry": "3",
             "verbose": "True",
         }
 
@@ -987,7 +1277,8 @@ class TestFastPathLLMArgsPriority:
                 action="drop",
                 namespace="cms-demo",
                 names=["nginx-7d4f-abc12"],
-                params={"interface": "eth0", "timeout": "600"},
+                params={"interface": "eth0"},
+                duration_seconds=600,
             )],
             id="ai_full_1",
         )
@@ -1018,7 +1309,8 @@ class TestFastPathLLMArgsPriority:
         assert fi["namespace"] == "cms-demo"
         assert fi["names"] == ["nginx-7d4f-abc12"]
         # ``params`` values are coerced to str by ``_extract_submit_args``.
-        assert fi["params"] == {"interface": "eth0", "timeout": "600"}
+        assert fi["params"] == {"interface": "eth0"}
+        assert fi["duration_seconds"] == 600
         mock_llm.bind_tools.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1269,6 +1561,7 @@ class TestHookIntegration:
         _spec = FaultSpec(
             scope="pod", blade_target="cpu", blade_action="fullload",
             namespace="default", labels={"app": "myapp"},
+            duration_seconds=600,
         )
         state = {
             "confirmed_intent": None,
@@ -1346,6 +1639,7 @@ class TestHookIntegration:
         _spec_hook = FaultSpec(
             scope="pod", blade_target="cpu", blade_action="fullload",
             namespace="default", labels={"app": "myapp"},
+            duration_seconds=600,
         )
         state = {
             "confirmed_intent": None,
@@ -1420,4 +1714,83 @@ class TestReviewedFaultSpecSection:
         assert '"scope": "pod"' in section
         assert '"scope": "node"' in section
         assert '"target": "disk"' in section
+
+
+class TestBatchFastPathDurationContract:
+    """Node-level end-to-end for the submit_batch_intent fast path.
+
+    Guards the batch half of the duration contract: a clean replay is
+    accepted with durations carried into the stored batch args, while any
+    entry smuggling duration via params.timeout — dict or JSON-stringified
+    — is rejected per-entry before any state transition.
+    """
+
+    @staticmethod
+    def _spec(name: str) -> FaultSpec:
+        return FaultSpec(
+            scope="pod", blade_target="cpu", blade_action="fullload",
+            namespace="ns", names=(name,), duration_seconds=600, revision=1,
+        )
+
+    @staticmethod
+    def _replay(spec: FaultSpec) -> dict:
+        return {
+            "scope": "pod", "target": "cpu", "action": "fullload",
+            "namespace": spec.namespace, "names": list(spec.names),
+            "params": {}, "duration_seconds": spec.duration_seconds,
+        }
+
+    @staticmethod
+    def _state(specs: list, tc_faults: list, revision: int) -> dict:
+        messages = [
+            HumanMessage(content="执行", id="h1"),
+            AIMessage(content="", tool_calls=[{
+                "name": "submit_batch_intent", "id": "call_b1",
+                "args": {"faults": tc_faults, "fault_revision": revision,
+                         "execution_order": "serial"},
+            }], id="ai_b"),
+            ToolMessage(content="ok", name="submit_batch_intent",
+                        tool_call_id="call_b1"),
+        ]
+        return {
+            "confirmed_intent": None, "messages": messages,
+            "clarification_round": 0, "dialogue_round": 2,
+            "fault_intent": {},
+            "batch_submit_args": {"faults": [s.to_dict() for s in specs]},
+        }
+
+    @pytest.mark.asyncio
+    async def test_clean_replay_accepted_with_durations(self):
+        s1, s2 = self._spec("p1"), self._spec("p2")
+        node = make_intent_clarification(llm=AsyncMock())
+        result = await node(self._state(
+            [s1, s2], [self._replay(s1), self._replay(s2)], s1.revision,
+        ))
+        assert result.get("confirmed_intent") == "batch_inject"
+        faults = result["batch_submit_args"]["faults"]
+        assert [f.get("duration_seconds") for f in faults] == [600, 600]
+
+    @pytest.mark.asyncio
+    async def test_dict_params_timeout_rejected(self):
+        s1, s2 = self._spec("p1"), self._spec("p2")
+        bad = self._replay(s1)
+        bad["params"] = {"timeout": "600"}
+        node = make_intent_clarification(llm=AsyncMock())
+        result = await node(self._state(
+            [s1, s2], [bad, self._replay(s2)], s1.revision,
+        ))
+        assert result.get("confirmed_intent") != "batch_inject"
+        assert "duration_seconds" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_stringified_params_timeout_rejected(self):
+        s1, s2 = self._spec("p1"), self._spec("p2")
+        bad = self._replay(s2)
+        bad["params"] = '{"timeout": "600"}'
+        node = make_intent_clarification(llm=AsyncMock())
+        result = await node(self._state(
+            [s1, s2], [self._replay(s1), bad], s1.revision,
+        ))
+        assert result.get("confirmed_intent") != "batch_inject"
+        assert "duration_seconds" in result["messages"][0].content
 

@@ -46,6 +46,7 @@ def _spec(
     """Build a ``fault_spec`` state dict in the new (post-refactor)
     serialised shape — what ``intent_clarification`` writes and what
     ``read_fault_spec`` expects to find."""
+    kwargs.setdefault("duration_seconds", 600)
     spec = FaultSpec(
         namespace=namespace,
         scope=scope,

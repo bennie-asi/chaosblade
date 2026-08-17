@@ -36,6 +36,7 @@ from chaos_agent.agent.spec.fault_spec import (
     FaultSpec,
     parse_fault_proposal,
     read_fault_spec,
+    strip_timeout_alias,
 )
 from chaos_agent.agent.nodes.execute.llm_step_helpers import (
     build_stagnation_hint,
@@ -72,7 +73,6 @@ from chaos_agent.transports.registry import (
 
 logger = logging.getLogger(__name__)
 
-MAX_CLARIFICATION_ROUNDS = settings.max_clarification_rounds
 MAX_DIALOGUE_ROUNDS = settings.max_dialogue_rounds
 
 
@@ -105,6 +105,11 @@ def _has_successful_trailing_tool_result(messages: list, tool_name: str) -> bool
 
 def _advance_fault_spec(existing: FaultSpec | None, raw: dict) -> FaultSpec:
     """Build the only persistent fault contract from an LLM proposal."""
+    # Strip the rejected duration alias before the contract is built: the
+    # fast-path gate refuses any replay whose params carry ``timeout``, so a
+    # reviewed spec holding that key would deadlock the submission loop
+    # (replay with it -> gate rejects; without it -> params mismatch).
+    raw = strip_timeout_alias(raw)
     candidate = FaultSpec.from_intent_args(raw, existing=existing)
     if existing is None:
         return candidate.replace(revision=1)
@@ -204,6 +209,40 @@ def _proposal_state_update(specs: list[FaultSpec]) -> dict:
             "interval_seconds": 0,
         },
     }
+
+def _clarification_bump(
+    is_new_user_turn: bool,
+    dialogue_round: int,
+    current: int,
+) -> int:
+    """Count ONE clarification round per fresh user turn after the opening.
+
+    ``clarification_round`` answers "how many turns did the user spend
+    clarifying the intent before submission". Every fresh user turn counts
+    once — answering a question, supplying missing parameters, revising the
+    proposal — EXCEPT the turn that opens the phase (``dialogue_round == 0``
+    at entry): the first utterance IS the intent, not a clarification of
+    anything. The count happens at turn ENTRY — every return of the
+    fresh-turn pass carries it — because a turn that probes with tools ends
+    its final reply on a tool-loop re-entry, where freshness is no longer
+    visible. A turn that turns out to be a pure confirmation is refunded by
+    the successful-submit fast path (see ``_confirmation_refund``).
+    """
+    if not is_new_user_turn or dialogue_round < 1:
+        return current
+    return current + 1
+
+
+def _confirmation_refund(current: int) -> int:
+    """Give back the entry bump of a turn that was only a confirmation.
+
+    The successful-submit fast path runs on the tool-loop re-entry of the
+    confirming turn, whose entry already counted +1. A pure confirmation
+    adds no clarification, so the count is refunded — never below zero: a
+    one-shot session can reach submission without any bump ever firing.
+    """
+    return max(0, current - 1)
+
 
 def bootstrap_task_session(
     op_task_id: str,
@@ -488,8 +527,9 @@ def submit_fault_intent(
     names: Annotated[Optional[list[str]], BeforeValidator(_validate_names)] = None,
     labels: Annotated[Optional[dict[str, str]], BeforeValidator(_validate_labels)] = None,
     params: Annotated[Optional[dict[str, str]], BeforeValidator(_validate_params)] = None,
+    duration_seconds: int = 0,
     user_description: str = "",
-    use_case_name: str = "",
+    case_resource_path: str = "",
 ) -> str:
     """Submit the collected fault injection intent (planning ONLY —
     structured handoff to execution confirmation).
@@ -511,8 +551,10 @@ def submit_fault_intent(
     environment-verified recommendation. Skill-case example literals are
     templates, never data. Downstream preserves params verbatim as
     user-approved.
-    use_case_name: skill use case the user chose in this dialogue; omit
-    when none was chosen.
+    duration_seconds: fault duration in seconds; pass the user's value, or 0
+    for the system recommended default. Never put duration into params.
+    case_resource_path: settled case file, relative to the skill directory
+    (``read_skill_resource`` input); omit when none.
 
     Output: acknowledgment. Side effects: none (NO injection here).
     """
@@ -556,7 +598,8 @@ def submit_batch_intent(
     Inputs:
       - faults: list of fault dicts; each REQUIRES scope / target / action /
         namespace, and may independently add names (list[str]) / labels (dict) /
-        params (dict) / fault_type (str).
+        params (dict) / fault_type (str) / duration_seconds (int, 0 = system
+        recommended; never put duration into params).
       - fault_revision: server-owned revision of the reviewed FaultSpec — replay
         it exactly as shown.
       - execution_order: only "serial" is currently implemented.
@@ -674,8 +717,8 @@ def recover_task(task_id: str) -> str:
         FIRST to find it — never guess a task_id.
 
     Inputs:
-      - task_id: the experiment's task_id (e.g. "inject-xxx"), from the user
-        or from ``query_active_experiments``.
+      - task_id: the experiment's task_id (e.g. "inject-xxx" or "task-xxx"),
+        from the user or from ``query_active_experiments``.
 
     Output: an acknowledgment string; the recover graph then runs the reverse
       operation and its Layer-2 verification.
@@ -701,7 +744,8 @@ def _extract_submit_args(messages: list) -> dict:
       * ``labels`` / ``params`` — dict or JSON-stringified dict
                      collapse to ``dict``; values stringified.
       * Scalar strings (``fault_type`` / ``scope`` / ``target`` /
-        ``action`` / ``namespace`` / ``user_description``) — coerced
+        ``action`` / ``namespace`` / ``user_description`` /
+        ``case_resource_path``) — coerced
         through ``str(...) or ""`` so a stray int / None won't crash
         downstream string formatting.
       * Empty / missing fields are filled with empty string / list /
@@ -723,7 +767,7 @@ def _extract_submit_args(messages: list) -> dict:
                         args.get("fault_revision")
                     ),
                     "user_description": _scalar_str(args.get("user_description")),
-                    "use_case_name": _scalar_str(args.get("use_case_name")),
+                    "case_resource_path": _scalar_str(args.get("case_resource_path")),
                 }
             # AIMessage without a submit call — older turn we don't
             # care about; abandon the walk.
@@ -747,13 +791,35 @@ def _scalar_str(value: object) -> str:
     return value if isinstance(value, str) else str(value)
 
 
+def _coerce_duration(value: object) -> int:
+    """Duration always comes out as a non-negative int (0 = unspecified)."""
+    try:
+        return max(int(str(value).strip()), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _params_carry_timeout(args: dict) -> bool:
+    """True when a submit args dict smuggles duration via ``params.timeout``.
+
+    ``duration_seconds`` is the only legal duration channel; the submission
+    chain rejects this legacy alias outright (see the fast-path gate).
+    Normalises through ``_coerce_to_dict`` so JSON-stringified params
+    (a known qwen-style emission) are caught too.
+    """
+    params = args.get("params")
+    if params is None:
+        return False
+    return "timeout" in _coerce_to_dict(params, "params")
+
+
 def _normalise_fault_args(args: dict) -> dict:
     """Normalize the shared fault vocabulary without interpreting semantics."""
 
     names_list = _coerce_to_list(args.get("names"), "names")
     labels_dict = _coerce_to_dict(args.get("labels"), "labels")
     params_dict = _coerce_to_dict(args.get("params"), "params")
-    return {
+    normalized = {
         "scope": _scalar_str(args.get("scope")),
         "target": _scalar_str(args.get("target")),
         "action": _scalar_str(args.get("action")),
@@ -768,6 +834,12 @@ def _normalise_fault_args(args: dict) -> dict:
             for key, value in params_dict.items()
         },
     }
+    # Presence-only pass-through: ``from_intent_args`` treats "key absent"
+    # as "inherit from the existing spec", so a missing duration must NOT
+    # surface as 0 here or a resubmit would wipe a previously reviewed value.
+    if "duration_seconds" in args:
+        normalized["duration_seconds"] = _coerce_duration(args.get("duration_seconds"))
+    return normalized
 
 
 def _public_intent_response(response, reply: str) -> AIMessage:
@@ -1033,6 +1105,15 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
                         current_human_msg = msg
                         break
 
+        # A fresh user turn (as opposed to a tool-loop re-entry) ends with
+        # the HumanMessage itself: converse_stream appends exactly one per
+        # invocation. Only fresh turns can count as clarification rounds.
+        _is_new_user_turn = (
+            current_human_msg is not None
+            and bool(messages)
+            and messages[-1] is current_human_msg
+        )
+
         tracker = get_tracker(task_id) if task_id else None
         if tracker:
             tracker.start(StatusCategory.NODE, "intent_clarification",
@@ -1107,6 +1188,21 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
         )
         if has_submit_tool_msg:
             llm_args = _extract_submit_args(messages)
+            # Duration contract gate: ``duration_seconds`` is the ONLY legal
+            # channel. The legacy ``params.timeout`` alias is rejected here —
+            # before bootstrap/contract construction — so the model repairs
+            # the submission through the normal ReAct feedback loop.
+            if _params_carry_timeout(llm_args):
+                return await _reject_turn(
+                    "Duration must be submitted via duration_seconds, not params.timeout. "
+                    "Remove timeout from params and resubmit with duration_seconds "
+                    "(0 = system recommended duration).",
+                    messages=messages,
+                    human_msg=current_human_msg,
+                    dialogue_round=dialogue_round,
+                    tui_session_id=tui_session_id,
+                    hook_updates=hook_updates,
+                )
             # The normal path replays an already reviewed FaultSpec exactly.
             # If a model omitted its private proposal trailer, no FaultSpec
             # exists yet even though it may have shown a complete summary and
@@ -1212,6 +1308,9 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
                     "fault_spec": existing_spec.to_dict(),
                     "intent_confidence": 1.0,
                     "intent_reasoning": "submit_fault_intent tool executed",
+                    # The confirming turn's entry bump counted a round that
+                    # turned out to be a pure confirmation — give it back.
+                    "clarification_round": _confirmation_refund(clarification_round),
                     "dialogue_round": dialogue_round + 1,
                     "task_id": op_task_id,
                 }, hook_updates)
@@ -1234,6 +1333,18 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
         if has_batch_tool_msg:
             batch_args = _extract_submit_batch_intent(messages)
             if batch_args:
+                # Same duration contract as the single-fault path, per entry.
+                if any(_params_carry_timeout(f) for f in batch_args.get("faults", [])):
+                    return await _reject_turn(
+                        "Duration must be submitted via duration_seconds, not params.timeout. "
+                        "Remove timeout from params and resubmit each fault with "
+                        "duration_seconds (0 = system recommended duration).",
+                        messages=messages,
+                        human_msg=current_human_msg,
+                        dialogue_round=dialogue_round,
+                        tui_session_id=tui_session_id,
+                        hook_updates=hook_updates,
+                    )
                 if not _submission_matches_batch(batch_args, existing_batch):
                     return await _reject_turn(
                         "The batch submission does not match the fault plan currently under review. "
@@ -1300,6 +1411,8 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
                     },
                     "intent_confidence": 1.0,
                     "intent_reasoning": "submit_batch_intent tool executed",
+                    # Same confirmation refund as the single-fault path.
+                    "clarification_round": _confirmation_refund(clarification_round),
                     "dialogue_round": dialogue_round + 1,
                     "task_id": op_task_id,
                 }, hook_updates)
@@ -1487,7 +1600,9 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
             result = {
                 "messages": _hints_for_state + [response],
                 "hint_repeat_counts": _hint_counts,
-                "clarification_round": clarification_round + 1,
+                "clarification_round": _clarification_bump(
+                    _is_new_user_turn, dialogue_round, clarification_round,
+                ),
                 "dialogue_round": dialogue_round + 1,
             }
             result.update(proposal_update)
@@ -1530,6 +1645,9 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
         _persist_dialogue(tui_session_id, persist_list)
         result = {
             "messages": [public_response],
+            "clarification_round": _clarification_bump(
+                _is_new_user_turn, dialogue_round, clarification_round,
+            ),
             "dialogue_round": dialogue_round + 1,
         }
         result.update(proposal_update)

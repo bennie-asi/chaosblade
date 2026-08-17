@@ -13,7 +13,7 @@ def _current() -> FaultSpec:
     return FaultSpec.from_intent_args({
         "objective": "validate packet loss", "scope": "pod", "target": "network",
         "action": "drop", "namespace": "default", "names": ["nginx"],
-        "params": {"timeout": "60"}, "boundaries": ["staging only"],
+        "params": {}, "duration_seconds": 60, "boundaries": ["staging only"],
         "constraints": ["one logical experiment"],
     }).replace(revision=3)
 
@@ -22,7 +22,7 @@ def _proposal_call(*, revision: int = 3, action: str = "delay") -> dict:
     proposed = _current().to_intent_dict() | {
         "action": action,
         "labels": {"app": "web"},
-        "params": {"timeout": "60", "time": "3000"},
+        "params": {"time": "3000"},
     }
     return {
         "name": "propose_plan_change", "id": "change-1",

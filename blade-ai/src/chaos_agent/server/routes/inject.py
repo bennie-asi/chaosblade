@@ -5,7 +5,7 @@ import logging
 
 from fastapi import Request
 
-from chaos_agent.agent.spec.fault_spec import FaultSpec
+from chaos_agent.agent.spec.fault_spec import DurationParamError, FaultSpec
 from chaos_agent.agent.result.operation_result import (
     build_inject_status_data_from_state,
 )
@@ -52,7 +52,16 @@ async def inject_fault(request: InjectRequest, req: Request):
 
     # Build initial state. FaultSpec is the single source of truth for
     # fault identity + tuning; consumers read via ``read_fault_spec``.
-    spec = FaultSpec.from_http_request(request)
+    try:
+        spec = FaultSpec.from_http_request(request)
+    except DurationParamError as e:
+        # Duration contract violation is a client input error — answer with
+        # the standard envelope instead of an unhandled 500.
+        return JSONEnvelope.fail(
+            code=ResponseCode.INVALID_PARAMS,
+            message=str(e),
+            request_id=getattr(req.state, "request_id", ""),
+        )
     initial_state = build_inject_initial_state(
         task_id=task_id,
         fault_spec=spec,

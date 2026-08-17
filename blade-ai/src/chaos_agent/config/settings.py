@@ -569,7 +569,6 @@ class Settings(BaseSettings):
     max_recover_verifier_loop: int = 60      # BLADE_AI_MAX_RECOVER_VERIFIER_LOOP
     max_recover_layer1_iterations: int = 60  # BLADE_AI_MAX_RECOVER_LAYER1_ITERATIONS (non-ChaosBlade LLM sub-loop)
     max_plan_builder_rounds: int = 40        # BLADE_AI_MAX_PLAN_BUILDER_ROUNDS
-    max_clarification_rounds: int = 10       # BLADE_AI_MAX_CLARIFICATION_ROUNDS
     max_dialogue_rounds: int = 999           # BLADE_AI_MAX_DIALOGUE_ROUNDS
     stagnation_threshold: int = 5            # BLADE_AI_STAGNATION_THRESHOLD，同一工具连续调用 N 次触发 action stagnation
     # 频次上限：达到该连续轮数后，streak 本身即证据，不再要求输出一致。

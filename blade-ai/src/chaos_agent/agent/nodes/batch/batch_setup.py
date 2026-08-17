@@ -20,7 +20,11 @@ import logging
 
 from langchain_core.messages import HumanMessage, RemoveMessage
 
-from chaos_agent.agent.spec.fault_spec import SOURCE_TUI, FaultSpec
+from chaos_agent.agent.spec.fault_spec import (
+    SOURCE_TUI,
+    FaultSpec,
+    _with_default_duration,
+)
 from chaos_agent.agent.nodes.store._store_sync import sync_to_store
 from chaos_agent.agent.state import AgentState
 from chaos_agent.agent.state_mgmt.state_lifecycle import build_batch_iteration_state
@@ -48,6 +52,7 @@ def _normalize_batch_args(state: dict) -> dict:
             "names": list(spec_dict.get("names", [])),
             "labels": dict(spec_dict.get("labels", {})),
             "params": dict(spec_dict.get("params", {})),
+            "duration_seconds": spec_dict.get("duration_seconds", 0),
         }],
         "execution_order": "serial",
         "interval_seconds": 0,
@@ -101,6 +106,9 @@ async def batch_setup(state: AgentState) -> dict:
             source=SOURCE_TUI,
             user_description=existing.get("user_description", ""),
         )
+    # Duration contract: every batch entry must carry a positive duration;
+    # externally constructed entries without one get the recommended default.
+    spec = _with_default_duration(spec)
 
     new_task_id = new_inject_task_id()
     tui_sid = state.get("tui_session_id", "")

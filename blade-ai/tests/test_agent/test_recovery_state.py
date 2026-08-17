@@ -114,7 +114,7 @@ def test_build_recover_initial_from_checkpoint_rebuilds_fault_spec_from_legacy_t
         "duration_seconds": 0,
         "source": "recover_checkpoint",
         "user_description": "",
-        "use_case_name": "",
+        "case_resource_path": "",
         "revision": 0,
         "objective": "",
         "boundaries": [],

@@ -199,8 +199,11 @@ class TestCliStructuredSpecPersistence:
             "namespace": "production",
             "target_name": "my-app-pod",
             "labels": {"app": "my-app"},
-            "params": {"percent": "80", "timeout": "600"},
+            "params": {"percent": "80"},
             "params_flags": ["read"],
+            # New duration contract: duration travels ONLY through
+            # ``duration`` / ``duration_seconds`` — params.timeout is
+            # rejected outright (regression anchor).
             "duration": 600,
         })
         state = {

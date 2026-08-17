@@ -597,7 +597,7 @@ class AgentState(MessagesState):
     interaction_mode: str = "cli"        # "cli" / "tui"
     intent_context: Optional[str] = None     # Intent description text (passed to planning node)
     intent_confidence: float = 0.0       # Confidence score 0.0-1.0
-    clarification_round: int = 0         # Low-confidence clarification round tracking
+    clarification_round: int = 0         # User turns spent clarifying the intent before submission (opening turn excluded, pure confirmation refunded)
     dialogue_round: int = 0              # Overall dialogue round tracking (chat + clarification)
     intent_reasoning: Optional[str] = None   # LLM classification reasoning (audit trail)
     needs_task_selection: bool = False    # RECOVER intent needs user to pick a task

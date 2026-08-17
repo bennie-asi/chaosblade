@@ -47,6 +47,7 @@ def test_complete_fault_spec_uses_expert_mode_when_no_mode_is_explicit():
         names=("api-0",),
         blade_target="cpu",
         blade_action="fullload",
+        duration_seconds=600,
     )
     state = build_inject_initial_state(task_id="task-1", fault_spec=spec)
 

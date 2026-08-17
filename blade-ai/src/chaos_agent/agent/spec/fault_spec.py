@@ -75,6 +75,7 @@ from chaos_agent.utils.coerce import (
     coerce_to_list,
     coerce_to_str,
 )
+from chaos_agent.utils.fault_type import ensure_min_duration
 
 logger = logging.getLogger(__name__)
 
@@ -182,11 +183,15 @@ class FaultSpec:
     # ---- Origin metadata (audit only) -------------------------------------
     source: str = ""                             # "cli_structured" | "cli_nl" | "http_structured" | "http_nl" | "tui" | "direct"
     user_description: str = ""
-    # Specific skill use case the user chose during intent dialogue (e.g. a
-    # catalogue entry name). Empty when no case was chosen — the planning
-    # phase then selects one itself. An anchor hint for planning, not an
-    # executable selector; environment evidence may still overrule it.
-    use_case_name: str = ""
+    # Case file the intent dialogue settled on — a path RELATIVE to the
+    # skill directory, i.e. exactly what ``read_skill_resource`` consumes.
+    # Passed through verbatim from ``submit_fault_intent``, never derived
+    # downstream. Empty when no case was chosen — the planning phase then
+    # selects one itself. A REFERENCE hint for planning, not a directive:
+    # the planning phase keeps full authority over the final case selection
+    # and may override it on runtime evidence (same semantics as the target
+    # fields above — hints to verify, not orders to obey).
+    case_resource_path: str = ""
 
     # ---- Approved-intent metadata -----------------------------------------
     # This metadata describes the user-approved contract but never duplicates
@@ -237,6 +242,10 @@ class FaultSpec:
           - For non-cluster-scoped scopes (pod / container / deployment /
             ...), namespace must be set; cluster-scoped (node / pv / ...)
             don't carry one.
+          - ``duration_seconds`` must be positive — every fault injection
+            is bounded in time; auto-recovery depends on it. Entry
+            constructors fill a recommended default when the user didn't
+            specify one, so a complete spec always carries a real value.
 
         Resource selector (names / labels) is NOT required here —
         ``namespace-wide`` is a legitimate intent ("inject any pod in
@@ -250,6 +259,8 @@ class FaultSpec:
         if family_for_scope(self.scope) is None:
             return False
         if self.scope not in _CLUSTER_SCOPED and not self.namespace:
+            return False
+        if self.duration_seconds <= 0:
             return False
         return True
 
@@ -280,19 +291,21 @@ class FaultSpec:
         names = tuple(
             n.strip() for n in str(names_raw).split(",") if n.strip()
         )
-        return cls(
+        params = _normalise_params(kwargs.get("params"))
+        _reject_timeout_param(params, "Use the --duration option instead.")
+        return _with_default_duration(cls(
             namespace=coerce_to_str(kwargs.get("namespace"), default=""),
             scope=coerce_to_str(kwargs.get("scope"), default=""),
             names=names,
             labels=_normalise_labels(kwargs.get("labels")),
             blade_target=coerce_to_str(kwargs.get("target"), default=""),
             blade_action=coerce_to_str(kwargs.get("action"), default=""),
-            params=_normalise_params(kwargs.get("params")),
+            params=params,
             params_flags=tuple(kwargs.get("params_flags") or ()),
             duration_seconds=coerce_to_int(kwargs.get("duration"), default=0),
             source=SOURCE_CLI_STRUCTURED,
             user_description=coerce_to_str(kwargs.get("input"), default=""),
-        )
+        ))
 
     @classmethod
     def from_cli_nl(cls, *, input_text: str, kwargs: Optional[dict] = None) -> "FaultSpec":
@@ -308,8 +321,10 @@ class FaultSpec:
         risking drift.
         """
         kwargs = kwargs or {}
+        params = _normalise_params(kwargs.get("params"))
+        _reject_timeout_param(params, "Use the --duration option instead.")
         return cls(
-            params=_normalise_params(kwargs.get("params")),
+            params=params,
             params_flags=tuple(kwargs.get("params_flags") or ()),
             duration_seconds=coerce_to_int(kwargs.get("duration"), default=0),
             source=SOURCE_CLI_NL,
@@ -344,19 +359,23 @@ class FaultSpec:
         if target_name:
             names = tuple(n.strip() for n in target_name.split(",") if n.strip())
 
-        return cls(
+        params = _normalise_params(getattr(request, "params", None))
+        _reject_timeout_param(
+            params, 'Use the top-level "duration" field instead.',
+        )
+        return _with_default_duration(cls(
             namespace=coerce_to_str(getattr(request, "namespace", ""), default=""),
             scope=coerce_to_str(scope, default=""),
             names=names,
             labels=_normalise_labels(labels),
             blade_target=coerce_to_str(getattr(request, "target", ""), default=""),
             blade_action=coerce_to_str(getattr(request, "action", ""), default=""),
-            params=_normalise_params(getattr(request, "params", None)),
+            params=params,
             params_flags=tuple(getattr(request, "params_flags", None) or ()),
             duration_seconds=coerce_to_int(getattr(request, "duration", 0), default=0),
             source=source,
             user_description=coerce_to_str(getattr(request, "input", ""), default=""),
-        )
+        ))
 
     @classmethod
     def from_intent_args(
@@ -383,9 +402,9 @@ class FaultSpec:
             source: explicit override. When None, inherits from
                 ``existing.source``, else falls back to ``"tui"``.
         """
-        # ChaosBlade params often carry ``timeout`` which is the fault
-        # duration in seconds. Hoist it to ``duration_seconds`` so
-        # consumers don't have to peer into params for a common field.
+        # Duration travels ONLY through ``duration_seconds`` — the legacy
+        # ``params.timeout`` alias is rejected upstream (intent_clarification
+        # submission chain) so params stays a pure fault-intensity channel.
         has_params = "params" in args and args.get("params") is not None
         params = _normalise_params(args.get("params")) if has_params else dict(
             existing.params if existing else {}
@@ -395,8 +414,6 @@ class FaultSpec:
             if "duration_seconds" in args
             else (existing.duration_seconds if existing else 0)
         )
-        if "timeout" in params and "duration_seconds" not in args:
-            duration = coerce_to_int(params["timeout"], default=0)
 
         user_desc = coerce_to_str(args.get("user_description"), default="")
         if not user_desc and existing is not None:
@@ -409,7 +426,7 @@ class FaultSpec:
         def inherited_text(key: str, fallback: str) -> str:
             return coerce_to_str(args.get(key), default="") if key in args else fallback
 
-        return cls(
+        return _with_default_duration(cls(
             namespace=inherited_text("namespace", existing.namespace if existing else ""),
             scope=inherited_text("scope", existing.scope if existing else ""),
             names=(
@@ -430,7 +447,7 @@ class FaultSpec:
             duration_seconds=duration,
             source=source,
             user_description=user_desc,
-            use_case_name=inherited_text("use_case_name", existing.use_case_name if existing else ""),
+            case_resource_path=inherited_text("case_resource_path", existing.case_resource_path if existing else ""),
             revision=coerce_to_int(args.get("revision"), default=(existing.revision if existing else 0)),
             objective=inherited_text("objective", existing.objective if existing else ""),
             boundaries=(
@@ -445,7 +462,7 @@ class FaultSpec:
                 tuple(str(item) for item in coerce_to_list(args.get("assumptions")))
                 if "assumptions" in args else (existing.assumptions if existing else ())
             ),
-        )
+        ))
 
     @classmethod
     def from_direct_setup(
@@ -463,13 +480,13 @@ class FaultSpec:
         values.
         """
         if not skill_meta:
-            return base
+            return _with_default_duration(base)
         updates: dict[str, Any] = {}
         if not base.duration_seconds and skill_meta.get("default_duration"):
             updates["duration_seconds"] = coerce_to_int(
                 skill_meta["default_duration"], default=0,
             )
-        return base.replace(**updates) if updates else base
+        return _with_default_duration(base.replace(**updates) if updates else base)
 
     # ---- Mutation (frozen → returns new instance) -------------------------
 
@@ -508,7 +525,7 @@ class FaultSpec:
             "params_flags": list(self.params_flags),
             "duration_seconds": self.duration_seconds,
             "user_description": self.user_description,
-            "use_case_name": self.use_case_name,
+            "case_resource_path": self.case_resource_path,
             "revision": self.revision,
             "objective": self.objective,
             "boundaries": list(self.boundaries),
@@ -528,7 +545,7 @@ class FaultSpec:
             "params": dict(self.params),
             "params_flags": list(self.params_flags),
             "duration_seconds": self.duration_seconds,
-            "use_case_name": self.use_case_name,
+            "case_resource_path": self.case_resource_path,
             "objective": self.objective,
             "boundaries": list(self.boundaries),
             "constraints": list(self.constraints),
@@ -555,7 +572,7 @@ class FaultSpec:
             "duration_seconds": self.duration_seconds,
             "source": self.source,
             "user_description": self.user_description,
-            "use_case_name": self.use_case_name,
+            "case_resource_path": self.case_resource_path,
             "revision": self.revision,
             "objective": self.objective,
             "boundaries": list(self.boundaries),
@@ -572,6 +589,13 @@ class FaultSpec:
         if not d or not isinstance(d, dict):
             return None
         try:
+            # Legacy checkpoints persisted before the duration contract
+            # may still hold the rejected ``params.timeout`` alias; drop
+            # it on hydration so a revived reviewed spec stays
+            # satisfiable by the replay gate (same rationale as the
+            # proposal-path strip — a spec holding ``timeout`` would
+            # deadlock resubmission).
+            d = strip_timeout_alias(d)
             return cls(
                 namespace=coerce_to_str(d.get("namespace"), default=""),
                 scope=coerce_to_str(d.get("scope"), default=""),
@@ -584,7 +608,10 @@ class FaultSpec:
                 duration_seconds=coerce_to_int(d.get("duration_seconds"), default=0),
                 source=coerce_to_str(d.get("source"), default=""),
                 user_description=coerce_to_str(d.get("user_description"), default=""),
-                use_case_name=coerce_to_str(d.get("use_case_name"), default=""),
+                # Legacy checkpoints may still persist the retired
+                # ``use_case_name``; it is deliberately ignored — the case
+                # hint travels only via ``case_resource_path`` now.
+                case_resource_path=coerce_to_str(d.get("case_resource_path"), default=""),
                 revision=coerce_to_int(d.get("revision"), default=0),
                 objective=coerce_to_str(d.get("objective"), default=""),
                 boundaries=tuple(str(item) for item in coerce_to_list(d.get("boundaries"))),
@@ -606,6 +633,63 @@ _CLUSTER_SCOPED: frozenset[str] = aggregate_cluster_scoped()
 # ---------------------------------------------------------------------------
 # Helpers — defensive normalisation against LLM / external schema drift
 # ---------------------------------------------------------------------------
+
+
+class DurationParamError(ValueError):
+    """Raised when fault duration is supplied through ``params.timeout``.
+
+    ``duration_seconds`` is the ONLY legal channel for fault duration — the
+    legacy ``params.timeout`` alias is rejected outright so callers get an
+    explicit error instead of a silently normalised value.
+    """
+
+
+def _reject_timeout_param(params: dict, hint: str) -> None:
+    """Raise :class:`DurationParamError` when ``params`` carries ``timeout``."""
+    if "timeout" in params:
+        raise DurationParamError(
+            "duration must be submitted via duration_seconds, not "
+            f"params.timeout. {hint}"
+        )
+
+
+def strip_timeout_alias(raw: dict) -> dict:
+    """Return ``raw`` with any ``params.timeout`` key removed.
+
+    Proposal-shaped dicts parsed from model output (proposal trailers,
+    plan-change proposals) may carry the rejected duration alias. Dropping
+    it before the contract is built keeps reviewed specs clean so the
+    replay gate and the params-equality check stay satisfiable — a spec
+    holding ``timeout`` would deadlock submission (replay with it is
+    rejected by the gate; without it the params comparison fails).
+    Everything else in ``raw`` is preserved untouched.
+    """
+    params = _normalise_params(raw.get("params"))
+    if "timeout" not in params:
+        return raw
+    stripped = dict(raw)
+    stripped["params"] = {k: v for k, v in params.items() if k != "timeout"}
+    return stripped
+
+
+def _with_default_duration(spec: "FaultSpec") -> "FaultSpec":
+    """Apply the duration floor policy at contract construction.
+
+    Every spec that can reach ``is_complete`` carries the duration that
+    will ACTUALLY execute: unset (0) gets the recommended default, and
+    explicit values below the fault type's recommended minimum are
+    lifted to it. Lifting here — instead of silently at execution —
+    keeps confirmation cards truthful: the operator approves the bound
+    that will really run. Explicit values above the floor pass through
+    untouched; execution-layer ``ensure_min_duration`` remains the floor
+    of last resort.
+    """
+    effective = ensure_min_duration(
+        spec.duration_seconds, spec.scope, spec.blade_target, spec.blade_action,
+    )
+    if effective == spec.duration_seconds:
+        return spec
+    return spec.replace(duration_seconds=effective)
 
 
 def _normalise_names(raw: Any) -> tuple[str, ...]:
@@ -864,7 +948,9 @@ def missing_full_proposal_fields(value: object) -> list[str]:
 
 
 __all__ = [
+    "DurationParamError",
     "FaultSpec",
+    "strip_timeout_alias",
     "FAULT_PROPOSAL_CLOSE",
     "FAULT_PROPOSAL_OPEN",
     "fault_parts_from_name",

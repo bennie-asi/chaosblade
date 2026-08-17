@@ -41,6 +41,7 @@ from chaos_agent.agent.prompts import (
     build_system_prompt,
     PromptMode,
 )
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.spec.skill_identity import has_active_skill, read_active_skill_name
 from chaos_agent.agent.state import AgentState
 from chaos_agent.agent.state_mgmt.state_helpers import fail_state
@@ -496,8 +497,24 @@ def make_agent_loop(hook=None, llm=None, tools=None, skill_catalog: str = "", re
                     _all_matches = registry.match_use_cases(
                         _spec.scope, _spec.blade_target, _spec.blade_action,
                     )
-                if _all_matches:
-                    fi_lines.append(f"\nCatalogue candidates ({len(_all_matches)}):")
+                _case_path = (_spec.case_resource_path or "").strip()
+                if _case_path:
+                    # The intent dialogue already settled a case file — surface
+                    # it FIRST, whatever use-case matching returned: the
+                    # no-match branch below would otherwise announce "no
+                    # matching use case ... STOP" right next to a settled
+                    # path. The full reference semantics live in the Reviewed
+                    # FaultSpec contract section of the system prompt (same
+                    # spec), so this message only names the path and restates
+                    # the core stance — it must not duplicate the long note.
+                    fi_lines.append(f"\nCase file settled in the intent dialogue: {_case_path}")
+                    fi_lines.append(
+                        "Read it with read_skill_resource and weigh it per the "
+                        "Reviewed FaultSpec section: a reference, not a "
+                        "directive — the final case selection is yours."
+                    )
+                elif _all_matches:
+                    fi_lines.append(f"\nCandidate use cases ({len(_all_matches)}):")
                     candidate_dirs: list[str] = []
                     for m in _all_matches:
                         parts = m.split("/")
@@ -506,21 +523,24 @@ def make_agent_loop(hook=None, llm=None, tools=None, skill_catalog: str = "", re
                             d = "/".join(parts[:cat_idx + 2]) + "/"
                             if d not in candidate_dirs:
                                 candidate_dirs.append(d)
-                    for d in candidate_dirs:
+                    # Non-catalogue paths would otherwise leave the list empty
+                    # under a "browse these candidates" instruction.
+                    candidates = candidate_dirs or list(_all_matches)
+                    for d in candidates:
                         fi_lines.append(f"  - {d}")
                     fi_lines.append("")
                     fi_lines.append(
-                        "You MUST browse these directories with read_skill_resource, "
+                        "You MUST browse these candidates with read_skill_resource, "
                         "read the candidate case files, and select the one that best "
                         "matches the user's fault scenario. Do NOT assume the first "
                         "candidate is correct \u2014 review the case content before deciding."
                     )
                 else:
                     fi_lines.append(
-                        "\n⚠️ No matching catalogue case found for this fault type."
+                        "\n⚠️ No matching use case found for this fault type."
                         "\nYou MUST follow the discovery flow in SKILL.md: "
-                        "use read_skill_resource to browse the catalogue, "
-                        "locate a matching use-case, and load it."
+                        "use read_skill_resource to browse the skill's "
+                        "resources, locate a matching use-case, and load it."
                         "\nIf no match exists after discovery, inform the user "
                         "this scenario is not currently supported and STOP."
                     )
@@ -856,11 +876,11 @@ def make_agent_loop(hook=None, llm=None, tools=None, skill_catalog: str = "", re
                         stall_count = state.get("_plan_text_stall_count", 0) + 1
                         if stall_count < max_stalls:
                             result.setdefault("messages", []).append(
-                                HumanMessage(content=(
+                                HumanMessage(content=wrap_system_reminder(
                                     "**PLANNING ACTION REQUIRED**: You output text "
                                     "without calling a tool or activating a skill. "
                                     "You are in Phase 1 (planning). Take a concrete "
-                                    "action NOW — browse the skill catalogue with "
+                                    "action NOW — browse the skill's resources with "
                                     "`read_skill_resource`, inspect the target with a "
                                     "bound read-only tool, `activate_skill`, or "
                                     "`finish_planning`. Do NOT conclude in prose."

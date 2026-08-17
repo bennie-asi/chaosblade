@@ -8,6 +8,7 @@ Design principles:
 - Three priorities: Truthfulness > Proactiveness > Convergence
 """
 
+from chaos_agent.agent.prompts.reminder import SYSTEM_REMINDER_DECLARATION
 from chaos_agent.transports import PROFILE_K8S
 
 # ---------------------------------------------------------------------------
@@ -111,7 +112,9 @@ def get_intent_priorities_section(*, semantic_only: bool = False) -> str:
     ) + """
 
 3. **Convergence** — Minimize dialogue rounds. Ideal path: user states intent
-   → you probe + recommend complete spec → submit."""
+   → you probe + recommend complete spec → submit.
+
+""" + SYSTEM_REMINDER_DECLARATION
 
 
 # ---------------------------------------------------------------------------
@@ -150,20 +153,23 @@ intent; the parameters are NOT tied to any specific injection tool.
 - target: resource type to attack (see Skill Index)
 - action: fault action to perform (see Skill Index)
 - target identity fields: candidates only until a later feasibility stage validates them
+- duration: state the user's value or the system recommended default in the
+  summary; pass it as duration_seconds, never as a params ``timeout`` key (rejected)
 
 **Conditional:**
 - names OR labels: required when scope targets specific instances (at least one)
 
 **Optional:**
-- params: dict of action-specific semantic parameters (intensity, duration,
+- params: dict of action-specific semantic parameters (intensity,
   percentages). Execution details — resource names to create, command
   templates, step-by-step procedures — belong to the execution stage, not here.
   Values obey the Truthfulness rule above: the probed environment is the only
   authority — never copy case examples, never submit an unprobed
   environment-bound value
 - user_description: user's original intent in their words
-- use_case_name: the exact skill use case the user chose during this
-  dialogue; pass it only when such a choice happened, omit it otherwise
+- case_resource_path: case file settled in this dialogue — path relative to
+  the skill directory; pass it whenever a case was settled and its path is
+  known, omit it otherwise
 
 Valid combinations for scope/target/action: see Skill Index below."""
 

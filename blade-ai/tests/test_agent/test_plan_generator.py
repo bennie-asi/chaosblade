@@ -12,6 +12,7 @@ from chaos_agent.agent.spec.fault_spec import FaultSpec
 from chaos_agent.agent.spec.plan_generator import (
     _resolve_baseline_template,
     _section_baseline_preview,
+    _section_inject_command,
 )
 
 
@@ -97,3 +98,30 @@ class TestResolveBaselineTemplate:
         spec = FaultSpec(scope="node")
         assert "<node>" in _resolve_baseline_template("x {node_name}", spec)
         assert "<namespace>" in _resolve_baseline_template("y {namespace}", spec)
+
+
+class TestSectionInjectCommandDuration:
+    """Preview command must mirror what actually executes: duration_seconds
+    translates to exactly one ``--timeout`` flag. Before the duration
+    contract the preview picked timeout up from params; under the contract
+    params never carry it, so the preview must read duration_seconds."""
+
+    def test_preview_includes_single_timeout_from_duration(self):
+        spec = FaultSpec(
+            scope="pod", blade_target="cpu", blade_action="fullload",
+            namespace="prod", labels={"app": "web"}, duration_seconds=600,
+        )
+        out = _section_inject_command(spec, {})
+        assert out.count("--timeout") == 1
+        assert "--timeout 600" in out
+
+    def test_preview_timeout_alongside_other_params(self):
+        spec = FaultSpec(
+            scope="pod", blade_target="cpu", blade_action="fullload",
+            namespace="prod", params={"cpu-percent": "80"},
+            duration_seconds=300,
+        )
+        out = _section_inject_command(spec, {})
+        assert out.count("--timeout") == 1
+        assert "--timeout 300" in out
+        assert "--cpu-percent 80" in out

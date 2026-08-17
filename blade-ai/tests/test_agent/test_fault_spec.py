@@ -20,11 +20,13 @@ from types import SimpleNamespace
 import pytest
 
 from chaos_agent.agent.spec.fault_spec import (
+    DurationParamError,
     FaultSpec,
     fault_parts_from_name,
     fault_spec_from_legacy_state,
     fault_type_from_state,
     read_fault_spec,
+    strip_timeout_alias,
 )
 
 
@@ -83,7 +85,7 @@ class TestFromCliStructured:
             "action": "fullload",
             "namespace": "default",
             "target_name": "cn-hongkong.10.0.1.120",
-            "params": {"percent": "80", "timeout": "600"},
+            "params": {"percent": "80"},
             "duration": 600,
         })
         assert spec.scope == "node"
@@ -91,7 +93,7 @@ class TestFromCliStructured:
         assert spec.blade_action == "fullload"
         assert spec.namespace == "default"
         assert spec.names == ("cn-hongkong.10.0.1.120",)
-        assert spec.params == {"percent": "80", "timeout": "600"}
+        assert spec.params == {"percent": "80"}
         assert spec.duration_seconds == 600
         assert spec.source == "cli_structured"
         assert spec.is_complete
@@ -138,8 +140,108 @@ class TestFromCliStructured:
         })
         assert spec.params == {}
         assert spec.params_flags == ()
-        assert spec.duration_seconds == 0
+        # Duration omitted by the user → constructor fills the recommended
+        # default (pod-cpu-fullload: 600s) so is_complete can demand >0.
+        assert spec.duration_seconds == 600
         assert spec.labels == {}
+
+    def test_params_timeout_rejected(self):
+        # New contract: duration travels ONLY through --duration /
+        # duration_seconds. The legacy params.timeout alias is refused
+        # outright at the structured entry point.
+        with pytest.raises(DurationParamError):
+            FaultSpec.from_cli_structured({
+                "scope": "pod", "target": "cpu", "action": "fullload",
+                "namespace": "default", "target_name": "pod-a",
+                "params": {"percent": "80", "timeout": "600"},
+            })
+
+    def test_explicit_duration_below_floor_lifted_at_contract(self):
+        # Floor policy: an explicit value under the fault type's
+        # recommended minimum is lifted AT CONSTRUCTION, so confirmation
+        # cards show the bound that will actually execute (no silent
+        # execution-time boost).
+        spec = FaultSpec.from_cli_structured({
+            "scope": "pod", "target": "cpu", "action": "fullload",
+            "namespace": "default", "target_name": "pod-a",
+            "duration": 120,
+        })
+        assert spec.duration_seconds == 600
+
+    def test_explicit_duration_above_floor_untouched(self):
+        spec = FaultSpec.from_cli_structured({
+            "scope": "pod", "target": "cpu", "action": "fullload",
+            "namespace": "default", "target_name": "pod-a",
+            "duration": 1200,
+        })
+        assert spec.duration_seconds == 1200
+
+    def test_intent_args_duration_below_floor_lifted(self):
+        # NL flow goes through the same constructor, so a "60 seconds"
+        # ask lands on the card (and executes) as the floored value.
+        spec = FaultSpec.from_intent_args({
+            "scope": "pod", "target": "network", "action": "delay",
+            "namespace": "default", "duration_seconds": 60,
+        })
+        assert spec.duration_seconds == 600
+
+
+# ---------------------------------------------------------------------------
+# strip_timeout_alias — proposal-trailer deadlock guard
+# ---------------------------------------------------------------------------
+
+
+class TestStripTimeoutAlias:
+    """Proposals parsed from model output may smuggle duration via
+    ``params.timeout``. Persisting that key would deadlock the submission
+    loop (the replay gate rejects params carrying timeout, while the
+    params-equality check rejects a replay that drops it), so the alias
+    is stripped before the contract is built."""
+
+    def test_timeout_key_removed_rest_preserved(self):
+        raw = {
+            "scope": "pod", "target": "cpu", "action": "fullload",
+            "namespace": "ns",
+            "params": {"percent": "80", "timeout": "600"},
+        }
+        cleaned = strip_timeout_alias(raw)
+        assert cleaned["params"] == {"percent": "80"}
+        assert cleaned["scope"] == "pod"
+        # original dict untouched — callers may still inspect it
+        assert raw["params"] == {"percent": "80", "timeout": "600"}
+
+    def test_stringified_params_handled(self):
+        raw = {"scope": "pod", "params": '{"timeout": "600", "x": "1"}'}
+        cleaned = strip_timeout_alias(raw)
+        assert "timeout" not in cleaned["params"]
+        assert cleaned["params"].get("x") == "1"
+
+    def test_noop_when_clean_or_missing(self):
+        assert strip_timeout_alias({"scope": "pod"}) == {"scope": "pod"}
+        raw = {"params": {"percent": "80"}}
+        assert strip_timeout_alias(raw) is raw
+
+    def test_stripped_contract_replay_is_satisfiable(self):
+        # End-to-end shape: proposal -> contract -> replay without timeout
+        # must pass the strict match (the deadlock scenario).
+        from chaos_agent.agent.nodes.planning.intent_clarification import (
+            _advance_fault_spec,
+            _submission_matches_spec,
+        )
+        raw = {
+            "scope": "pod", "target": "cpu", "action": "fullload",
+            "namespace": "ns",
+            "params": {"percent": "80", "timeout": "600"},
+        }
+        spec = _advance_fault_spec(None, raw)
+        assert spec.params == {"percent": "80"}
+        replay = {
+            "scope": "pod", "target": "cpu", "action": "fullload",
+            "namespace": "ns", "params": {"percent": "80"},
+            "fault_revision": spec.revision,
+            "duration_seconds": spec.duration_seconds,
+        }
+        assert _submission_matches_spec(replay, spec)
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +367,29 @@ class TestFromHttpRequest:
                 f"Missing {missing} should yield http_nl"
             )
 
+    def test_params_timeout_rejected(self):
+        # Same duration contract as CLI: params.timeout is refused and
+        # the caller is pointed at the top-level duration field.
+        req = SimpleNamespace(
+            scope="pod", target="cpu", action="fullload",
+            namespace="default", target_name="pod-a",
+            labels={}, params={"percent": "80", "timeout": "600"},
+            params_flags=None, duration=0, input=None,
+        )
+        with pytest.raises(DurationParamError):
+            FaultSpec.from_http_request(req)
+
+    def test_missing_duration_gets_recommended_default(self):
+        req = SimpleNamespace(
+            scope="pod", target="cpu", action="fullload",
+            namespace="default", target_name="pod-a",
+            labels={}, params={"percent": "80"}, params_flags=None,
+            duration=0, input=None,
+        )
+        spec = FaultSpec.from_http_request(req)
+        assert spec.duration_seconds == 600
+        assert spec.is_complete
+
 
 # ---------------------------------------------------------------------------
 # from_intent_args — LLM tool_call shape (the previously-broken NL path)
@@ -310,10 +435,11 @@ class TestFromIntentArgs:
             "scope": "node", "target": "cpu", "action": "fullload",
             "namespace": "default",
             "names": ["n1"],
-            "params": '{"percent": "80", "timeout": "300"}',
+            "params": '{"percent": "80"}',
+            "duration_seconds": 900,
         })
-        assert spec.params == {"percent": "80", "timeout": "300"}
-        assert spec.duration_seconds == 300
+        assert spec.params == {"percent": "80"}
+        assert spec.duration_seconds == 900
 
     def test_labels_as_selector_string(self):
         # LLMs sometimes serialise labels as k=v selector syntax.
@@ -381,22 +507,36 @@ class TestFromIntentArgs:
         # No existing, no explicit → "tui" default (most common path)
         assert spec.source == "tui"
 
-    def test_timeout_hoist_int_string(self):
-        # blade conventionally takes timeout as string seconds
+    def test_params_timeout_not_hoisted(self):
+        # New contract: duration travels ONLY through duration_seconds.
+        # from_intent_args no longer interprets params.timeout — the
+        # intent_clarification submission chain rejects it upstream, and
+        # here it simply stays an inert param while the constructor fills
+        # the recommended default duration.
         spec = FaultSpec.from_intent_args({
             "scope": "pod", "target": "cpu", "action": "fullload",
             "namespace": "default", "names": ["p1"],
             "params": {"timeout": "1200"},
         })
-        assert spec.duration_seconds == 1200
+        assert spec.params == {"timeout": "1200"}
+        assert spec.duration_seconds == 600  # recommended default, not hoisted
 
-    def test_timeout_not_in_params_no_hoist(self):
+    def test_missing_duration_gets_recommended_default(self):
         spec = FaultSpec.from_intent_args({
             "scope": "pod", "target": "cpu", "action": "fullload",
             "namespace": "default", "names": ["p1"],
             "params": {"percent": "80"},
         })
-        assert spec.duration_seconds == 0
+        assert spec.duration_seconds == 600
+
+    def test_explicit_duration_seconds_respected(self):
+        spec = FaultSpec.from_intent_args({
+            "scope": "pod", "target": "cpu", "action": "fullload",
+            "namespace": "default", "names": ["p1"],
+            "params": {},
+            "duration_seconds": 1200,
+        })
+        assert spec.duration_seconds == 1200
 
 
 # ---------------------------------------------------------------------------
@@ -414,28 +554,41 @@ class TestFromDirectSetup:
         assert spec == base
 
     def test_skill_meta_fills_default_duration(self):
-        base = FaultSpec.from_cli_structured({
-            "scope": "pod", "target": "cpu", "action": "fullload",
-            "namespace": "default", "target_name": "pod-a",
-        })
+        # Raw base (not built through an entry constructor) may still
+        # carry duration 0; skill_meta fills it before the recommended
+        # default kicks in.
+        base = FaultSpec(
+            scope="pod", blade_target="cpu", blade_action="fullload",
+            namespace="default", names=("pod-a",),
+        )
         assert base.duration_seconds == 0
         spec = FaultSpec.from_direct_setup(
-            base=base, skill_meta={"default_duration": 600},
+            base=base, skill_meta={"default_duration": 900},
         )
-        assert spec.duration_seconds == 600
+        assert spec.duration_seconds == 900
         assert spec.scope == base.scope  # other fields untouched
+
+    def test_zero_duration_falls_back_to_recommended(self):
+        # No skill_meta default → recommended fault-type minimum.
+        base = FaultSpec(
+            scope="pod", blade_target="cpu", blade_action="fullload",
+            namespace="default", names=("pod-a",),
+        )
+        spec = FaultSpec.from_direct_setup(base=base, skill_meta=None)
+        assert spec.duration_seconds == 600
 
     def test_skill_meta_does_not_override_explicit_duration(self):
         base = FaultSpec.from_cli_structured({
             "scope": "pod", "target": "cpu", "action": "fullload",
             "namespace": "default", "target_name": "pod-a",
-            "duration": 300,
+            "duration": 900,
         })
         spec = FaultSpec.from_direct_setup(
-            base=base, skill_meta={"default_duration": 600},
+            base=base, skill_meta={"default_duration": 1200},
         )
-        # User's 300 wins over skill's 600
-        assert spec.duration_seconds == 300
+        # User's 900 wins over skill's 1200 (both above the floor, so
+        # the floor policy stays out of this comparison).
+        assert spec.duration_seconds == 900
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +634,7 @@ class TestDerivedProperties:
         spec = FaultSpec(
             scope="node", names=("n1",),
             blade_target="cpu", blade_action="fullload",
+            duration_seconds=600,
         )
         assert spec.is_complete
 
@@ -488,8 +642,19 @@ class TestDerivedProperties:
         spec = FaultSpec(
             scope="pod", names=("p1",),
             blade_target="cpu", blade_action="fullload",
+            duration_seconds=600,
         )
         assert not spec.is_complete  # namespace missing
+
+    def test_is_complete_requires_positive_duration(self):
+        # Every fault injection must be bounded in time — a spec without
+        # a duration is never ready to drive execution.
+        spec = FaultSpec(
+            scope="pod", namespace="ns", names=("p1",),
+            blade_target="cpu", blade_action="fullload",
+        )
+        assert not spec.is_complete
+        assert spec.replace(duration_seconds=600).is_complete
 
     def test_is_complete_namespace_wide_is_allowed(self):
         # ``namespace-wide`` is a legitimate intent: "inject any pod in
@@ -499,6 +664,7 @@ class TestDerivedProperties:
         spec = FaultSpec(
             scope="pod", namespace="ns",
             blade_target="cpu", blade_action="fullload",
+            duration_seconds=600,
         )
         assert spec.is_complete
         assert spec.is_namespace_wide
@@ -569,7 +735,7 @@ class TestSerialization:
             "scope": "node", "target": "cpu", "action": "fullload",
             "namespace": "default", "target_name": "n1,n2",
             "labels": {"app": "demo"},
-            "params": {"percent": "80", "timeout": "600"},
+            "params": {"percent": "80"},
             "params_flags": ["read", "write"],
             "duration": 600,
         })
@@ -598,11 +764,30 @@ class TestSerialization:
         original = FaultSpec.from_intent_args({
             "scope": "node", "target": "cpu", "action": "fullload",
             "namespace": "default", "names": ["n1"],
-            "params": {"percent": "80", "timeout": "300"},
+            "params": {"percent": "80"},
+            "duration_seconds": 300,
         })
         once = FaultSpec.from_dict(original.to_dict())
         twice = FaultSpec.from_dict(once.to_dict())
         assert once == twice == original
+
+    def test_from_dict_strips_legacy_params_timeout(self):
+        # Checkpoints persisted before the duration contract may still
+        # hold the rejected ``params.timeout`` alias. Hydration must
+        # drop it (and keep duration_seconds) so a revived reviewed
+        # spec stays satisfiable by the replay gate.
+        legacy = {
+            "scope": "node", "blade_target": "cpu",
+            "blade_action": "fullload", "namespace": "default",
+            "names": ["n1"],
+            "params": {"percent": "80", "timeout": "300"},
+            "duration_seconds": 300,
+        }
+        spec = FaultSpec.from_dict(legacy)
+        assert spec is not None
+        assert "timeout" not in spec.params
+        assert spec.params == {"percent": "80"}
+        assert spec.duration_seconds == 300
 
     def test_to_dict_uses_list_not_tuple(self):
         # Tuples don't serialise to JSON; consumers must see lists.
@@ -664,7 +849,7 @@ class TestToIntentDict:
             "params_flags": [],
             "duration_seconds": 0,
             "user_description": "",
-            "use_case_name": "",
+            "case_resource_path": "",
             "revision": 0,
             "objective": "",
             "boundaries": [],
@@ -682,39 +867,58 @@ class TestToIntentDict:
         assert d["user_description"] == "x"
 
 
-class TestUseCaseName:
-    """use_case_name: user-chosen skill case carried from intent to planning."""
+class TestCaseResourcePath:
+    """case_resource_path: case file settled in the intent dialogue.
 
-    def test_from_intent_args_picks_up_use_case_name(self):
+    Relative to the skill directory (what ``read_skill_resource``
+    consumes); carried first-hand from ``submit_fault_intent`` to
+    planning, never derived downstream."""
+
+    _PATH = (
+        "references/catalogue/Pod_ContainerCreating/"
+        "Pod_ContainerCreating_无效挂载选项注入.md"
+    )
+
+    def test_from_intent_args_picks_up_case_resource_path(self):
         spec = FaultSpec.from_intent_args({
             "scope": "pod", "target": "volume", "action": "patch",
             "namespace": "ns", "names": ["p1"],
-            "use_case_name": "Pod_ContainerCreating_无效挂载选项注入",
+            "case_resource_path": self._PATH,
         })
-        assert spec.use_case_name == "Pod_ContainerCreating_无效挂载选项注入"
+        assert spec.case_resource_path == self._PATH
 
     def test_from_intent_args_defaults_empty_when_absent(self):
         spec = FaultSpec.from_intent_args({
             "scope": "pod", "target": "cpu", "action": "fullload",
             "namespace": "ns",
         })
-        assert spec.use_case_name == ""
+        assert spec.case_resource_path == ""
 
     def test_from_intent_args_inherits_from_existing(self):
-        existing = FaultSpec(use_case_name="case-A", scope="pod", namespace="ns")
+        existing = FaultSpec(case_resource_path="case-A.md", scope="pod", namespace="ns")
         spec = FaultSpec.from_intent_args({"scope": "pod"}, existing=existing)
-        assert spec.use_case_name == "case-A"
+        assert spec.case_resource_path == "case-A.md"
 
     def test_dict_round_trip(self):
-        spec = FaultSpec(scope="pod", namespace="ns", use_case_name="case-B")
+        spec = FaultSpec(scope="pod", namespace="ns", case_resource_path="case-B.md")
         rebuilt = FaultSpec.from_dict(spec.to_dict())
         assert rebuilt is not None
-        assert rebuilt.use_case_name == "case-B"
+        assert rebuilt.case_resource_path == "case-B.md"
         assert rebuilt == spec
 
-    def test_contract_change_when_use_case_differs(self):
-        base = FaultSpec(scope="pod", namespace="ns", use_case_name="case-A")
-        other = FaultSpec(scope="pod", namespace="ns", use_case_name="case-B")
+    def test_legacy_use_case_name_key_ignored_on_hydration(self):
+        # Retired field persisted by old checkpoints must not crash
+        # hydration and must not leak into the new spec shape.
+        spec = FaultSpec.from_dict({
+            "scope": "pod", "namespace": "ns",
+            "use_case_name": "legacy-case",
+        })
+        assert spec is not None
+        assert spec.case_resource_path == ""
+
+    def test_contract_change_when_case_path_differs(self):
+        base = FaultSpec(scope="pod", namespace="ns", case_resource_path="case-A.md")
+        other = FaultSpec(scope="pod", namespace="ns", case_resource_path="case-B.md")
         assert base.contract_dict() != other.contract_dict()
 
 
@@ -808,7 +1012,7 @@ class TestLegacyFaultSpecProjection:
             "duration_seconds": 60,
             "source": "test_legacy",
             "user_description": "",
-            "use_case_name": "",
+            "case_resource_path": "",
             "revision": 0,
             "objective": "",
             "boundaries": [],

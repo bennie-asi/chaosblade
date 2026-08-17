@@ -83,6 +83,9 @@ from chaos_agent.agent.prompts.sections.verification import (
 from chaos_agent.agent.prompts.sections.workflow import (
     get_verification_heuristics_compact_section,
 )
+from chaos_agent.agent.prompts.sections.case_reference import (
+    get_case_reference_note,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +214,6 @@ def build_inject_system_prompt(
         ("guidelines", get_guidelines_section(include_method_switching=False, phase=1), "context"),
         ("environment_profile", _environment_prompt_fragment(profile, "plan"), "context"),
         ("provider_identity", _provider_prompt_fragment(profile, "identity"), "context"),
-        ("remember", get_remember_section(), "invariant"),
         ("cache_boundary", CACHE_BOUNDARY.strip(), "contract"),
     ]
     if kwargs.get("env_info"):
@@ -231,6 +233,19 @@ def build_inject_system_prompt(
                 "fault type, call `propose_plan_change` with that revision and a "
                 "full `proposed_fault`."
             )
+            # Reference-not-directive handoff: the case file the intent
+            # dialogue settled on (when surfaced) saves planning a locating
+            # round, but the final case selection stays planning's own
+            # decision on runtime evidence — same semantics as the FaultSpec
+            # target fields (hints to verify, not orders). The path travels
+            # on the spec itself (``case_resource_path``), first-hand from
+            # the dialogue — never derived downstream. Canonical wording
+            # lives in the single source (``case_reference``); with no path
+            # settled it yields "" so the note can never promise a file
+            # that does not exist.
+            _case_note = get_case_reference_note(spec.case_resource_path)
+            if _case_note:
+                _case_note += "\n\n"
             sections.append((
                 "fault_contract",
                 "## Reviewed FaultSpec\n"
@@ -238,11 +253,7 @@ def build_inject_system_prompt(
                 "evidence may correct implementation details, but it must not silently "
                 "change the outcome. A material change must go through the plan-change "
                 "confirmation path.\n\n"
-                "If `use_case_name` is set, it is the skill use case the user chose "
-                "during the intent dialogue: read that case first and anchor planning "
-                "on it. Runtime evidence may still prove it unviable in this "
-                "environment — then surface the finding and request a replan instead "
-                "of silently switching to another case.\n\n"
+                + _case_note
                 + str(spec.to_intent_dict())
                 + declaration,
                 "contract",
@@ -263,6 +274,16 @@ def build_inject_system_prompt(
     _ledger_section = kwargs.get("progress_ledger_section") or ""
     if _ledger_section:
         sections.append(("progress_ledger", _ledger_section, "contract"))
+
+    # U-shaped attention: REMEMBER last, AFTER every dynamic section. The
+    # original section list carried it above cache_boundary, so the
+    # ever-present fault contract (plus replan context / runtime env /
+    # ledger) pushed it out of the recency zone on the most common Phase 1
+    # paths — the docstring contract of the sibling builders ("REMEMBER at
+    # END") silently did not hold here. Same layout as the intent builder:
+    # stable prefix above the boundary stays cache-intact, and the recency
+    # anchor now sits adjacent to the Reviewed FaultSpec rule it reinforces.
+    sections.append(("remember", get_remember_section(), "invariant"))
 
     return _assemble(PromptMode.FULL, sections)
 

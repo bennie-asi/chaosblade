@@ -76,13 +76,13 @@ def _schema_tokens(tool) -> int:
 # the only enumeration of valid values, none of which may be dropped
 # (slimming-plan hard constraint: "A 类一条不删").
 _CAPS: dict[str, tuple[object, int]] = {
-    "kubectl": (kubectl, 650),                      # class-A floor (~593 qwen); +shell-quoting MUST (task-190c94e8)
-    "kubectl_read": (kubectl_read, 580),            # class-A floor (~552 qwen); +shell-quoting MUST (task-190c94e8)
+    "kubectl": (kubectl, 695),                      # class-A floor (~593 qwen); +shell-quoting MUST (task-190c94e8); +one-shot debug 120s cap / systemd-run carrier (inject-59b289a6: 300s loop hosted in a one-shot debug pod was killed at the 120s cap, fragmenting the fault window + ~150s re-arm)
+    "kubectl_read": (kubectl_read, 615),            # class-A floor (~552 qwen); +shell-quoting MUST (task-190c94e8); +exec single-command constraint (c157857 real-rejection-rework drift); +jsonpath whole-template quoting (inject-774ecd39: unquoted template word-split remotely, error invisible)
     "blade_python_create": (blade_python_create, 605),  # class-A floor (~592)
     "blade_python_prepare": (blade_python_prepare, 500),
     "blade_python_revoke": (blade_python_revoke, 375),
-    "submit_fault_intent": (submit_fault_intent, 705),  # class-A floor (~586) + dynamic INTENT_* enums; +use_case_name incident fix (sess_47ee34902167); +intent-accuracy provenance contract (probe trail / template-not-data)
-    "submit_batch_intent": (submit_batch_intent, 380),
+    "submit_fault_intent": (submit_fault_intent, 750),  # class-A floor (~586) + dynamic INTENT_* enums; +case hint param (case_resource_path); +intent-accuracy provenance contract (probe trail / template-not-data); +one-line duration contract (duration_seconds channel)
+    "submit_batch_intent": (submit_batch_intent, 395),  # +one-line duration contract (duration_seconds channel)
     "submit_verification": (submit_verification, 495),
     "submit_recover_verification": (submit_recover_verification, 400),
     "blade_create": (blade_create, 610),            # class-A floor (~597)
@@ -96,7 +96,7 @@ _CAPS: dict[str, tuple[object, int]] = {
     "read_knowledge_resource": (read_knowledge_resource, 440),
     "time_wait": (time_wait, 225),
     "query_active_experiments": (query_active_experiments, 220),
-    "recover_task": (recover_task, 230),
+    "recover_task": (recover_task, 235),  # +task_id multi-format example (461398b)
     "update_progress": (update_progress, 365),
 }
 
@@ -111,9 +111,11 @@ _SECTIONS = (
     "Constraints",
 )
 
-# Total budget across all tracked schemas (current ~9390). If this trips,
+# Total budget across all tracked schemas (current ~9690). If this trips,
 # the growth is aggregate drift — find the culprit via the per-tool caps.
-_TOTAL_CAP = 9600
+# 9795 = 9750 + 45: single class-A raise for the kubectl one-shot debug
+# 120s cap constraint (inject-59b289a6), approved by budget owner.
+_TOTAL_CAP = 9795
 
 
 class TestToolDescriptionBudget:

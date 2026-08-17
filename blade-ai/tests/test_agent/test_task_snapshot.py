@@ -179,7 +179,7 @@ def test_task_snapshot_builds_fault_spec_from_merged_context():
         "duration_seconds": 0,
         "source": "task_snapshot_rebuild",
         "user_description": "",
-        "use_case_name": "",
+        "case_resource_path": "",
         "revision": 0,
         "objective": "",
         "boundaries": [],

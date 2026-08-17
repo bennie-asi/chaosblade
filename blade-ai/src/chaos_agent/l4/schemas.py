@@ -190,11 +190,11 @@ _FAULT_INTENT_SCHEMA: dict = {
         "params": {"type": "object", "additionalProperties": {"type": "string"}},
         "duration": {"type": "integer", "description": "seconds"},
         "user_description": {"type": "string"},
-        "use_case_name": {
+        "case_resource_path": {
             "type": "string",
             "description": (
-                "Skill use case chosen during intent dialogue; empty when "
-                "no case was chosen."
+                "Skill case file (relative to the skill directory) chosen "
+                "during intent dialogue; empty when no case was chosen."
             ),
         },
     },

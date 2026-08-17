@@ -16,12 +16,14 @@ from langgraph.types import interrupt
 
 from chaos_agent.agent.nodes.execute.execute_loop import reset_attribution_state
 from chaos_agent.agent.nodes.store._store_sync import sync_node_status_to_session, sync_to_store
+from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.result.verdict import FailureCategory
 from chaos_agent.config.settings import settings
 from chaos_agent.agent.spec.fault_spec import (
     FaultSpec,
     is_full_fault_spec_proposal,
     read_fault_spec,
+    strip_timeout_alias,
 )
 from chaos_agent.agent.state import AgentState
 from chaos_agent.agent.state_mgmt.state_helpers import fail_state
@@ -60,7 +62,9 @@ def _extract_proposal(state: AgentState, current: FaultSpec) -> tuple[str, Fault
                 revision = int(args.get("fault_revision"))
             except (TypeError, ValueError):
                 return None
-            candidate = FaultSpec.from_intent_args(raw, existing=current)
+            candidate = FaultSpec.from_intent_args(
+                strip_timeout_alias(raw), existing=current,
+            )
             if not candidate.is_complete:
                 return None
             reason = str(args.get("reason") or "").strip()
@@ -115,14 +119,14 @@ async def plan_change_confirm(state: AgentState) -> dict:
     reason, candidate, submitted_revision = proposal
     if submitted_revision != current.revision:
         return {
-            "messages": [HumanMessage(content=(
+            "messages": [HumanMessage(content=wrap_system_reminder(
                 "[PLAN CHANGE RETRY] The proposal referenced a stale FaultSpec revision. "
                 "Read the current reviewed contract and propose a complete replacement."
             ))],
         }
     if candidate.contract_dict() == current.contract_dict():
         return {
-            "messages": [HumanMessage(content=(
+            "messages": [HumanMessage(content=wrap_system_reminder(
                 "[PLAN CHANGE RETRY] The proposal does not change the reviewed FaultSpec. "
                 "Continue planning or finish with the current contract."
             ))],
@@ -139,7 +143,7 @@ async def plan_change_confirm(state: AgentState) -> dict:
         else:
             result = {
                 "plan_change_reject_count": rejected_count,
-                "messages": [HumanMessage(content=(
+                "messages": [HumanMessage(content=wrap_system_reminder(
                     "[PLAN CHANGE REJECTED] CLI mode does not support interactive plan changes. "
                     "Continue with the reviewed FaultSpec or finish_planning(rejected=True)."
                 ))],
@@ -163,7 +167,7 @@ async def plan_change_confirm(state: AgentState) -> dict:
         else:
             result = {
                 "plan_change_reject_count": rejected_count,
-                "messages": [HumanMessage(content=(
+                "messages": [HumanMessage(content=wrap_system_reminder(
                     "[PLAN CHANGE REJECTED] The user declined the replacement. Continue with the "
                     "reviewed FaultSpec, try a different proposal, or finish_planning(rejected=True)."
                 ))],
@@ -202,7 +206,7 @@ async def plan_change_confirm(state: AgentState) -> dict:
         # replan). New contract == new budget, same as the message promises.
         "replan_count": 0,
         "verify_replan_count": 0,
-        "messages": [HumanMessage(content=(
+        "messages": [HumanMessage(content=wrap_system_reminder(
             f"[PLAN CHANGE APPROVED] FaultSpec revision {approved.revision} is now authoritative: "
             f"{approved.fault_type}. Re-evaluate feasibility, choose a matching skill, and build "
             "a fresh plan. Do not reuse evidence or execution assumptions from the old contract. "

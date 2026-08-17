@@ -9,8 +9,20 @@ Covers:
 from chaos_agent.agent.prompts.builders import (
     build_execute_system_prompt,
     build_inject_system_prompt,
+    build_intent_clarification_prompt,
+    build_plan_builder_prompt,
+    build_verifier_prompt,
 )
 from chaos_agent.agent.prompts.constants import CACHE_BOUNDARY
+from chaos_agent.agent.prompts.sections import (
+    get_executor_remember_section,
+    get_intent_reminder_section,
+    get_remember_section,
+    get_verifier_remember_section,
+)
+from chaos_agent.agent.prompts.sections.plan_builder import (
+    get_plan_builder_critical_rules_reminder_section,
+)
 
 
 class TestInjectInputIsNlKwarg:
@@ -52,6 +64,124 @@ class TestInjectCacheBoundary:
         boundary_idx = prompt.index(CACHE_BOUNDARY.strip())
         env_idx = prompt.index("## Environment")
         assert env_idx > boundary_idx
+
+
+class TestInjectRememberRecency:
+    """U-shaped attention: REMEMBER must occupy the true end of the Phase 1
+    prompt — AFTER every dynamic section, not just above the cache boundary.
+
+    Regression: remember used to sit in the stable section list, so the
+    ever-present fault contract (plus replan context / runtime env / ledger)
+    pushed it out of the recency zone on the most common Phase 1 paths,
+    while the sibling builders' docstrings claimed "REMEMBER at END" for it.
+    """
+
+    def test_remember_trails_all_dynamic_sections(self):
+        prompt = build_inject_system_prompt(
+            skill_catalog="x",
+            env_info={"blade_version": "1.7.0"},
+            fault_spec={
+                "scope": "pod", "blade_target": "cpu", "blade_action": "fullload",
+                "namespace": "demo", "names": ["p0"], "params": {},
+            },
+            replan_context={"error": "boom", "failed_node": "execute_loop"},
+        )
+        remember_idx = prompt.index("# REMEMBER")
+        for dynamic_marker in (
+            CACHE_BOUNDARY.strip(),
+            "## Environment",
+            "Reviewed FaultSpec",
+            "Planning Contract Declaration",
+        ):
+            assert remember_idx > prompt.index(dynamic_marker), (
+                f"# REMEMBER must come after {dynamic_marker!r} so the "
+                "recency anchor is never displaced by dynamic content"
+            )
+        # And nothing at all may follow it.
+        assert remember_idx == prompt.rindex("# REMEMBER")
+        assert "# REMEMBER" in prompt[-4000:]
+
+    def test_remember_still_last_without_dynamic_sections(self):
+        prompt = build_inject_system_prompt(skill_catalog="x")
+        assert prompt.rstrip().endswith(
+            get_remember_section().strip()
+        ) or "# REMEMBER" in prompt[-3000:]
+
+
+class TestSiblingBuildersRememberRecency:
+    """Machine-enforce the "REMEMBER at END" docstring contract for the
+    sibling builders.
+
+    The inject-builder regression (remember pushed out of the recency zone
+    by dynamic sections appended after it) survived because this contract
+    was only a docstring claim. These guards pin it down for the builders
+    that currently hold it — execute, verifier, intent, plan_builder — on
+    their MAXIMAL dynamic paths, which are the ones where a future
+    late-appended section would silently displace the anchor.
+    """
+
+    LEDGER = "## Progress Ledger\n- b-anchor: plan X\n- log: step1 done"
+
+    def test_execute_remember_trails_all_dynamic_sections(self):
+        prompt = build_execute_system_prompt(
+            skill_catalog="x",
+            skill_name="k8s-fault",
+            plan="the approved plan body",
+            plan_path="/tmp/plan.json",
+            structured_params_hint="scope=pod, target=cpu, action=fullload",
+            user_params_hint='{"percent": 80}',
+            env_info={"blade_version": "1.7.0"},
+            progress_ledger_section=self.LEDGER,
+        )
+        remember_idx = prompt.index("# REMEMBER")
+        for dynamic_marker in (
+            "## Environment",
+            "the approved plan body",
+            "## EXECUTION PHASE DIRECTIVES",
+            "## Progress Ledger",
+        ):
+            assert remember_idx > prompt.index(dynamic_marker), (
+                f"# REMEMBER must come after {dynamic_marker!r}"
+            )
+        assert remember_idx == prompt.rindex("# REMEMBER")
+        assert prompt.rstrip().endswith(get_executor_remember_section().strip())
+
+    def test_verifier_remember_trails_ledger(self):
+        prompt = build_verifier_prompt(progress_ledger_section=self.LEDGER)
+        remember_idx = prompt.index("# REMEMBER")
+        assert remember_idx > prompt.index("## Progress Ledger")
+        assert remember_idx == prompt.rindex("# REMEMBER")
+        assert prompt.rstrip().endswith(get_verifier_remember_section().strip())
+
+    def test_intent_remember_trails_dynamic_completeness(self):
+        prompt = build_intent_clarification_prompt(
+            fault_spec={"scope": "pod", "blade_target": "cpu"},
+            skill_catalog="x",
+        )
+        remember_idx = prompt.index("# REMEMBER")
+        # The reviewed-contract snapshot is the dynamic section appended
+        # after the cache boundary — the anchor must still trail it.
+        assert remember_idx > prompt.index('"scope": "pod"')
+        assert remember_idx > prompt.index(CACHE_BOUNDARY.strip())
+        assert remember_idx == prompt.rindex("# REMEMBER")
+        assert prompt.rstrip().endswith(get_intent_reminder_section().strip())
+
+    def test_plan_builder_reminder_trails_progress(self):
+        prompt = build_plan_builder_prompt(
+            collected_faults=[
+                {"scope": "pod", "target": "cpu", "action": "fullload"},
+            ],
+            skill_catalog="x",
+        )
+        reminder_idx = prompt.index("## Reminder")
+        assert reminder_idx > prompt.index(
+            "## Collected Parameters (confirmed by user)"
+        )
+        assert reminder_idx > prompt.index(CACHE_BOUNDARY.strip())
+        assert reminder_idx == prompt.rindex("## Reminder")
+        assert prompt.rstrip().endswith(
+            get_plan_builder_critical_rules_reminder_section().strip()
+        )
 
 
 class TestInjectSlimmedSections:
@@ -137,3 +267,68 @@ class TestExecuteSlimmedSections:
     def test_keeps_execution_directives(self):
         prompt = build_execute_system_prompt(skill_catalog="x")
         assert "EXECUTION PHASE DIRECTIVES" in prompt
+
+
+class TestCaseHandoffReferenceSemantics:
+    """The intent dialogue's case pick reaches Phase 1 as a REFERENCE, not
+    a directive (user design principle: card approval ≠ careful review, so
+    the pick is usually the intent node's own — planning must keep full
+    authority over the final case selection, exactly as it independently
+    verifies the FaultSpec target).
+
+    Freezes the two-sided fix:
+    * the old binding wording ("read that case first and anchor planning",
+      "instead of silently switching") is gone — it contradicted the
+      reference semantics;
+    * the case file path, carried first-hand on ``FaultSpec.
+      case_resource_path`` (relative to the skill directory), is surfaced
+      so planning can read the case directly instead of browsing the
+      skill's resources to locate it.
+    """
+
+    _CASE_PATH = (
+        "references/catalogue/Node_内存使用率过高/"
+        "Node_内存使用率过高_异常进程占用.md"
+    )
+
+    _SPEC = {
+        "scope": "node", "blade_target": "mem", "blade_action": "load",
+        "case_resource_path": _CASE_PATH,
+    }
+
+    def test_case_pick_worded_as_reference(self):
+        prompt = build_inject_system_prompt(
+            skill_catalog="x", fault_spec=dict(self._SPEC),
+        )
+        assert "a reference, not a directive" in prompt
+        assert "the final case selection is yours" in prompt
+        # The fallback path is signposted: a case that turns out wrong must
+        # send planning back to browsing the skill, not into a dead end.
+        # Canonical wording comes from the single source (case_reference).
+        assert "browse the active skill with `read_skill_resource`" in prompt
+        assert "note the reason in your plan" in prompt
+        # Binding-era wording must not survive anywhere in the prompt.
+        assert "read that case first and anchor planning" not in prompt
+        assert "silently switching to another case" not in prompt
+
+    def test_case_path_surfaced_from_spec(self):
+        prompt = build_inject_system_prompt(
+            skill_catalog="x", fault_spec=dict(self._SPEC),
+        )
+        # The path rides on the spec dump and the canonical note fires.
+        assert self._CASE_PATH in prompt
+        assert "exactly what `read_skill_resource` consumes" in prompt
+
+    def test_no_case_pick_note_without_case_path(self):
+        # No case settled in the dialogue → the whole case-pick note is
+        # absent; telling planning to "start from it" with no path at all
+        # would be self-contradictory.
+        spec = dict(self._SPEC)
+        spec["case_resource_path"] = ""
+        prompt = build_inject_system_prompt(
+            skill_catalog="x", fault_spec=spec,
+        )
+        assert "a reference, not a directive" not in prompt
+        assert "Start from it" not in prompt
+        assert "exactly what `read_skill_resource` consumes" not in prompt
+        assert "browse the active skill" not in prompt

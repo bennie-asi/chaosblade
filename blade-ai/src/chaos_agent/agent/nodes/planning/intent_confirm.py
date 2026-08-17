@@ -42,6 +42,10 @@ def _format_intent_summary(fault_intent: dict) -> str:
     parts.append(f"Target: {fault_intent.get('target', 'unknown')}")
     parts.append(f"Action: {fault_intent.get('action', 'unknown')}")
     parts.append(f"Namespace: {fault_intent.get('namespace', 'unknown')}")
+    # Always rendered — every fault injection is bounded in time, and the
+    # user must see the applied duration (user-stated or system recommended)
+    # before approving.
+    parts.append(f"Duration: {fault_intent.get('duration_seconds', 0)}s")
     if fault_intent.get("labels"):
         parts.append(f"Label selector: {fault_intent['labels']}")
     if fault_intent.get("names"):
@@ -211,10 +215,12 @@ async def intent_confirm(state: AgentState) -> dict:
     #                                surfaces it on low-confidence
     #                                turns so the user can audit
     #                                "why did the agent pick this?".
-    #   · ``clarification_round`` — N>0 means we've already asked the
-    #                                user once for clarification; UI
-    #                                can show "round N of N" so the
-    #                                user knows we're iterating.
+    #   · ``clarification_round`` — how many user turns were spent
+    #                                clarifying the intent before submission:
+    #                                every fresh turn after the opening
+    #                                counts one, a pure confirmation is
+    #                                refunded (0 = one-shot convergence). The
+    #                                TUI renders this field only when N>0.
     batch_args = state.get("batch_submit_args")
     if batch_args and isinstance(batch_args, dict) and batch_args.get("faults"):
         batch_faults = batch_args["faults"]
@@ -228,9 +234,10 @@ async def intent_confirm(state: AgentState) -> dict:
             action = item_spec.blade_action if item_spec else f.get("action", "")
             namespace = item_spec.namespace if item_spec else f.get("namespace", "")
             names = list(item_spec.names) if item_spec else f.get("names", [])
+            duration = item_spec.duration_seconds if item_spec else f.get("duration_seconds", 0)
             batch_lines.append(
                 f"  {i}. {scope}-{target}-{action} "
-                f"@ {namespace}/{', '.join(names) or '*'}"
+                f"@ {namespace}/{', '.join(names) or '*'} ({duration}s)"
             )
         summary = "\n".join(batch_lines)
     else:

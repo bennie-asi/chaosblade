@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage
 
 from chaos_agent.agent.spec.fault_spec import FaultSpec, read_fault_spec
 from chaos_agent.agent.state import AgentState
-from chaos_agent.utils.fault_type import build_blade_create_args, ensure_min_duration
+from chaos_agent.utils.fault_type import build_blade_create_args
 
 
 def generate_injection_plan(state: AgentState) -> str:
@@ -71,6 +71,9 @@ def _section_inject_command(spec: FaultSpec, state: AgentState) -> str:
         kubeconfig=kubeconfig,
         params=dict(spec.params) if spec.params else None,
         params_flags=list(spec.params_flags) if spec.params_flags else None,
+        # Preview must match what actually executes: duration translates to
+        # the single --timeout flag (params never carry it under the contract).
+        duration=spec.duration_seconds,
     )
 
     # Format as human-readable command
@@ -199,21 +202,12 @@ def _section_safety_assessment(state: AgentState) -> str:
 
 
 def _section_timing(spec: FaultSpec) -> str:
-    timeout_str = spec.params.get("timeout", "")
-    if not timeout_str and spec.scope and spec.blade_target and spec.blade_action:
-        timeout_val = ensure_min_duration(
-            None, spec.scope, spec.blade_target, spec.blade_action
-        )
-        timeout_str = str(timeout_val)
-
-    if not timeout_str:
+    # ``duration_seconds`` is the single source of truth for fault duration
+    # (params never carry ``timeout`` under the current contract).
+    if spec.duration_seconds <= 0:
         return ""
 
-    try:
-        timeout_s = int(timeout_str)
-    except (ValueError, TypeError):
-        return f"## Timing\n\n- Injection duration: {timeout_str}"
-
+    timeout_s = spec.duration_seconds
     minutes = timeout_s // 60
     total_est = minutes + 2  # baseline + verification overhead
     return (

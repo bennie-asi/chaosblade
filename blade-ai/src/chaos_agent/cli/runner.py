@@ -14,7 +14,7 @@ from typing import Optional
 
 from chaos_agent import __version__
 from chaos_agent.agent.factory import create_agent
-from chaos_agent.agent.spec.fault_spec import FaultSpec
+from chaos_agent.agent.spec.fault_spec import DurationParamError, FaultSpec
 from chaos_agent.agent.result.operation_summary import build_operation_record
 from chaos_agent.agent.state_mgmt.state_builders import build_inject_initial_state
 from chaos_agent.agent.streaming import StreamEvent, parse_stream_events
@@ -226,10 +226,16 @@ class AgentRunner:
         _ts = now_iso()
         _interaction_mode = kwargs.get("interaction_mode", "cli")
         _dry_run = bool(kwargs.get("dry_run", False))
-        if kwargs.get("input"):
-            spec = FaultSpec.from_cli_nl(input_text=kwargs["input"], kwargs=kwargs)
-        else:
-            spec = FaultSpec.from_cli_structured(kwargs)
+        try:
+            if kwargs.get("input"):
+                spec = FaultSpec.from_cli_nl(input_text=kwargs["input"], kwargs=kwargs)
+            else:
+                spec = FaultSpec.from_cli_structured(kwargs)
+        except DurationParamError as e:
+            # Duration contract violation is a client input error — surface
+            # the actionable guidance instead of letting the traceback leak.
+            yield StreamEvent(type="error", content=str(e), task_id=task_id)
+            return
         initial_state = build_inject_initial_state(
             task_id=task_id,
             tui_session_id=tui_session_id,
@@ -533,10 +539,18 @@ class AgentRunner:
         # Same single-source-of-truth pattern as inject_stream: FaultSpec
         # only, no legacy scattered fields.
         _ts2 = now_iso()
-        if kwargs.get("input"):
-            spec = FaultSpec.from_cli_nl(input_text=kwargs["input"], kwargs=kwargs)
-        else:
-            spec = FaultSpec.from_cli_structured(kwargs)
+        try:
+            if kwargs.get("input"):
+                spec = FaultSpec.from_cli_nl(input_text=kwargs["input"], kwargs=kwargs)
+            else:
+                spec = FaultSpec.from_cli_structured(kwargs)
+        except DurationParamError as e:
+            # Duration contract violation is a client input error — return an
+            # actionable envelope instead of letting the traceback leak.
+            return JSONEnvelope.fail(
+                code=ResponseCode.INVALID_PARAMS,
+                message=str(e),
+            )
         initial_state = build_inject_initial_state(
             task_id=task_id,
             tui_session_id=tui_session_id,
@@ -1513,9 +1527,22 @@ class AgentRunner:
             lambda: {"category": "", "description": "", "faults": []}
         )
 
-        # Create a lightweight LLM instance for catalog generation
-        from chaos_agent.agent.factory import make_llm
-        llm = make_llm(temperature=0.3, max_retries=2, read_timeout=60)
+        # Create a lightweight LLM instance for catalog generation.
+        # enable_thinking=False: single-shot structured catalog output —
+        # reasoning tokens only add latency (same rationale as
+        # capabilities_cmd; bench_thinking.py) — but only for models
+        # strong enough to absorb the disable (>= 1M window); weak
+        # models keep thinking ON (factory.aux_calls_can_skip_thinking).
+        from chaos_agent.agent.factory import (
+            aux_calls_can_skip_thinking,
+            make_llm,
+        )
+        llm = make_llm(
+            temperature=0.3,
+            max_retries=2,
+            read_timeout=60,
+            enable_thinking=False if aux_calls_can_skip_thinking() else None,
+        )
 
         for name, meta in self._registry.metadata.items():
             if params.get("category") and meta.category != params["category"]:

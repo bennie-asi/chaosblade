@@ -63,7 +63,7 @@ def get_skill_index_section(skill_catalog: str) -> str:
         lines.extend(entries)
 
     lines.append("")
-    lines.append("Call `activate_skill(skill_name)` to load full instructions and use-case catalogue.")
+    lines.append("Call `activate_skill(skill_name)` to load full instructions and use-case resources.")
     return "\n".join(lines)
 
 

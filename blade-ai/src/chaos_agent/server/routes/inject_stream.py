@@ -7,7 +7,7 @@ import logging
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
-from chaos_agent.agent.spec.fault_spec import FaultSpec
+from chaos_agent.agent.spec.fault_spec import DurationParamError, FaultSpec
 from chaos_agent.agent.state_mgmt.state_builders import build_inject_initial_state
 from chaos_agent.agent.streaming import SSEBatcher, StreamEvent, parse_stream_event
 from chaos_agent.config.settings import settings
@@ -66,7 +66,16 @@ async def inject_stream(request: InjectRequest, req: Request):
         settings.kube_context = request.context
 
     # Build initial state — FaultSpec is the single source of truth.
-    spec = FaultSpec.from_http_request(request)
+    try:
+        spec = FaultSpec.from_http_request(request)
+    except DurationParamError as e:
+        # Duration contract violation is a client input error — emit one SSE
+        # error event instead of an unhandled 500 mid-stream setup.
+        return StreamingResponse(
+            iter([StreamEvent(type="error", content=str(e), task_id=task_id).to_sse()]),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        )
     initial_state = build_inject_initial_state(
         task_id=task_id,
         fault_spec=spec,
