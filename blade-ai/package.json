@@ -1,0 +1,24 @@
+{
+  "name": "blade-ai-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Blade-AI JS workspace root (tui / web; Python backend in src/).",
+  "type": "module",
+  "workspaces": [
+    "core",
+    "tui",
+    "web"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "test": "npm test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "postinstall": "patch-package --patch-dir tui/patches"
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.1"
+  }
+}

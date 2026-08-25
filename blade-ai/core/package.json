@@ -1,0 +1,26 @@
+{
+  "name": "@blade-ai/core",
+  "version": "0.7.0",
+  "description": "Shared core for Blade-AI frontends (tui/ and web/): SSE client, stream-event protocol, reducer/state store, slash-command registry, i18n. Zero Node.js-only dependencies — browser-safe.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "react": "^19.2.5",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "peerDependencies": {
+    "react": ">=19.0.0"
+  }
+}
