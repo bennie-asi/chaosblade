@@ -73,6 +73,15 @@ datas = [
     # directory tree (which can hit the user's home ``package.json``
     # in a PyInstaller bundle and trigger ``MODULE_TYPELESS_PACKAGE_JSON``).
     ('tui/dist/package.json', 'chaos_agent/_tui_assets'),
+    # The Web UI bundle (Vite output). CI's build-tui job produces this
+    # alongside the TUI bundle; for local builds run
+    # ``cd web && npm install && npm run build`` once first.
+    # Missing → PyInstaller errors at Analysis time — same fail-loud
+    # contract as the TUI bundle, since ``blade-ai web`` is a shipped
+    # surface of the standalone binary. At runtime
+    # chaos_agent.server.web.resolve_web_dist() resolves it from
+    # ``sys._MEIPASS/chaos_agent/_web_assets`` and mounts it at "/".
+    ('web/dist', 'chaos_agent/_web_assets'),
 ]
 
 # chaosblade tool — per platform. Skip on Windows (no upstream build).
