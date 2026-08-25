@@ -20,6 +20,31 @@ from chaos_agent.agent.dispatch import dispatch_node_message
 logger = logging.getLogger(__name__)
 
 
+def _persist_conclusion(task_id: str, message: str, detail: dict) -> None:
+    """Persist the conflict-check conclusion into the task record.
+
+    ``dispatch_node_message`` is TUI-stream-only and tracker state is not
+    exported to the task JSON — without this, the check's outcome left
+    no trace in the task file and post-hoc forensics could only
+    reconstruct it from behavioral signatures (inject-0db61248 analysis:
+    the tier-2 undeterminable note was provably emitted but nowhere to
+    be found in the persisted record). ``sync_node_status_to_session``
+    only reads ``task_id`` from its state argument, which this module
+    already holds, so conclusions can be persisted at the same place
+    they are computed — same source of truth as tracker/dispatch, no
+    drift possible. Fire-and-forget, never raises.
+    """
+    try:
+        from chaos_agent.agent.nodes.store._store_sync import (
+            sync_node_status_to_session,
+        )
+        sync_node_status_to_session(
+            {"task_id": task_id}, "conflict-check", message, detail,
+        )
+    except Exception:
+        logger.debug("conflict-check conclusion persistence failed", exc_info=True)
+
+
 @dataclass
 class ConflictInfo:
     """Structured conflict information with target overlap analysis."""
@@ -33,6 +58,12 @@ class ConflictInfo:
     same_action_as_request: bool = False  # True when action matches current request (P1 escalation)
     overlaps_target: bool = False  # whether this experiment overlaps the current target
     overlap_reason: str = ""       # human-readable reason for overlap
+    # True when the Flag carries no --namespace (cri scope targets a
+    # container-id, node scope a node name — neither lives in a namespace)
+    # or when the blade status output was not parseable at all. Overlap
+    # with the current target CANNOT be determined for these; they are
+    # reported in details (weak note) but never treated as conflicts.
+    undeterminable: bool = False
 
 
 def _extract_param_from_flag(flag: str, param_name: str) -> str:
@@ -147,10 +178,27 @@ async def check_blade_conflicts(
 ) -> tuple[list[str], list[ConflictInfo]]:
     """Best-effort check for active ChaosBlade experiments on the cluster.
 
-    Optionally filters results by namespace and/or labels when the
-    blade status output is JSON (ChaosBlade >= 1.0).  Falls back to
-    returning all detected UIDs when JSON parsing fails or no filter
-    criteria are provided.
+    Three-tier isolation semantics (destroyed/Revoked always excluded):
+
+    1. PROVABLY UNRELATED — experiment in a KNOWN namespace different
+       from the target's (pod-scope, both namespaces known): silently
+       skipped. This preserves the isolation intent of the original
+       namespace filter: shared clusters must not surface other teams'
+       experiments as conflicts on every injection.
+    2. UNDETERMINABLE — Flag carries no --namespace (cri scope targets
+       a container-id, node scope a node name — node faults hit every
+       namespace on that node, yet carry no ns to compare): kept in
+       conflict_details with undeterminable=True but NEVER in uids, so
+       the caller reports a weak note, not a "consider destroying"
+       warning. Dropping this tier entirely is how the original bug
+       reported "no active experiments" on a cluster with 4 recorded
+       experiments, one of them a live cri mem-load (inject-17617837
+       forensics, verified live).
+    3. CONFLICT CANDIDATE — same namespace (or unknown target ns):
+       appended to uids and run through overlap analysis.
+
+    Falls back to regex UID extraction when JSON parsing fails; those
+    UIDs are undeterminable (no Flag to analyze) and follow tier 2.
 
     When target_names is provided, also analyzes whether any active
     experiment targets the same resource (exact name or label overlap
@@ -201,12 +249,14 @@ async def check_blade_conflicts(
         # Step 1: Discover running tool pods (all-namespaces, multiple label candidates)
         pods_with_ns = await discover_tool_pods_cluster_wide(kubeconfig, task_id)
         if not pods_with_ns:
+            _msg = "Pre-injection conflict check: no tool pods found (skipped)"
             if tracker:
                 tracker.complete(
-                    "Pre-injection conflict check: no tool pods found (skipped)",
+                    _msg,
                     {"step": "conflict_check", "status": "skipped", "reason": "no_tool_pods"},
                 )
-            await dispatch_node_message("conflict-check", "Pre-injection conflict check: no tool pods found (skipped)\n\n")
+            await dispatch_node_message("conflict-check", f"{_msg}\n\n")
+            _persist_conclusion(task_id, _msg, {"step": "conflict_check", "status": "skipped", "reason": "no_tool_pods"})
             return ([], [])
 
         # Step 2: Run blade status --type create in the first available pod.
@@ -221,6 +271,29 @@ async def check_blade_conflicts(
         status_result = await execute_via_transport(
             status_cmd, _target, task_id=task_id, source="conflict-check", expect_profile=PROFILE_K8S)
         raw = status_result.stdout
+
+        # A failed or timed-out `blade status` (exit != 0, empty stdout)
+        # must report UNKNOWN — never silently convert to "clear"
+        # (inject-17617837: a 31s wiz timeout returned exit 1 + empty
+        # stdout, which flowed through the regex fallback on an EMPTY
+        # string, found no UIDs, and was reported as "no active
+        # experiments" while the check had in fact verified nothing).
+        if status_result.exit_code != 0 or not raw.strip():
+            _reason = f"blade status exited {status_result.exit_code}"
+            if not raw.strip():
+                _reason += ", empty output"
+            _msg = (
+                f"Pre-injection conflict check: FAILED ({_reason}). "
+                "Active experiments cannot be ruled out — treat as UNKNOWN, not clear."
+            )
+            if tracker:
+                tracker.complete(
+                    _msg,
+                    {"step": "conflict_check", "status": "failed"},
+                )
+            await dispatch_node_message("conflict-check", f"{_msg}\n\n")
+            _persist_conclusion(task_id, _msg, {"step": "conflict_check", "status": "failed", "reason": _reason})
+            return ([], [])
 
         # Build ConflictInfo list with overlap analysis when JSON is available
         uids: list[str] = []
@@ -258,41 +331,38 @@ async def check_blade_conflicts(
                             exp_names = _extract_param_from_flag(flag, "--names")
                             exp_labels = _extract_param_from_flag(flag, "--labels")
 
+                            # Three-tier isolation (inject-17617837 review):
+                            # a NARROW skip replaces the old namespace
+                            # pre-filter. The old filter dropped BOTH
+                            # unrelated cross-ns experiments (fine) and
+                            # namespace-less cri/node experiments (the bug:
+                            # a live cri mem-load stayed invisible). The
+                            # skip below only fires when BOTH namespaces
+                            # are known and they differ — provably
+                            # unrelated, safe to isolate away.
+                            if namespace and exp_ns and exp_ns != namespace:
+                                continue
+
                             ci = ConflictInfo(
                                 uid=uid,
                                 flag=flag,
                                 namespace=exp_ns,
                                 names=exp_names,
                                 labels=exp_labels,
+                                undeterminable=not exp_ns,
                             )
 
-                            # Filter by namespace/labels using extracted values.
-                            # Uses _extract_param_from_flag result instead of
-                            # substring matching on flag, so both
-                            # "--namespace=cms-demo" and "--namespace cms-demo"
-                            # formats are handled correctly.
-                            if namespace and exp_ns != namespace:
-                                continue
-                            if labels and exp_labels != labels:
-                                # Also check partial label overlap: include
-                                # experiments sharing any label key=value pair.
-                                target_label_set = set(
-                                    lbl.strip() for lbl in labels.split(",") if lbl.strip()
-                                )
-                                exp_label_set = set(
-                                    lbl.strip() for lbl in exp_labels.split(",") if lbl.strip()
-                                )
-                                if not (target_label_set & exp_label_set):
-                                    continue
+                            # Overlap analysis runs for every non-skipped
+                            # experiment. For undeterminable ones it can
+                            # still parse scope-target-action (same-action
+                            # awareness); ns-based overlap needs both sides.
+                            _analyze_overlap(
+                                ci, namespace, target_names, labels,
+                                request_scope_target_action=request_scope_target_action,
+                            )
 
-                            # Analyze overlap with current target
-                            if target_names or labels:
-                                _analyze_overlap(
-                                    ci, namespace, target_names, labels,
-                                    request_scope_target_action=request_scope_target_action,
-                                )
-
-                            uids.append(uid)
+                            if not ci.undeterminable:
+                                uids.append(uid)
                             conflict_details.append(ci)
             except Exception:
                 logger.warning(
@@ -300,37 +370,75 @@ async def check_blade_conflicts(
                 )
 
         # Fallback: regex-extract UIDs from raw output when JSON parsing
-        # failed or returned non-standard format. These UIDs are unfiltered
-        # (no namespace/status filtering possible without structured data).
+        # failed or returned non-standard format. Nothing is known about
+        # these experiments beyond their existence, so they all follow the
+        # UNDETERMINABLE tier: visible in details, never asserted as
+        # conflicts (uids).
         if not json_parsed:
-            uids = re.findall(r"[0-9a-f]{16}", raw)
-            for uid in uids:
-                conflict_details.append(ConflictInfo(uid=uid))
+            fallback_uids = re.findall(r"[0-9a-f]{16}", raw)
+            for uid in fallback_uids:
+                conflict_details.append(ConflictInfo(uid=uid, undeterminable=True))
         overlapping = [c for c in conflict_details if c.overlaps_target]
+        no_ns = [c for c in conflict_details if c.undeterminable]
         if tracker:
             if uids:
-                overlap_hint = f" ({len(overlapping)} with target overlap)" if overlapping else ""
-                _msg = f"Pre-injection conflict check: {len(uids)} active experiment(s) found{overlap_hint}: {', '.join(uids[:5])}"
+                _hints = []
+                if overlapping:
+                    _hints.append(f"{len(overlapping)} with target overlap")
+                if no_ns:
+                    _hints.append(
+                        f"{len(no_ns)} undeterminable (cri/node scope, "
+                        f"no namespace info)"
+                    )
+                overlap_hint = f" ({'; '.join(_hints)})" if _hints else ""
+                _msg = f"Pre-injection conflict check: {len(uids)} active experiment(s) in namespace '{namespace}'{overlap_hint}: {', '.join(uids[:5])}"
+                _detail = {"step": "conflict_check", "status": "conflicts_found", "conflict_count": len(uids), "uids": uids[:5], "overlap_count": len(overlapping)}
                 tracker.complete(
                     _msg,
-                    {"step": "conflict_check", "status": "conflicts_found", "conflict_count": len(uids), "uids": uids[:5], "overlap_count": len(overlapping)},
+                    _detail,
                 )
                 await dispatch_node_message("conflict-check", f"{_msg}\n\n")
-            else:
+                _persist_conclusion(task_id, _msg, _detail)
+            elif no_ns:
+                # uids is empty but undeterminable experiments exist: the
+                # honest message is NOT "no active experiments" (the live
+                # cluster proved that lie) — scope the claim to the
+                # namespace and surface what cannot be ruled out.
+                _msg = (
+                    f"Pre-injection conflict check: no active experiments in "
+                    f"namespace '{namespace}', but {len(no_ns)} active "
+                    f"experiment(s) carry no namespace info (cri/node scope, "
+                    f"overlap undeterminable): "
+                    f"{', '.join(c.uid[:16] for c in no_ns[:5])}"
+                )
+                _detail = {"step": "conflict_check", "status": "clear",
+                           "undeterminable_count": len(no_ns),
+                           "undeterminable_uids": [c.uid[:16] for c in no_ns[:5]]}
                 tracker.complete(
-                    "Pre-injection conflict check: no active experiments",
+                    _msg,
+                    _detail,
+                )
+                await dispatch_node_message("conflict-check", f"{_msg}\n\n")
+                _persist_conclusion(task_id, _msg, _detail)
+            else:
+                _msg = f"Pre-injection conflict check: no active experiments in namespace '{namespace}'"
+                tracker.complete(
+                    _msg,
                     {"step": "conflict_check", "status": "clear"},
                 )
-                await dispatch_node_message("conflict-check", "Pre-injection conflict check: no active experiments\n\n")
+                await dispatch_node_message("conflict-check", f"{_msg}\n\n")
+                _persist_conclusion(task_id, _msg, {"step": "conflict_check", "status": "clear"})
         return (uids, conflict_details)
     except Exception:
         logger.debug(f"Blade conflict check failed for task {task_id}", exc_info=True)
+        _msg = "Pre-injection conflict check: failed (soft, non-blocking)"
         if tracker:
             tracker.complete(
-                "Pre-injection conflict check: failed (soft, non-blocking)",
+                _msg,
                 {"step": "conflict_check", "status": "failed"},
             )
-        await dispatch_node_message("conflict-check", "Pre-injection conflict check: failed (soft, non-blocking)\n\n")
+        await dispatch_node_message("conflict-check", f"{_msg}\n\n")
+        _persist_conclusion(task_id, _msg, {"step": "conflict_check", "status": "failed", "reason": "exception"})
         return ([], [])
     finally:
         # Restore parent tracker state so the caller's subsequent

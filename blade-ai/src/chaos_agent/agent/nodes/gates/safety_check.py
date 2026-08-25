@@ -249,6 +249,10 @@ async def safety_check(state: AgentState) -> dict:
     conflict_reason: str = ""
     conflict_uids: list = []
     conflict_extra: dict = {}
+    # Weak note for UNDETERMINABLE experiments (cri/node scope, no
+    # --namespace in Flag): they never enter conflict_uids and never
+    # trigger a warning — surfaced here as a non-blocking note only.
+    undet_note: str = ""
     from chaos_agent.transports import (
         PROFILE_K8S,
         is_kubewiz_channel,
@@ -319,7 +323,7 @@ async def safety_check(state: AgentState) -> dict:
                 conflict_status = "warning"
                 if overlapping:
                     conflict_reason = (
-                        f"{len(uids)} active ChaosBlade experiment(s) already exist on this cluster. "
+                        f"{len(uids)} active ChaosBlade experiment(s) already exist in your namespace. "
                         f"WARNING: {len(overlapping)} of them target the SAME resource(s): "
                         f"{overlap_desc}. "
                         f"Overlapping injections on the same target produce unpredictable "
@@ -329,11 +333,27 @@ async def safety_check(state: AgentState) -> dict:
                     )
                 else:
                     conflict_reason = (
-                        f"{len(uids)} active ChaosBlade experiment(s) already exist on this cluster: "
+                        f"{len(uids)} active ChaosBlade experiment(s) already exist in your namespace: "
                         f"{', '.join(uids[:5])}. "
                         f"No direct target overlap detected, but compound effects are possible. "
                         f"Consider destroying existing experiments first before proceeding."
                     )
+        else:
+            # No conflict candidates in the target namespace. Experiments
+            # whose overlap CANNOT be determined (cri/node scope, no
+            # --namespace in Flag — e.g. a stale cri mem-load CR) get a
+            # non-blocking note instead of silence: isolation must not
+            # degrade back into the inject-17617837 blind spot where
+            # "no active experiments" was reported on a cluster that
+            # actually had a live experiment.
+            undet = [c for c in conflict_details if c.undeterminable]
+            if undet:
+                undet_note = (
+                    f"{len(undet)} active experiment(s) carry no namespace info "
+                    f"(cri/node scope) — overlap with your target cannot be "
+                    f"determined: {', '.join(c.uid[:16] for c in undet[:5])}"
+                )
+                await dispatch_node_message("safety_check", f"Note: {undet_note}.\n\n")
 
     # 5. Target health pre-check — always runs regardless of conflicts.
     target_health_report: dict | None = None
@@ -471,7 +491,8 @@ async def safety_check(state: AgentState) -> dict:
         result = {
             "safety_status": "safe",
             "safety_reason": None,
-            "safety_checked_detail": f"namespace={namespace} compliant, no conflicting experiments",
+            "safety_checked_detail": f"namespace={namespace} compliant, no conflicting experiments"
+                + (f"; {undet_note}" if undet_note else ""),
             "conflict_uids": [],
         }
 

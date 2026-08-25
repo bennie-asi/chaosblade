@@ -311,6 +311,122 @@ class TestKubectlExec:
         assert "kubectl exec failed:" not in result
 
 
+class TestKubectlExecPayloadIntegrity:
+    r"""inject-17617837: the old string-level selector-strip regex
+    `(?:^|\s)(-l|--selector)\s+\S+` ran on the RAW v_args and could not see
+    quote regions — it amputated `` -l /proc/$(cat`` from inside a quoted
+    ``sh -c '...'`` exec payload (``ls -l /proc/$(cat ...)``), and the
+    container received a syntax error. Flag-shaped text past ``--`` is
+    payload, never a kubectl flag. These tests pin the tokenized two-layer
+    contract: hygiene only before ``--``, payload verbatim after it, and
+    kubectl-level selectors on exec rejected BEFORE dispatch (never
+    silently rewritten)."""
+
+    async def test_msg60_regression_quoted_payload_verbatim(self, mock_run_command):
+        # The exact v_args shape from the incident (msg[60]): every byte of
+        # the quoted sh -c payload must reach dispatch untouched.
+        v_args = (
+            "zookeeper-0-0 -n taokeeper -- sh -c 'cat /tmp/memcache-warmup.pid "
+            "2>/dev/null && echo \"---\" && ls -l /proc/$(cat "
+            "/tmp/memcache-warmup.pid)/exe 2>/dev/null'"
+        )
+        await kubectl.ainvoke({
+            "subcommand": "exec",
+            "v_args": v_args,
+            "kubeconfig": "",
+            "context": "",
+            "cluster": "",
+        })
+        cmd = mock_run_command.call_args[0][0]
+        payload = " ".join(cmd[cmd.index("sh") :])
+        assert "ls -l /proc/$(cat /tmp/memcache-warmup.pid)/exe" in payload
+        # The amputation signature must be absent — this exact fragment is
+        # what the container received in the incident.
+        assert "ls /tmp/memcache-warmup.pid)/exe" not in payload
+
+    async def test_payload_ls_dash_l_survives(self, mock_run_command):
+        # Skill recipe shape (DNS劫持 case): `ls -l` INSIDE the payload is a
+        # flag of ls, not a kubectl selector — must never be touched.
+        await kubectl.ainvoke({
+            "subcommand": "exec",
+            "v_args": "my-pod -n default -- sh -c 'ls -l /etc/hosts; id -u'",
+            "kubeconfig": "",
+            "context": "",
+            "cluster": "",
+        })
+        cmd = mock_run_command.call_args[0][0]
+        assert "ls -l /etc/hosts; id -u" in cmd
+
+    async def test_payload_wc_dash_l_survives(self, mock_run_command):
+        # `wc -l` amputated to `wc` HANGS waiting on stdin — worse than a
+        # syntax error. Pin the full token.
+        await kubectl.ainvoke({
+            "subcommand": "exec",
+            "v_args": "my-pod -n default -- sh -c 'wc -l /var/log/app.log'",
+            "kubeconfig": "",
+            "context": "",
+            "cluster": "",
+        })
+        cmd = mock_run_command.call_args[0][0]
+        assert "wc -l /var/log/app.log" in cmd
+
+    async def test_kubectl_level_selector_rejected_before_dispatch(self, mock_run_command):
+        # A genuine kubectl-level -l on exec is rejected with reason + fix,
+        # BEFORE any dispatch — never silently rewritten.
+        result = await kubectl.ainvoke({
+            "subcommand": "exec",
+            "v_args": "my-pod -n default -l app=nginx -- ls",
+            "kubeconfig": "",
+            "context": "",
+            "cluster": "",
+        })
+        mock_run_command.assert_not_called()
+        assert result.startswith("Error: kubectl exec does not support -l/--selector")
+        assert "kubectl get pods" in result  # fix guidance present
+
+    async def test_kubectl_level_long_selector_rejected(self, mock_run_command):
+        result = await kubectl.ainvoke({
+            "subcommand": "exec",
+            "v_args": "my-pod -n default --selector app=nginx -- ls",
+            "kubeconfig": "",
+            "context": "",
+            "cluster": "",
+        })
+        mock_run_command.assert_not_called()
+        assert result.startswith("Error: kubectl exec does not support -l/--selector")
+
+    async def test_get_selector_untouched(self, mock_run_command):
+        # `-l` on `get` is legitimate — the reject applies to exec only.
+        await kubectl.ainvoke({
+            "subcommand": "get",
+            "v_args": "pods -n default -l app=nginx",
+            "kubeconfig": "",
+            "context": "",
+            "cluster": "",
+        })
+        cmd = mock_run_command.call_args[0][0]
+        assert "-l" in cmd and "app=nginx" in cmd
+        mock_run_command.assert_called_once()
+
+    async def test_kubeconfig_inside_payload_survives(self, mock_run_command):
+        # A --kubeconfig past "--" belongs to a NESTED kubectl inside the
+        # payload — kubectl-layer stripping must stop at the separator.
+        v_args = (
+            "my-pod -n default -- sh -c 'kubectl get pods "
+            "--kubeconfig /etc/nested/kubeconfig -o name'"
+        )
+        await kubectl.ainvoke({
+            "subcommand": "exec",
+            "v_args": v_args,
+            "kubeconfig": "",
+            "context": "",
+            "cluster": "",
+        })
+        cmd = mock_run_command.call_args[0][0]
+        joined = " ".join(cmd)
+        assert "/etc/nested/kubeconfig" in joined
+
+
 class TestKubectlDebugLifecycle:
     """Debug pods use their real namespace and must be Ready before return."""
 

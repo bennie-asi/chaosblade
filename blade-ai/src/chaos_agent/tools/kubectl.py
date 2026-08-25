@@ -885,10 +885,14 @@ async def kubectl(
     Side effects: read verbs none; all else mutates cluster state.
 
     Constraints:
-      - No shell features (`|`, `;`, `&&`, `>`, `$()`) — use
-        `-l/--selector`, `--field-selector`, `-o jsonpath`.
-      - `exec` rejects `-l/--selector` (auto-stripped) — resolve the pod
-        via `get` first.
+      - v_args is two-layered. BEFORE `--`: kubectl args go straight
+        into argv, no shell — `|`/`;`/`&&`/`>`/`$()` are inert there
+        (use `-l/--selector`, `--field-selector`, `-o jsonpath`).
+        AFTER `--` (exec): `sh -c '<script>'` hands the script to the
+        container's shell — heredocs, redirects, pipes, `&&` all work
+        there (skill recipes use this form).
+      - `exec` rejects `-l/--selector` at the kubectl layer (error with
+        fix guidance) — resolve the pod via `get` first.
       - `debug node/<node>`: MUST append `-- sleep 3600`; never `-it`;
         host paths under `/host/...`; host mutation needs
         `--profile=sysadmin` + pullable image (recipes).
@@ -918,30 +922,64 @@ async def _kubectl_impl(
     # rejection here any more (task-349ccf5d deadlock).
     _target = TransportTarget.from_state({})
 
-    selector_removed = False
     processed_args: list[str] = []
 
     if v_args:
-        # Defensive: strip --kubeconfig embedded in v_args by LLM mistake.
-        if "--kubeconfig" in v_args:
-            v_args = re.sub(r"--kubeconfig\s+\S+", "", v_args).strip()
+        # Tokenize FIRST, then apply kubectl-level hygiene to tokens BEFORE
+        # the "--" separator only. String-level regex rewrites here once
+        # matched ``ls -l /proc/$(cat ...)`` INSIDE a quoted exec payload and
+        # amputated `` -l /proc/$(cat``, corrupting the script the container
+        # received (inject-17617837): flag-shaped text past "--" is payload,
+        # never a kubectl flag.
+        processed_args = _split_args(v_args)
+        sep_idx = processed_args.index("--") if "--" in processed_args else len(processed_args)
+
+        # Defensive: strip --kubeconfig embedded at the kubectl layer by LLM
+        # mistake (the tool has a dedicated 'kubeconfig' parameter). A
+        # --kubeconfig past "--" targets a NESTED kubectl inside the exec
+        # payload and must survive verbatim.
+        cleaned: list[str] = []
+        kubeconfig_dropped = False
+        i = 0
+        while i < sep_idx:
+            tok = processed_args[i]
+            if tok == "--kubeconfig":
+                i += 2 if i + 1 < sep_idx else 1
+                kubeconfig_dropped = True
+                continue
+            if tok.startswith("--kubeconfig="):
+                i += 1
+                kubeconfig_dropped = True
+                continue
+            cleaned.append(tok)
+            i += 1
+        if kubeconfig_dropped:
             logger.warning(
                 "kubeconfig should be passed via dedicated 'kubeconfig' parameter, "
                 "not embedded in v_args. The embedded value has been removed."
             )
+        processed_args = cleaned + processed_args[sep_idx:]
 
-        # Validate exec subcommand: reject -l/--selector (not supported by kubectl exec)
+        # kubectl exec targets ONE explicit pod — selector flags belong to
+        # `get`, not `exec`. Reject BEFORE dispatch (fail fast, reason + fix);
+        # never silently rewrite a command the caller did not send.
         if subcommand == "exec":
-            selector_pattern = re.compile(r"(?:^|\s)(-l|--selector)\s+\S+")
-            if selector_pattern.search(v_args):
-                v_args = selector_pattern.sub("", v_args).strip()
-                selector_removed = True
-                logger.warning(
-                    "kubectl exec does not support -l/--selector. "
-                    "Removed from v_args. Use kubectl get to discover the pod name first."
+            hit = next(
+                (
+                    t for t in cleaned
+                    if t in ("-l", "--selector") or t.startswith(("-l=", "--selector="))
+                ),
+                None,
+            )
+            if hit is not None:
+                return (
+                    "Error: kubectl exec does not support -l/--selector "
+                    "(exec targets one explicit pod name, not a selector).\n"
+                    "Fix: resolve the pod first — "
+                    "kubectl get pods -n <ns> -l <selector> "
+                    "-o jsonpath='{.items[0].metadata.name}' — then exec by pod name:\n"
+                    "kubectl(subcommand='exec', v_args='<pod-name> -n <ns> -- <command>')"
                 )
-
-        processed_args = _split_args(v_args)
 
     debug_namespace = ""
     _debug_start_ts = 0.0
@@ -1046,14 +1084,9 @@ async def _kubectl_impl(
                 f"- Use -o jsonpath to extract specific fields"
             )
 
-    # Append exec parameter correction warning
-    if subcommand == "exec" and selector_removed:
-        output += (
-            "\n\n⚠️ kubectl exec does NOT support -l/--selector. "
-            "The flag was removed from your command. "
-            "Use kubectl(subcommand='get') to discover the pod name first, "
-            "then use kubectl(subcommand='exec', v_args='<pod-name> -n <ns> -- <command>')."
-        )
+    # (The old post-hoc "-l was removed from your command" warning is gone:
+    # selector flags at the kubectl layer are now rejected before dispatch,
+    # and payload tokens were never ours to touch.)
 
     # Debug pod lifecycle — creation alone is not execution readiness. Resolve
     # the authoritative namespace/UID/node and fail early on image pull errors.
@@ -1362,8 +1395,9 @@ async def kubectl_read(
       - exec inner: a SINGLE read-only command — shell operators
         (``;``/``&&``/``||``/``>``/``&``) and multi-statement ``sh -c`` are
         rejected (fail closed); one probe per call.
-      - exec: no ``-l/--selector`` (resolve the pod via `get`); no
-        ``-it``; SHORT keep-alive for debug (``-- sleep 60``).
+      - exec: no ``-l/--selector`` at the kubectl layer (rejected with
+        guidance — resolve the pod via `get`); no ``-it``; SHORT
+        keep-alive for debug (``-- sleep 60``).
       - Unknown-flag error → ``--help`` in v_args rather than guessing.
     """
     # Belt-and-braces: even if Literal validation is bypassed, reject any

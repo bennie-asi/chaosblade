@@ -38,7 +38,14 @@ Fault injection is NOT instantaneous. After `blade create` reports `Success`:
   default 60s, but the official Helm chart overrides to **15s** — most
   production clusters use 15s; configurable via `--metric-resolution`;
   kubelet computes metrics every 15s), so `kubectl top` lags reality
-  by up to one window.
+  by up to one window. Snapshot age is NOT predictable: on one cluster
+  the same metrics pipeline reflected a fresh memory injection in ~11s
+  on one pod yet served ~60s-old snapshots on another (some adapters,
+  e.g. alibaba-cloud-metrics-adapter, expose no timestamp/window fields
+  to even tell). For **memory** faults do NOT wait out the window —
+  read `/proc/<pid>/status` (VmRSS) directly in the container (zero
+  lag, authoritative) and treat `kubectl top` as aggregate
+  confirmation only.
 
 If you check immediately and see no signal, that is **not** evidence of
 absence — it is evidence the window has not elapsed. Wait and re-check.
@@ -70,7 +77,8 @@ fault type:
 
 | Fault type | Primary method | Secondary method |
 | --- | --- | --- |
-| CPU / Memory stress | `kubectl top` (quantitative metrics) | `kubectl describe` (conditions) |
+| CPU stress | `kubectl top` (quantitative metrics) | `kubectl describe` (conditions) |
+| Memory stress | `kubectl exec` → `cat /proc/<pid>/status` VmRSS (zero lag, authoritative) | `kubectl top` (aggregate; lags one window) |
 | Network delay / loss | `kubectl exec` connectivity test (application impact) | `kubectl describe` (events) |
 | Pod kill / crash | `kubectl get pods` (restart count) | `kubectl describe` (events / OOMKilled) |
 | Disk fill | `kubectl exec df -h` (filesystem) | `kubectl describe node` (DiskPressure condition) |
@@ -109,9 +117,12 @@ A single positive data point is a hint, **not** a conclusion.
 
 When tool output contradicts expectations:
 
-1. **Consider timing** — metrics may not reflect the fault yet (wait
-   at least one metrics-server window — typically 15s in most clusters
-   — and re-check).
+1. **Consider timing** — metrics may not reflect the fault yet. For
+   CPU, wait at least one metrics-server window (typically 15s in most
+   clusters) and re-check. For **memory**, skip the wait entirely:
+   `cat /proc/<pid>/status` inside the container reads live VmRSS with
+   zero lag — a stale `kubectl top` next to a fresh `/proc` reading
+   means the metrics snapshot is old, not that the injection failed.
 2. **Cross-validate with a different command** — if `kubectl top` shows
    no change, check `kubectl describe` for condition changes.
 3. **Never infer from absence** — "no signal" is not "no fault" until

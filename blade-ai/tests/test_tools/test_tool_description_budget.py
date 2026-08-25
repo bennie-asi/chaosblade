@@ -76,8 +76,8 @@ def _schema_tokens(tool) -> int:
 # the only enumeration of valid values, none of which may be dropped
 # (slimming-plan hard constraint: "A 类一条不删").
 _CAPS: dict[str, tuple[object, int]] = {
-    "kubectl": (kubectl, 695),                      # class-A floor (~593 qwen); +shell-quoting MUST (task-190c94e8); +one-shot debug 120s cap / systemd-run carrier (inject-59b289a6: 300s loop hosted in a one-shot debug pod was killed at the 120s cap, fragmenting the fault window + ~150s re-arm)
-    "kubectl_read": (kubectl_read, 615),            # class-A floor (~552 qwen); +shell-quoting MUST (task-190c94e8); +exec single-command constraint (c157857 real-rejection-rework drift); +jsonpath whole-template quoting (inject-774ecd39: unquoted template word-split remotely, error invisible)
+    "kubectl": (kubectl, 766),                      # class-A floor (~593 qwen); +shell-quoting MUST (task-190c94e8); +one-shot debug 120s cap / systemd-run carrier (inject-59b289a6: 300s loop hosted in a one-shot debug pod was killed at the 120s cap, fragmenting the fault window + ~150s re-arm); +two-layer v_args semantics (inject-17617837: old flat "No shell features" line contradicted skill recipes' sh -c heredocs and cost 90s model hesitation; the selector-strip regex it advertised silently amputated `ls -l /proc/$(cat ...)` inside quoted payloads)
+    "kubectl_read": (kubectl_read, 616),            # class-A floor (~552 qwen); +shell-quoting MUST (task-190c94e8); +exec single-command constraint (c157857 real-rejection-rework drift); +jsonpath whole-template quoting (inject-774ecd39: unquoted template word-split remotely, error invisible); +kubectl-layer selector rejection clarified (inject-17617837)
     "blade_python_create": (blade_python_create, 605),  # class-A floor (~592)
     "blade_python_prepare": (blade_python_prepare, 500),
     "blade_python_revoke": (blade_python_revoke, 375),
@@ -111,11 +111,14 @@ _SECTIONS = (
     "Constraints",
 )
 
-# Total budget across all tracked schemas (current ~9690). If this trips,
+# Total budget across all tracked schemas (current ~9867). If this trips,
 # the growth is aggregate drift — find the culprit via the per-tool caps.
 # 9795 = 9750 + 45: single class-A raise for the kubectl one-shot debug
 # 120s cap constraint (inject-59b289a6), approved by budget owner.
-_TOTAL_CAP = 9795
+# 9867 = 9795 + 72: class-A raise for kubectl two-layer v_args semantics
+# + kubectl_read selector-rejection clarification (inject-17617837),
+# approved by budget owner.
+_TOTAL_CAP = 9867
 
 
 class TestToolDescriptionBudget:

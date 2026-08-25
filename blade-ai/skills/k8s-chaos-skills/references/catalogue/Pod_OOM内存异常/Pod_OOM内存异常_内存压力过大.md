@@ -63,7 +63,7 @@ kubectl exec <pod-name> -n <namespace> -- sh -c '
 > **不要走 tmpfs 文件写路线**（`dd of=/dev/shm/…`）：部分环境对页缓存写入路径限速，实测可低至 ~0.5MB/s（3.5G 需 1 小时以上）；匿名内存分配（方案 2）同环境实测 <30 秒完成同量级分配。
 
 **注入验证**：
-1. `kubectl top pod <pod-name> -n <namespace>` 确认内存用量接近 Limit 上限（对比 resources.limits.memory）
+1. 首选零滞后直查：`kubectl exec <pod-name> -n <namespace> -- cat /proc/<注入进程PID>/status`（注入时已落盘 PID 的用 `cat /tmp/memcache-warmup.pid` 取；未落盘的用 `ps` 找 stress/mem_stress 进程）看 VmRSS 确认接近目标量——`kubectl top` 滞后一个 metrics 窗口（实测同集群不同 Pod 11s~60s 不等，且部分 adapter 不暴露快照时间戳），注入后短期内 top 无变化**不构成效果否定证据**，仅作聚合确认
 2. 仅当已触发 OOMKill 时，`kubectl describe pod` 才会在 Events 中见到 OOMKilled；只接近 Limit 而未 OOM 时**没有任何内存相关 Event，查不到是必然，不要反复找**
 3. （可选，仅当演练方提供了应用访问入口时）向入口发请求确认延迟增大；无入口时上述内存级证据成立即可判定
 
@@ -82,7 +82,7 @@ kubectl exec <pod-name> -n <namespace> -- \
 ```
 
 **恢复验证**：
-1. `kubectl top pod <pod-name> -n <namespace>` 确认内存用量回落到注入前基线
+1. 直查注入进程 PID 是否已退出（`cat /proc/<pid>/status` 报 No such file 即已释放）；`kubectl top pod` 回落仅作聚合确认（同样滞后一个窗口，恢复初期 top 仍高**不构成恢复失败证据**）
 2. （可选，有访问入口时）确认应用响应恢复正常
 
 **基准事实**：

@@ -42,6 +42,7 @@ def get_tools_section(phase: int = 1) -> str:
 
 ### Parallel Calls
 - You MAY make multiple independent read-only queries in a single turn (e.g., inspect two independent targets simultaneously)
+- "Dependent" means one call's arguments require another call's result — not that the calls are about the same thing. A probe that comes back "not found" is itself a usable answer.
 - Do NOT make dependent calls in parallel
 
 ### Avoid Redundancy
@@ -56,6 +57,7 @@ def get_tools_section(phase: int = 1) -> str:
 
 ### Parallel Calls
 - You MAY make multiple independent read-only query calls in a single turn (e.g., inspect two independent targets simultaneously)
+- "Dependent" means one call's arguments require another call's result — not that the calls are about the same thing. A probe that comes back "not found" is itself a usable answer.
 - Do NOT make dependent calls in parallel
 
 ### Avoid Redundancy
