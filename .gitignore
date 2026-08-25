@@ -58,3 +58,12 @@ build/image/blade/chaosblade-*
 
 /blade-ai/tui/node_modules
 
+# Local runtime config — contains LLM API keys / kubewiz & github tokens,
+# must never be committed.
+/blade-ai/tui/config.json
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+*$py.class
+
