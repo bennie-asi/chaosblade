@@ -39,17 +39,22 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: blade-ai/tui/package-lock.json
+          # npm workspaces: tui/ and web/ share ONE lockfile at the
+          # blade-ai workspace root.
+          cache-dependency-path: blade-ai/package-lock.json
 
       - name: Install
-        # See release-blade-ai.yml for the rationale of the --ignore-scripts
-        # + explicit patch-package call. npm 10.9.2 + skipped postinstall
-        # avoids "Exit handler never called!" hangs on Linux runners.
+        # Workspace install at the blade-ai root (tui/ + web/ share one
+        # lockfile). See release-blade-ai.yml for the rationale of the
+        # --ignore-scripts + explicit patch-package call. npm 10.9.2 +
+        # skipped postinstall avoids "Exit handler never called!" hangs
+        # on Linux runners.
+        working-directory: blade-ai
         run: |
           npm install -g npm@10.9.2 || true
           npm ci --ignore-scripts --prefer-offline --no-audit --no-fund \
             || npm install --ignore-scripts --no-audit --no-fund
-          ./node_modules/.bin/patch-package
+          ./node_modules/.bin/patch-package --patch-dir tui/patches
 
       - name: Typecheck
         run: npm run typecheck

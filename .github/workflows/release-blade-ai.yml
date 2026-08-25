@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Tag to release (e.g. blade-ai-v0.3.0-alpha.1; must match all 4 version files)'
+        description: 'Tag to release (e.g. blade-ai-v0.3.0-alpha.1; must match all version files)'
         required: true
         default: ''
 
@@ -37,6 +37,11 @@ env:
 
 jobs:
   # ── Verify all version files agree with the release tag ────────────────
+  # Files coordinated:
+  #   - pyproject.toml ``version = "..."``
+  #   - tui/package.json ``"version": "..."``
+  #   - web/package.json ``"version": "..."``
+  #   - src/chaos_agent/__init__.py ``__version__ = "..."``
   verify-versions:
     runs-on: ubuntu-latest
     outputs:
@@ -82,6 +87,16 @@ jobs:
           fi
           echo "✓ blade-ai/tui/package.json matches"
 
+      - name: Verify blade-ai/web/package.json
+        shell: bash
+        run: |
+          PKG="$(node -p 'require("./blade-ai/web/package.json").version')"
+          if [ "${{ steps.derive.outputs.version }}" != "$PKG" ]; then
+            echo "::error::blade-ai/web/package.json version ($PKG) ≠ tag ${{ steps.derive.outputs.tag }}"
+            exit 1
+          fi
+          echo "✓ blade-ai/web/package.json matches"
+
       - name: Verify blade-ai/src/chaos_agent/__init__.py
         shell: bash
         run: |
@@ -92,7 +107,10 @@ jobs:
           fi
           echo "✓ blade-ai/src/chaos_agent/__init__.py matches"
 
-  # ── Build the TS TUI bundle once, share via artifact ───────────────────
+  # ── Build the TS TUI + Web UI bundles once, share via artifacts ────────
+  # The bundles are consumed by the build matrix below (PyInstaller embeds
+  # both via blade-ai.spec: tui/dist/cli.js → _tui_assets, web/dist →
+  # _web_assets).
   build-tui:
     needs: verify-versions
     runs-on: ubuntu-latest
@@ -104,9 +122,11 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: blade-ai/tui/package-lock.json
+          # npm workspaces: tui/ and web/ share ONE lockfile at the
+          # blade-ai workspace root.
+          cache-dependency-path: blade-ai/package-lock.json
       - name: Install dependencies
-        working-directory: blade-ai/tui
+        working-directory: blade-ai
         run: |
           # GitHub-hosted Linux runners hit npm's "Exit handler never
           # called!" bug when patch-package runs in postinstall. Two-part
@@ -127,16 +147,18 @@ jobs:
           npm --version
           npm ci --ignore-scripts --prefer-offline --no-audit --no-fund \
             || npm install --ignore-scripts --no-audit --no-fund
-          # Apply patches/ explicitly (postinstall was skipped above).
-          # Direct binary call avoids `npx`'s extra fetch / exit handler.
-          ./node_modules/.bin/patch-package
-      - name: Typecheck
+          # Apply tui/patches/ explicitly (postinstall was skipped above).
+          # Workspaces hoist node_modules to the workspace root, so the
+          # binary lives one level up; --patch-dir mirrors the root
+          # package.json postinstall script.
+          ./node_modules/.bin/patch-package --patch-dir tui/patches
+      - name: Typecheck (TUI)
         working-directory: blade-ai/tui
         run: npm run typecheck
-      - name: Build bundle
+      - name: Build TUI bundle
         working-directory: blade-ai/tui
         run: npm run build
-      - name: Vitest
+      - name: Vitest (TUI)
         working-directory: blade-ai/tui
         run: npm test
       # - name: Headless smokes (server-less subset)
@@ -162,6 +184,29 @@ jobs:
           path: |
             blade-ai/tui/dist/cli.js
             blade-ai/tui/dist/package.json
+          retention-days: 7
+          if-no-files-found: error
+
+      # Web UI bundle — embedded into the PyInstaller binary via
+      # blade-ai.spec (web/dist → chaos_agent/_web_assets) and served by
+      # FastAPI StaticFiles at "/" (chaos_agent.server.web), so
+      # ``blade-ai web`` works out of the standalone binary.
+      - name: Typecheck (Web)
+        working-directory: blade-ai/web
+        run: npm run typecheck
+      - name: Build Web UI bundle
+        working-directory: blade-ai/web
+        run: npm run build
+      - name: Vitest (Web)
+        working-directory: blade-ai/web
+        run: npm test
+      - name: Verify Web UI bundle
+        working-directory: blade-ai
+        run: ls -la web/dist/index.html
+      - uses: actions/upload-artifact@v6
+        with:
+          name: web-bundle
+          path: blade-ai/web/dist
           retention-days: 7
           if-no-files-found: error
 
@@ -231,6 +276,18 @@ jobs:
       - name: Verify TS bundle in place
         shell: bash
         run: ls -la blade-ai/tui/dist/cli.js
+
+      # Pull the Web UI bundle into ``blade-ai/web/dist`` BEFORE both
+      # ``pip install -e`` (hatchling's build_editable validates the
+      # ``web/dist`` force-include target in pyproject.toml) and
+      # pyinstaller (blade-ai.spec embeds it as _web_assets).
+      - uses: actions/download-artifact@v7
+        with:
+          name: web-bundle
+          path: blade-ai/web/dist
+      - name: Verify Web bundle in place
+        shell: bash
+        run: ls -la blade-ai/web/dist/index.html
 
       - name: Download ChaosBlade tool
         # No upstream Windows agent release — skip on Windows. The spec
@@ -567,7 +624,9 @@ jobs:
           body: |
             ## blade-ai ${{ needs.verify-versions.outputs.tag }}
 
-            Bundles ChaosBlade tool v${{ env.CHAOSBLADE_VERSION }} for Linux / macOS.
+            Bundles ChaosBlade tool v${{ env.CHAOSBLADE_VERSION }} for Linux / macOS,
+            plus the built-in Web UI — `blade-ai web` serves the console from the
+            standalone binary with no extra install.
             The Windows client ships without the blade binary (no upstream
             Windows agent) — injection there runs through kubectl-native
             control-plane faults, `kubectl exec` into cluster tool pods, and
