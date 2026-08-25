@@ -172,7 +172,7 @@ class TestLayer2VehicleWarning:
             "messages": [],
             "fault_spec": FaultSpec(
                 namespace="default", scope="node", names=(VEHICLE,),
-                blade_target="disk", blade_action="fill",
+                fault_target="disk", fault_action="fill",
             ).to_dict(),
             "approved_target": {
                 "namespace": "default",
@@ -180,7 +180,7 @@ class TestLayer2VehicleWarning:
                 "labels": {},
                 "resolved_names": ["node-a"],
             },
-            "blade_parsed_flags": {"path": "/tmp", "size": "10000"},
+            "injection_parsed_params": {"path": "/tmp", "size": "10000"},
             "params": {},
             "kubeconfig": "/path/to/kubeconfig",
         }
@@ -214,7 +214,7 @@ class TestLayer2VehicleWarning:
         state = self._state_with_vehicle_target()
         state["fault_spec"] = FaultSpec(
             namespace="default", scope="node", names=("node-a",),
-            blade_target="disk", blade_action="fill",
+            fault_target="disk", fault_action="fill",
         ).to_dict()
         layer1 = Layer1Result(
             status="passed", affected_count=1, raw_output="Success",

@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     phase           TEXT NOT NULL DEFAULT 'planning',
     operation       TEXT NOT NULL DEFAULT 'inject',
     skill_name      TEXT,
-    blade_uid       TEXT,
+    experiment_uid  TEXT,
     namespace       TEXT,
     target_name     TEXT,
     tenant_id       TEXT DEFAULT '',
@@ -71,6 +71,12 @@ CREATE TABLE IF NOT EXISTS task_details (
     postmortem          TEXT,
     target_health_report TEXT,
     feasibility_report  TEXT,
+    baseline_data       TEXT,
+    inject_context      TEXT,
+    skill_use_case      TEXT,
+    injection_method    TEXT,
+    kubectl_exec_pod_name TEXT,
+    injection_start_time TEXT,
     execution_artifacts TEXT,
     model_name          TEXT,
     total_token_input   INTEGER NOT NULL DEFAULT 0,
@@ -237,117 +243,20 @@ class PostgreSQLBackend:
     # -- schema --------------------------------------------------------------
 
     async def ensure_schema(self) -> None:
+        """Pure DDL execution (phase-14 G6, fresh-database ruling).
+
+        The startup migration segments — the pre-DDL tenant_id patch, every
+        historical ADD COLUMN, the one-shot ``injection_start_time`` backfill
+        and the phase-9 ``blade_uid`` RENAME — are retired: the DDL alone
+        builds the full terminal schema. Databases created before phase-14
+        are no longer upgradeable in place.
+        """
         async with self._pool.acquire() as conn:
-            # Pre-migration: add tenant_id column BEFORE running DDL, because
-            # DDL includes CREATE INDEX idx_tasks_tenant which requires the
-            # column to exist. Without this, ensure_schema() crashes on the
-            # index creation and the ALTER TABLE below never runs (chicken-and-egg).
-            try:
-                await conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT ''")
-            except Exception:
-                pass
             # asyncpg does not support executescript; run statements individually
             # Split by semicolons, filter empty lines
             statements = [s.strip() for s in _SCHEMA_DDL.split(";") if s.strip()]
             for stmt in statements:
                 await conn.execute(stmt)
-            try:
-                await conn.execute("ALTER TABLE task_details ADD COLUMN fault_spec TEXT")
-            except Exception:
-                pass
-            # Migration: add failure_reason column if not exists
-            try:
-                await conn.execute("ALTER TABLE task_details ADD COLUMN failure_reason TEXT")
-            except Exception:
-                pass  # Column already exists
-            try:
-                await conn.execute("ALTER TABLE task_details ADD COLUMN baseline_data TEXT")
-            except Exception:
-                pass
-            try:
-                await conn.execute("ALTER TABLE task_details ADD COLUMN inject_context TEXT")
-            except Exception:
-                pass
-            try:
-                await conn.execute("ALTER TABLE task_details ADD COLUMN skill_use_case TEXT")
-            except Exception:
-                pass
-            try:
-                # R18 — postmortem JSON column (path/markdown/summary).
-                await conn.execute("ALTER TABLE task_details ADD COLUMN postmortem TEXT")
-            except Exception:
-                pass
-            try:
-                await conn.execute("ALTER TABLE task_details ADD COLUMN target_health_report TEXT")
-            except Exception:
-                pass
-            try:
-                await conn.execute("ALTER TABLE task_details ADD COLUMN feasibility_report TEXT")
-            except Exception:
-                pass
-            try:
-                await conn.execute("ALTER TABLE task_details ADD COLUMN injection_method TEXT")
-            except Exception:
-                pass
-            try:
-                await conn.execute("ALTER TABLE task_details ADD COLUMN execution_artifacts TEXT")
-            except Exception:
-                pass
-            try:
-                await conn.execute("ALTER TABLE task_details ADD COLUMN kubectl_exec_pod_name TEXT")
-            except Exception:
-                pass
-            try:
-                # LLM model frozen at task finalize time — synced from the
-                # session record by ``_finalize_session_store`` so the
-                # metric envelope can report which model ran the drill.
-                await conn.execute("ALTER TABLE task_details ADD COLUMN model_name TEXT")
-            except Exception:
-                pass
-            try:
-                # ``injection_start_time`` — the only field written exactly when
-                # an injection command is *issued* (execute_loop /
-                # direct_execute set it write-once and never clear it, unlike
-                # ``injection_method``). ``select_active_tasks`` needs it to tell
-                # "confirmed but never executed" apart from "really injected".
-                #
-                # ALTER + backfill are wrapped in ONE explicit transaction:
-                # asyncpg auto-commits each ``execute`` outside a transaction,
-                # so without this the process could die between them and leave
-                # the column added but never backfilled. Because the backfill is
-                # one-shot (see below), that middle state would be permanent.
-                async with conn.transaction():
-                    await conn.execute(
-                        "ALTER TABLE task_details ADD COLUMN injection_start_time TEXT"
-                    )
-                    # One-shot backfill, deliberately INSIDE this try: it runs
-                    # only on the migration that adds the column (on later
-                    # startups the ALTER raises and we skip).
-                    #
-                    # ❗ 不要把它拆成独立的 try / 让它每次启动都跑：回填条件
-                    # （injection_start_time IS NULL 且有意图）恰好也匹配
-                    # 「方案已确认但命令从未发出」的**新行**，每次启动重跑会给
-                    # 它们盖上时间戳，永久废掉 select_active_tasks 的"已发出"
-                    # 判据。一次性回填失败最多让存量行暂时不可恢复（一次性
-                    # 窗口），而重复回填是永久性失效。上面的显式事务已消除
-                    # "列加上了但回填没跑"这个中间态。
-                    #
-                    # Pre-existing rows have no recorded issue time, so assume
-                    # they were issued and stamp ``tasks.gmt_create`` — that
-                    # keeps their current recoverable status. Excluding them
-                    # instead would hide real in-flight injections, i.e.
-                    # re-create the "注入了却恢复不了" bug this column exists
-                    # to avoid.
-                    await conn.execute(
-                        "UPDATE task_details d SET injection_start_time = COALESCE("
-                        "  (SELECT t.gmt_create FROM tasks t WHERE t.task_id = d.task_id),"
-                        "  d.gmt_create)"
-                        " WHERE d.injection_start_time IS NULL"
-                        "   AND (d.target IS NOT NULL OR d.fault_spec IS NOT NULL)"
-                    )
-            except Exception:
-                pass
-            # tenant_id migration already done above (pre-DDL)
 
     # -- tasks (narrow, hot) -------------------------------------------------
 
@@ -400,7 +309,7 @@ class PostgreSQLBackend:
         #   • skill_name IS NOT NULL  —— 误藏不激活 skill 的真实注入；
         #   • target_name <> ''       —— 误藏 host 类与按 labels 选目标的注入；
         #   • 仅 target IS NOT NULL   —— 误藏只写规范形态的注入；
-        #   • blade_uid IS NOT NULL   —— 误藏 kubectl_native / host_native
+        #   • experiment_uid IS NOT NULL  —— 误藏 kubectl_native / host_native
         #     （它们天然无 uid，"attempt IS the injection"）；
         #   • injection_method IS NOT NULL —— execute_loop 的多步自检分支会把
         #     已发出命令的 method 置回 None，无法区分"已执行但 method 为空"；
@@ -409,17 +318,15 @@ class PostgreSQLBackend:
         #
         # 「已发出命令」判据用 ``d.injection_start_time IS NOT NULL``：它是唯一
         # 恰在注入命令发出那一刻置位、且**写一次不清零**的字段
-        # （execute_loop:674/1313/1355、direct_execute 三处均为
+        # （execute_loop 中均为
         # ``if not state.get("injection_start_time")`` 守卫），因此不会像
         # ``injection_method`` 那样被后续分支抹掉。少了这条，"方案已确认但卡在
         # 安全门、从未发出命令"的行会进可恢复列表，被恢复流程误选后报「找不到该
         # 任务的注入状态记录」。
         #
-        # ⚠️ 存量兼容：该列是后加的，存量行没有值。迁移时做了**一次性回填**
-        # （见 _ensure_schema：仅在 ADD COLUMN 成功那次执行），把有意图的存量行
-        # 的 injection_start_time 置为 tasks.gmt_create，保持它们原有的可恢复
-        # 状态。若不回填而直接按新判据过滤，存量在途注入会全部变成不可恢复 ——
-        # 那正是本列要避免的失败模式。
+        # （phase-14 G6：该列历史上的「存量一次性回填」迁移段已随启动迁移
+        # 整体退役——fresh-database 裁决下新库由 DDL 直接建成终态；判据
+        # 本身不动，属现行写路径防御。）
         #
         # ⚠️ 判据的两个条件都不要单独回滚。可用下述 SQL 在任意库上复核不变量
         # （规范形态未被误藏），结果应为 0：

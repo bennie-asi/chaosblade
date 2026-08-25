@@ -256,7 +256,6 @@ FAULT_PAYLOAD_SCHEMA: dict = {
             "maximum": 65535,
             "description": "SSH port.",
         },
-        "direct": {"type": "boolean", "default": True},
         "auto_recover": {"type": "boolean", "default": True},
     },
 }

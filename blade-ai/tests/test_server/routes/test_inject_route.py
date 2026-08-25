@@ -186,8 +186,8 @@ class TestInjectRoute:
         )
         assert response.status_code == 422
 
-    def test_inject_direct_mode(self, test_client):
-        """Direct mode with all structured params should succeed."""
+    def test_inject_structured_mode(self, test_client):
+        """All structured params (without natural-language input) should succeed."""
         response = test_client.post(
             "/api/v1/inject",
             json={
@@ -196,23 +196,11 @@ class TestInjectRoute:
                 "action": "fullload",
                 "target_name": "my-pod",
                 "namespace": "default",
-                "direct": True,
             },
         )
         assert response.status_code == 200
         data = response.json()
         assert data["data"]["fault_type"] == "pod-cpu-fullload"
-
-    def test_inject_direct_with_input_raises(self, test_client):
-        """Direct mode is not compatible with input."""
-        response = test_client.post(
-            "/api/v1/inject",
-            json={
-                "input": "kill the pod",
-                "direct": True,
-            },
-        )
-        assert response.status_code == 422
 
     def test_inject_invalid_scope_raises(self, test_client):
         """Invalid scope value should return validation error."""

@@ -77,7 +77,7 @@ def _approved_names_only() -> dict:
     return freeze_approved_target(
         target={"namespace": _NS, "names": [_POD_A]},
         params={"scope": "pod"},
-        blade_scope="pod", blade_target="network", blade_action="delay",
+        fault_scope="pod", fault_target="network", fault_action="delay",
     )
 
 
@@ -85,7 +85,7 @@ def _approved_labels_only(resolved: tuple[str, ...]) -> dict:
     return freeze_approved_target(
         target={"namespace": _NS, "labels": dict(_LABELS)},
         params={"scope": "pod"},
-        blade_scope="pod", blade_target="network", blade_action="delay",
+        fault_scope="pod", fault_target="network", fault_action="delay",
         resolved_names=resolved,
     )
 

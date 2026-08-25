@@ -21,6 +21,7 @@ from chaos_agent.agent.result.operation_outcome import (
 )
 from chaos_agent.agent.state import (
     extract_ui_diagnostics,
+    materialize_fault_handle,
     strip_side_effects,
     terminal_task_state,
 )
@@ -34,19 +35,32 @@ def _fault_spec_dict(values: Mapping[str, Any]) -> dict[str, Any]:
 def build_recovery_handle(values: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return a carrier-agnostic recovery handle for a fault.
 
-    A fault is undone either via its ChaosBlade destroy UID (``chaosblade_k8s`` /
-    ``host_blade`` carriers) or via reverse operations over recorded execution
-    artifacts (``host_native`` carrier — reverse logic wired in P1). This decouples
-    downstream consumers from the ``blade_uid`` hard dependency. Returns ``None``
+    Recovery-side view of ``fault_handle``: a fault is undone either via its
+    ChaosBlade destroy UID (blade-family carriers) or via reverse operations
+    over recorded execution artifacts (native carriers). Returns ``None``
     when neither handle is available.
     """
     state = dict(values or {})
-    blade_uid = state.get("blade_uid", "") or ""
-    if blade_uid:
-        return {"kind": "blade_uid", "value": blade_uid}
+    handle = materialize_fault_handle(state)
+    # Lazy import — keep the result layer free of provider-package module
+    # imports at import time (matches the build_inject_context precedent).
+    from chaos_agent.agent.providers.registry import FaultProviderRegistry
+
+    if handle and FaultProviderRegistry.is_experiment_handle(handle):
+        # Experiment-carrier UID pinning. Keep the historically pinned
+        # consumer shape — kind / value / experiment_uid (the legacy
+        # ``experiment_uid`` key stays the permanent external contract).
+        # Membership ("is this an experiment handle?") is the owning
+        # provider's ``has_experiment_uid`` declaration via the registry,
+        # not a ``kind == "experiment_uid"`` string branch, so a future
+        # experiment carrier pins automatically (phase-7 T6).
+        uid = handle.get("value", "")
+        return {"kind": handle.get("kind", ""), "value": uid, "experiment_uid": uid}
     artifacts = list(state.get("execution_artifacts") or [])
     if artifacts:
         return {"kind": "artifact", "artifacts": artifacts}
+    if handle:
+        return dict(handle)
     return None
 
 
@@ -82,17 +96,22 @@ def build_inject_data_from_state(
     try:
         from chaos_agent.utils.inject_context import build_inject_context
 
-        inject_context = build_inject_context(
-            list(state_values.get("messages") or [])
-        )
+        inject_context = build_inject_context(list(state_values.get("messages") or []))
     except Exception:
         inject_context = ""
 
+    experiment_uid_out = state_values.get("experiment_uid") or ""
     return {
         "task_id": task_id,
         "task_state": task_state,
         "fault_type": fault_type_from_state(state_values),
-        "blade_uid": state_values.get("blade_uid", "") or "",
+        "experiment_uid": experiment_uid_out,
+        # Attribution facts persisted for recover hydration (R4): a native
+        # fault has no UID, so the method + materialized handle are the only
+        # durable identity that survives across a process restart. TaskSnapshot
+        # feeds them back into the recover initial state.
+        "injection_method": state_values.get("injection_method"),
+        "fault_handle": materialize_fault_handle(state_values),
         "recovery_handle": build_recovery_handle(state_values),
         "duration_ms": elapsed_ms,
         "fault_spec": _fault_spec_dict(state_values),
@@ -114,7 +133,7 @@ def build_unknown_inject_data(
     task_id: str,
     *,
     task_state: str = "unknown",
-    blade_uid: str = "",
+    experiment_uid: str = "",
     error: str = "",
 ) -> dict[str, Any]:
     """Build a minimal complete result-card data dict when graph state is absent."""
@@ -123,7 +142,9 @@ def build_unknown_inject_data(
         "task_id": task_id,
         "task_state": task_state,
         "fault_type": "",
-        "blade_uid": blade_uid or "",
+        "experiment_uid": experiment_uid or "",
+        "injection_method": None,
+        "fault_handle": None,
         "duration_ms": 0,
         "fault_spec": {},
         "target": {},
@@ -157,9 +178,9 @@ def build_inject_status_data_from_state(
     *,
     result: str,
     error: str = "",
-    blade_uid: str | None = None,
+    experiment_uid: str | None = None,
     fault_spec: FaultSpec | Mapping[str, Any] | None = None,
-    include_blade_uid: bool = True,
+    include_experiment_uid: bool = True,
 ) -> dict[str, Any]:
     """Build the legacy pending/failed inject status data shape."""
 
@@ -170,10 +191,13 @@ def build_inject_status_data_from_state(
         "fault_type": fault_type_from_state(state),
         "targets": target_list_from_state(state),
     }
-    if include_blade_uid:
-        data["blade_uid"] = (
-            blade_uid if blade_uid is not None else state.get("blade_uid", "")
+    if include_experiment_uid:
+        experiment_uid_out = (
+            experiment_uid
+            if experiment_uid is not None
+            else state.get("experiment_uid")
         ) or ""
+        data["experiment_uid"] = experiment_uid_out
     if error:
         data["error"] = error
     return data
@@ -227,7 +251,7 @@ def build_recover_data_from_state(
         "operation": "recover",
         "task_state": recover_task_state_from_values(recover_state),
         "fault_type": fault_type_from_state(inject_state),
-        "blade_uid": inject_state.get("blade_uid", "") or "",
+        "experiment_uid": inject_state.get("experiment_uid") or "",
         "recovery_handle": build_recovery_handle(inject_state),
         "duration_ms": elapsed_ms,
         "fault_spec": _fault_spec_dict(inject_state),
@@ -261,7 +285,7 @@ def build_recover_cli_data_from_state(
     data = {
         "task_id": inject_task_id,
         "result": recover_result_label_from_values(recover_state),
-        "blade_uid": inject_state.get("blade_uid", "") or "",
+        "experiment_uid": inject_state.get("experiment_uid") or "",
         "targets": target_list_from_state(inject_state),
         "verification": build_verification_simple(
             read_recover_verification(recover_state)
@@ -276,14 +300,14 @@ def build_recover_cli_failure_data_from_state(
     inject_task_id: str,
     inject_state_values: Mapping[str, Any],
     *,
-    blade_uid: str = "",
+    experiment_uid: str = "",
     error: str = "",
 ) -> dict[str, Any]:
     """Build the legacy local-CLI recover failure data shape."""
 
     inject_state = dict(inject_state_values or {})
-    if blade_uid and not inject_state.get("blade_uid"):
-        inject_state["blade_uid"] = blade_uid
+    if experiment_uid and not inject_state.get("experiment_uid"):
+        inject_state["experiment_uid"] = experiment_uid
     data = build_recover_cli_data_from_state(
         {"result": {"recovered": False}, "error": error or ""},
         inject_task_id,

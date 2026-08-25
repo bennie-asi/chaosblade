@@ -61,7 +61,8 @@ class TestGetAgentCard:
     def test_output_schema_present(self):
         card = get_agent_card()
         schema = card["output_schema"]
-        assert "blade_uid" in schema["properties"]
+        assert "experiment_uid" in schema["properties"]
+        assert "blade_uid" not in schema["properties"]
         assert "verification" in schema["properties"]
 
     def test_sla_fields(self):

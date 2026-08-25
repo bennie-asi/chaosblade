@@ -669,3 +669,110 @@ class TestCheckMatrices:
         from chaos_agent.preflight import run_tui_checks
 
         assert "check_skills" in inspect.getsource(run_tui_checks)
+
+
+# ── Scope registry (check registration) ────────────────────────────────
+
+
+class TestScopeRegistry:
+    """preflight-check-registration: the seven tier constants are load-time
+    snapshots of the ``_CHECK_SCOPES`` registry; built-ins register through
+    the same channel as external appends (single source of truth)."""
+
+    def test_builtin_lists_match_historical_baseline(self):
+        # Baseline captured before the registry refactor (order + members).
+        assert [f.__name__ for f in INJECT_CHECKS] == [
+            "check_llm_api_key",
+            "check_kubeconfig",
+            "check_kubectl",
+            "check_transport_config",
+            "check_blade",
+        ]
+        assert [f.__name__ for f in RECOVER_CHECKS] == [
+            "check_llm_api_key",
+            "check_kubeconfig",
+            "check_kubectl",
+            "check_transport_config",
+            "check_blade",
+        ]
+        assert [f.__name__ for f in LIST_CHECKS] == ["check_llm_api_key"]
+        assert [f.__name__ for f in CONFIRM_CHECKS] == ["check_llm_api_key"]
+        assert METRIC_CHECKS == []
+        assert CONFIG_CHECKS == []
+        assert VERSION_CHECKS == []
+
+    def test_registry_single_source_matches_snapshots(self):
+        from chaos_agent import preflight as pf
+
+        for scope, const in [
+            ("inject", INJECT_CHECKS),
+            ("recover", RECOVER_CHECKS),
+            ("list", LIST_CHECKS),
+            ("confirm", CONFIRM_CHECKS),
+            ("metric", METRIC_CHECKS),
+            ("config", CONFIG_CHECKS),
+            ("version", VERSION_CHECKS),
+        ]:
+            assert pf.checks_for(scope) == const
+
+    def test_external_append_lands_after_builtins(self):
+        from chaos_agent import preflight as pf
+
+        def fake_extra_check() -> CheckResult:
+            return CheckResult(name="fake_extra", severity="blocking", passed=True)
+
+        try:
+            pf.register_check("inject", fake_extra_check)
+            current = pf.checks_for("inject")
+            assert current[-1] is fake_extra_check
+            assert len(current) == len(INJECT_CHECKS) + 1
+            # Built-in prefix unchanged (append-only ordering).
+            assert current[: len(INJECT_CHECKS)] == INJECT_CHECKS
+        finally:
+            pf._CHECK_SCOPES["inject"].remove(fake_extra_check)
+
+    def test_snapshot_constants_do_not_grow_after_append(self):
+        from chaos_agent import preflight as pf
+
+        def fake_extra_check() -> CheckResult:
+            return CheckResult(name="fake_extra2", severity="blocking", passed=True)
+
+        try:
+            before = len(INJECT_CHECKS)
+            pf.register_check("inject", fake_extra_check)
+            # Snapshot constant keeps the load-time view...
+            assert len(INJECT_CHECKS) == before
+            # ...while the query path sees the append.
+            assert pf.checks_for("inject")[-1] is fake_extra_check
+        finally:
+            pf._CHECK_SCOPES["inject"].remove(fake_extra_check)
+
+    def test_unknown_scope_rejected(self):
+        from chaos_agent import preflight as pf
+
+        before = {s: list(v) for s, v in pf._CHECK_SCOPES.items()}
+        with pytest.raises(ValueError) as exc:
+            pf.register_check("deploy", lambda: None)
+        assert "deploy" in str(exc.value)
+        # The error lists the known set (fail-loud with guidance).
+        assert "inject" in str(exc.value)
+        # Registry state untouched by the rejected registration.
+        assert {s: list(v) for s, v in pf._CHECK_SCOPES.items()} == before
+
+    def test_checks_for_unknown_scope_rejected(self):
+        from chaos_agent import preflight as pf
+
+        with pytest.raises(ValueError):
+            pf.checks_for("deploy")
+
+    def test_append_into_empty_tier(self):
+        from chaos_agent import preflight as pf
+
+        def fake_metric_check() -> CheckResult:
+            return CheckResult(name="fake_metric", severity="warning", passed=True)
+
+        try:
+            pf.register_check("metric", fake_metric_check)
+            assert pf.checks_for("metric") == [fake_metric_check]
+        finally:
+            pf._CHECK_SCOPES["metric"].remove(fake_metric_check)

@@ -83,7 +83,7 @@ async def se_detect_node(state: AgentState) -> dict:
         kubeconfig=kubeconfig,
         injection_start_time=injection_start,
         task_id=task_id,
-        target=spec.blade_target if spec else "",
+        target=spec.fault_target if spec else "",
         profile=profile,
     )
 

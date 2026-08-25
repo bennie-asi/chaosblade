@@ -119,22 +119,54 @@ def _advance_fault_spec(existing: FaultSpec | None, raw: dict) -> FaultSpec:
     return candidate.replace(revision=revision)
 
 
+_SUBMISSION_REPLAY_FIELDS = (
+    "scope", "fault_target", "fault_action", "namespace",
+    "names", "labels", "params",
+)
+
+
+def _submission_mismatches(
+    args: dict, spec: FaultSpec,
+) -> list[tuple[str, object, object]]:
+    """Execution fields whose submitted value differs from the reviewed contract.
+
+    An empty list means the submission replays the reviewed FaultSpec exactly.
+    Revisions are deliberately NOT compared: the private proposal trailer of
+    the very reply carrying the submit call is parsed first and may already
+    have advanced the server-owned revision — a value the model can never
+    observe at generation time, so a strict revision replay turned that
+    same-turn window into a guaranteed rejection.  Field equality alone
+    preserves every guarantee the replay check provided: stale or smuggled
+    values cannot equal the reviewed contract, and values that ARE equal are
+    correct whichever revision they nominally came from.
+
+    Returns ``(field, reviewed_value, submitted_value)`` triples for
+    actionable rejection messages.
+    """
+    submitted = FaultSpec.from_intent_args(args, existing=spec)
+    return [
+        (field, getattr(spec, field), getattr(submitted, field))
+        for field in _SUBMISSION_REPLAY_FIELDS
+        if getattr(submitted, field) != getattr(spec, field)
+    ]
+
+
 def _submission_matches_spec(args: dict, spec: FaultSpec) -> bool:
     """Require execution arguments to match the reviewed FaultSpec exactly."""
-    submitted = FaultSpec.from_intent_args(args, existing=spec)
-    return (
-        int(args.get("fault_revision", -1)) == spec.revision
-        and submitted.scope == spec.scope
-        and submitted.blade_target == spec.blade_target
-        and submitted.blade_action == spec.blade_action
-        and submitted.namespace == spec.namespace
-        and submitted.names == spec.names
-        and submitted.labels == spec.labels
-        and submitted.params == spec.params
+    return not _submission_mismatches(args, spec)
+
+
+def _mismatch_summary(mismatches: list[tuple[str, object, object]]) -> str:
+    """Render field diffs into a short, actionable rejection detail."""
+    return "; ".join(
+        f"{field}: reviewed {reviewed!r} vs submitted {got!r}"
+        for field, reviewed, got in mismatches
     )
 
 
-def _bootstrap_submitted_spec(args: dict) -> FaultSpec | None:
+def _bootstrap_submitted_spec(
+    args: dict, *, existing: FaultSpec | None = None,
+) -> FaultSpec | None:
     """Create the first durable contract from an approved structured submit.
 
     A proposal trailer is an optimisation for carrying the reviewed contract
@@ -144,8 +176,15 @@ def _bootstrap_submitted_spec(args: dict) -> FaultSpec | None:
     happens only after the model observed explicit approval, and is the most
     faithful available contract.  Bootstrap from those exact arguments rather
     than attempting to recover fields from natural-language history.
+
+    ``existing`` is the incomplete stub found in state — the TUI NL entry's
+    ``placeholder_nl`` (or a partial contract collected over turns).  Its
+    identity fields (``user_description`` / ``source``) are inherited for
+    args the submit omitted; submitted arguments always win where present.
+    A candidate that still fails ``is_complete`` returns None so the caller
+    keeps the stub and rejects with the incomplete-contract wording.
     """
-    candidate = FaultSpec.from_intent_args(args)
+    candidate = FaultSpec.from_intent_args(args, existing=existing)
     if not candidate.is_complete:
         return None
     return candidate.replace(revision=1)
@@ -161,22 +200,27 @@ def _stored_batch_specs(state: AgentState) -> list[FaultSpec]:
             if (spec := FaultSpec.from_dict(item)) is not None]
 
 
-def _submission_matches_batch(args: dict, specs: list[FaultSpec]) -> bool:
-    """Require a batch submit call to replay the reviewed contracts exactly."""
+def _submission_batch_mismatches(
+    args: dict, specs: list[FaultSpec],
+) -> list[tuple[str, object, object]]:
+    """Per-fault replay diffs for a batch submit; empty means an exact replay.
+
+    Same revision-free replay semantics as ``_submission_mismatches`` — see
+    that docstring for why the server-owned revision is never compared.
+    """
     submitted_faults = args.get("faults")
     if not specs or not isinstance(submitted_faults, list):
-        return False
+        return [("faults", f"{len(specs)} reviewed fault(s)", type(submitted_faults).__name__)]
     if len(submitted_faults) != len(specs):
-        return False
-    if int(args.get("fault_revision", -1)) != specs[0].revision:
-        return False
-    for submitted, spec in zip(submitted_faults, specs):
+        return [("faults", f"{len(specs)} reviewed fault(s)", f"{len(submitted_faults)} submitted")]
+    diffs: list[tuple[str, object, object]] = []
+    for index, (submitted, spec) in enumerate(zip(submitted_faults, specs), 1):
         if not isinstance(submitted, dict):
-            return False
-        candidate_args = {**submitted, "fault_revision": spec.revision}
-        if not _submission_matches_spec(candidate_args, spec):
-            return False
-    return True
+            diffs.append((f"fault[{index}]", "a fault dict", type(submitted).__name__))
+            continue
+        for field, reviewed, got in _submission_mismatches(submitted, spec):
+            diffs.append((f"fault[{index}].{field}", reviewed, got))
+    return diffs
 
 
 def _advance_proposed_specs(
@@ -522,7 +566,6 @@ def submit_fault_intent(
     scope: str,
     target: str,
     action: str,
-    fault_revision: int,
     namespace: str = "",
     names: Annotated[Optional[list[str]], BeforeValidator(_validate_names)] = None,
     labels: Annotated[Optional[dict[str, str]], BeforeValidator(_validate_labels)] = None,
@@ -543,8 +586,7 @@ def submit_fault_intent(
     from dialogue history. Multiple objectives → ``submit_batch_intent``.
 
     Inputs: fault_type "<scope>-<target>-<action>"; target = subsystem,
-    NOT a resource instance name; fault_revision replayed exactly
-    (0 = none yet); namespace empty for host/cluster-scoped;
+    NOT a resource instance name; namespace empty for host/cluster-scoped;
     names/labels/params per the reviewed spec. Environment-bound params
     values must carry a probe trail from the CURRENT environment — on a
     probe/user conflict do NOT submit; go back to the user with the
@@ -580,7 +622,6 @@ submit_fault_intent.description = (
 @lc_tool
 def submit_batch_intent(
     faults: list[dict],
-    fault_revision: int,
     execution_order: Literal["serial"] = "serial",
     interval_seconds: int = 0,
 ) -> str:
@@ -600,8 +641,6 @@ def submit_batch_intent(
         namespace, and may independently add names (list[str]) / labels (dict) /
         params (dict) / fault_type (str) / duration_seconds (int, 0 = system
         recommended; never put duration into params).
-      - fault_revision: server-owned revision of the reviewed FaultSpec — replay
-        it exactly as shown.
       - execution_order: only "serial" is currently implemented.
       - interval_seconds: seconds between serial faults (default 0).
 
@@ -637,9 +676,9 @@ def _extract_submit_batch_intent(messages: list) -> dict | None:
                     return None
                 return {
                     "faults": valid,
-                    "fault_revision": _coerce_fault_revision(
-                        args.get("fault_revision")
-                    ),
+                    # ``fault_revision`` is deliberately dropped: revisions are
+                    # server-owned and the replay gate compares execution
+                    # fields only.
                     "execution_order": "serial",
                     "interval_seconds": int(args.get("interval_seconds", 0)),
                 }
@@ -763,9 +802,9 @@ def _extract_submit_args(messages: list) -> dict:
                 return {
                     **_normalise_fault_args(args),
                     "fault_type": _scalar_str(args.get("fault_type")),
-                    "fault_revision": _coerce_fault_revision(
-                        args.get("fault_revision")
-                    ),
+                    # ``fault_revision`` is deliberately dropped: revisions are
+                    # server-owned and the replay gate compares execution
+                    # fields only.
                     "user_description": _scalar_str(args.get("user_description")),
                     "case_resource_path": _scalar_str(args.get("case_resource_path")),
                 }
@@ -776,13 +815,6 @@ def _extract_submit_args(messages: list) -> dict:
         # current AI turn boundary without finding a submit call.
         return {}
     return {}
-
-
-def _coerce_fault_revision(value: object) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return -1
 
 
 def _scalar_str(value: object) -> str:
@@ -1204,28 +1236,48 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
                     hook_updates=hook_updates,
                 )
             # The normal path replays an already reviewed FaultSpec exactly.
-            # If a model omitted its private proposal trailer, no FaultSpec
-            # exists yet even though it may have shown a complete summary and
-            # received explicit approval.  The structured submit is then the
-            # only trustworthy contract source; bootstrap from it without
-            # parsing prose or relaxing validation for an existing contract.
-            if existing_spec is None:
-                existing_spec = _bootstrap_submitted_spec(llm_args)
+            # If a model omitted its private proposal trailer, no COMPLETE
+            # FaultSpec exists yet even though it may have shown a complete
+            # summary and received explicit approval.  The TUI NL entry
+            # writes a ``placeholder_nl`` stub from turn one, so "no complete
+            # contract" spans both ``None`` and the incomplete placeholder
+            # (observed on sess_c0402de35872: a correct submit was rejected
+            # because the stub masked the bootstrap).  The structured submit
+            # is then the only trustworthy contract source; bootstrap from it
+            # without parsing prose or relaxing validation for an existing
+            # COMPLETE contract — the anti-smuggling replay check below
+            # still gates every submit against a complete spec.
+            if existing_spec is None or not existing_spec.is_complete:
+                existing_spec = (
+                    _bootstrap_submitted_spec(llm_args, existing=existing_spec)
+                    or existing_spec
+                )
+            replay_diffs: list[tuple[str, object, object]] = []
+            if (
+                existing_spec is not None
+                and existing_spec.is_complete
+                and state.get("fault_spec") is not None
+            ):
+                replay_diffs = _submission_mismatches(llm_args, existing_spec)
             if (
                 existing_spec is None
                 or not existing_spec.is_complete
-                or (
-                    # A bootstrapped spec has no prior server revision for
-                    # the model to replay.  Once a spec exists, the revision
-                    # and every executable field remain strict.
-                    state.get("fault_spec") is not None
-                    and not _submission_matches_spec(llm_args, existing_spec)
-                )
+                or replay_diffs
             ):
+                if replay_diffs:
+                    reject_reason = (
+                        "The submitted parameters differ from the reviewed contract: "
+                        f"{_mismatch_summary(replay_diffs)}. Replay the reviewed "
+                        "contract's fields exactly and resubmit."
+                    )
+                else:
+                    reject_reason = (
+                        "The submitted execution parameters are incomplete or cannot "
+                        "form a contract yet. Complete the reviewed plan first, "
+                        "then resubmit with its exact fields."
+                    )
                 return await _reject_turn(
-                    "The submitted content does not match the fault plan currently under review, "
-                    "or the plan is not yet complete. "
-                    "Confirm the current plan first, then resubmit using its exact fields.",
+                    reject_reason,
                     messages=messages,
                     human_msg=current_human_msg,
                     dialogue_round=dialogue_round,
@@ -1266,8 +1318,8 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
             if existing_spec.is_complete:
                 if tracker:
                     tracker.complete(
-                        f"Fault intent converged: {existing_spec.scope}-{existing_spec.blade_target} "
-                        f"{existing_spec.blade_action} @ {existing_spec.namespace}"
+                        f"Fault intent converged: {existing_spec.scope}-{existing_spec.fault_target} "
+                        f"{existing_spec.fault_action} @ {existing_spec.namespace}"
                     )
                 # Persist dialogue (audit log on disk; happens regardless
                 # of whether the user later approves or rejects the intent
@@ -1314,15 +1366,9 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
                     "dialogue_round": dialogue_round + 1,
                     "task_id": op_task_id,
                 }, hook_updates)
-            return await _reject_turn(
-                "The submitted execution parameters are incomplete or unsupported; "
-                "re-confirm based on the current intent summary.",
-                messages=messages,
-                human_msg=current_human_msg,
-                dialogue_round=dialogue_round,
-                tui_session_id=tui_session_id,
-                hook_updates=hook_updates,
-            )
+            # The replay gate above already rejects every None / incomplete /
+            # mismatching submission, so control only reaches the converged
+            # return once ``existing_spec.is_complete`` holds.
 
         # ── submit_batch_intent (batch injection) ──
         # Outside has_submit_tool_msg block: submit_batch_intent ToolMessage
@@ -1345,10 +1391,35 @@ def make_intent_clarification(llm=None, tools: list = None, hook=None, registry=
                         tui_session_id=tui_session_id,
                         hook_updates=hook_updates,
                     )
-                if not _submission_matches_batch(batch_args, existing_batch):
+                # Same bootstrap parity as the single-fault path: a model that
+                # omitted the proposal trailer has no reviewed batch yet, and
+                # the structured submission is the most faithful contract
+                # source.  Without this the replay gate below would diff the
+                # submission against an empty review — a guaranteed rejection
+                # the model can never repair.
+                if not existing_batch:
+                    existing_batch = [
+                        _advance_fault_spec(None, f)
+                        for f in batch_args.get("faults", [])
+                    ]
+                batch_diffs = _submission_batch_mismatches(batch_args, existing_batch)
+                incomplete = [s for s in existing_batch if not s.is_complete]
+                if batch_diffs:
                     return await _reject_turn(
-                        "The batch submission does not match the fault plan currently under review. "
-                        "Confirm the current plan first, then resubmit using its exact fields.",
+                        "The batch submission differs from the reviewed contract: "
+                        f"{_mismatch_summary(batch_diffs)}. Replay the reviewed "
+                        "contract's fields exactly and resubmit.",
+                        messages=messages,
+                        human_msg=current_human_msg,
+                        dialogue_round=dialogue_round,
+                        tui_session_id=tui_session_id,
+                        hook_updates=hook_updates,
+                    )
+                if incomplete:
+                    return await _reject_turn(
+                        "The batch execution parameters are incomplete or cannot "
+                        "form a contract yet. Complete the reviewed plan first, "
+                        "then resubmit with its exact fields.",
                         messages=messages,
                         human_msg=current_human_msg,
                         dialogue_round=dialogue_round,

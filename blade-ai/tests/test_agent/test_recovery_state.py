@@ -12,11 +12,11 @@ def test_build_recover_initial_from_checkpoint_copies_durable_facts_and_resets_r
     inject_values = {
         "task_id": "task-inject",
         "tui_session_id": "sid-1",
-        "blade_uid": "uid-123",
+        "experiment_uid": "uid-123",
         "skill_name": "pod-cpu-fullload",
         "skill_case_content": "case text",
         "inject_verification_summary": "verified",
-        "fault_spec": {"scope": "pod", "blade_target": "cpu", "blade_action": "fullload"},
+        "fault_spec": {"scope": "pod", "fault_target": "cpu", "fault_action": "fullload"},
         "kubeconfig": "/old/kubeconfig",
         "kube_context": "ctx-a",
         "kubewiz_cluster_uuid": "cluster-a",
@@ -42,10 +42,16 @@ def test_build_recover_initial_from_checkpoint_copies_durable_facts_and_resets_r
     assert initial["parent_task_id"] == "task-inject"
     assert initial["recover_task_id"] == "task-inject"
     assert initial["operation"] == "recover"
-    assert initial["blade_uid"] == "uid-123"
+    assert initial["experiment_uid"] == "uid-123"
     assert initial["skill_name"] == "pod-cpu-fullload"
     assert initial["inject_context"] == "inject context"
-    assert initial["fault_spec"] == inject_values["fault_spec"]
+    # The fault_spec passes through verbatim on the modern key face
+    # (phase-14 G4: the legacy-spelling hydration is retired).
+    assert initial["fault_spec"] == {
+        "scope": "pod", "fault_target": "cpu", "fault_action": "fullload",
+    }
+    assert "blade_uid" not in initial
+    assert "blade_target" not in initial["fault_spec"]
     assert initial["kubeconfig"] == "/new/kubeconfig"
     assert initial["kube_context"] == "ctx-a"
     assert initial["injection_method"] == "kubectl_exec"
@@ -107,8 +113,11 @@ def test_build_recover_initial_from_checkpoint_rebuilds_fault_spec_from_legacy_t
         "scope": "node",
         "names": ["node-a"],
         "labels": {},
-        "blade_target": "disk",
-        "blade_action": "fill",
+        # Phase-10: to_dict() projects the modern fault_target/fault_action
+        # only — the legacy blade_* dual-write mirrors are retired, old
+        # records hydrate on read instead.
+        "fault_target": "disk",
+        "fault_action": "fill",
         "params": {"percent": "85"},
         "params_flags": [],
         "duration_seconds": 0,
@@ -126,12 +135,12 @@ def test_build_recover_initial_from_checkpoint_rebuilds_fault_spec_from_legacy_t
 def test_ensure_recover_runtime_defaults_keeps_existing_durable_fields():
     initial = ensure_recover_runtime_defaults({
         "task_id": "task-recover",
-        "blade_uid": "uid-123",
+        "experiment_uid": "uid-123",
         "recover_phase": "layer2_verification",
     })
 
     assert initial["task_id"] == "task-recover"
-    assert initial["blade_uid"] == "uid-123"
+    assert initial["experiment_uid"] == "uid-123"
     assert initial["recover_phase"] == "layer2_verification"
     assert initial["operation"] == "recover"
     assert initial["recover_verification"] is None

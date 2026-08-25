@@ -1083,6 +1083,65 @@ class TestClarificationRoundSemantics:
         assert result["confirmed_intent"] == "inject"
         assert result["clarification_round"] == 0
 
+    @pytest.mark.asyncio
+    async def test_same_turn_trailer_plus_submit_converges_despite_stale_revision(self):
+        """Regression pin for the golden-eval failure mode: the reply that
+        carries a submit call may also carry the proposal trailer that just
+        advanced the server-owned revision.  The submit args then hold the
+        OLD revision (the only one the model could observe at generation
+        time).  Replay matching must compare execution fields only — a strict
+        revision replay turned this legal same-turn window into a guaranteed
+        rejection."""
+        prior = _advance_fault_spec(None, _raw_fault(["node-118"]))
+        # Same-turn trailer changed the contract → server advanced to rev 2.
+        reviewed = _advance_fault_spec(prior, _raw_fault(["node-119"]))
+        assert reviewed.revision == 2
+        submit = _submit_fault_tc(
+            fault_type="node-mem-load", scope="node", target="mem",
+            action="load", namespace="", names=["node-119"],
+            duration_seconds=600,
+            params={"mode": "ram", "mem-percent": 80},
+            user_description="对 node-119 注入内存故障",
+            fault_revision=1,  # extra unknown arg (resumed-session habit); pydantic drops it silently
+        )
+        messages = [
+            HumanMessage(content="确认", id="h-confirm"),
+            AIMessage(content="", tool_calls=[submit], id="ai-submit"),
+            ToolMessage(content="✓ Fault-injection intent submitted",
+                        name="submit_fault_intent",
+                        tool_call_id="call_submit_1", id="tool-submit"),
+        ]
+        node = make_intent_clarification(llm=AsyncMock())
+        result = await node(self._state(messages, spec=reviewed))
+        assert result["confirmed_intent"] == "inject"
+
+    @pytest.mark.asyncio
+    async def test_field_mismatch_rejection_names_the_differing_fields(self):
+        """A genuine replay mismatch (submit args ≠ reviewed contract) is
+        still rejected — and the rejection now names the differing fields so
+        the model can repair the submission instead of guessing."""
+        spec = _advance_fault_spec(None, _raw_fault(["node-118"]))
+        submit = _submit_fault_tc(
+            fault_type="node-mem-load", scope="node", target="mem",
+            action="load", namespace="", names=["node-118"],
+            duration_seconds=600,
+            params={"mode": "ram", "mem-percent": 90},  # reviewed says 80
+            user_description="对 node-118 注入内存故障",
+        )
+        messages = [
+            HumanMessage(content="确认", id="h-confirm"),
+            AIMessage(content="", tool_calls=[submit], id="ai-submit"),
+            ToolMessage(content="✓ Fault-injection intent submitted",
+                        name="submit_fault_intent",
+                        tool_call_id="call_submit_1", id="tool-submit"),
+        ]
+        node = make_intent_clarification(llm=AsyncMock())
+        result = await node(self._state(messages, spec=spec))
+        assert "confirmed_intent" not in result
+        reason = result["messages"][-1].content
+        assert "differ from the reviewed contract" in reason
+        assert "params" in reason and "mem-percent" in reason
+
 
 class TestExtractSubmitArgsCoercion:
     """Pin the coercion rules in ``_extract_submit_args`` for tool_call
@@ -1463,6 +1522,168 @@ class TestFastPathLLMArgsPriority:
         mock_llm.bind_tools.assert_not_called()
 
 
+class TestFastPathPlaceholderBootstrap:
+    """Pin the bootstrap contract for placeholder-obscured submits.
+
+    Regression for sess_c0402de35872: the TUI NL entry writes a
+    ``FaultSpec.placeholder_nl`` stub into state from the first turn, so the
+    bootstrap fallback's old ``existing_spec is None`` condition never fired
+    there — a model that rendered a complete reviewed plan but omitted the
+    private proposal trailer was rejected ("cannot form a contract yet")
+    and the drill only proceeded after a full rejection→resubmit
+    round-trip.  The gate now bootstraps from the structured submit
+    whenever the state holds no COMPLETE contract (None or placeholder),
+    restoring the submit as a contract source while the anti-smuggling
+    replay check stays intact for complete contracts.
+    """
+
+    @staticmethod
+    def _placeholder_state(messages, dialogue_round=5):
+        from chaos_agent.agent.spec.fault_spec import FaultSpec
+        return {
+            "confirmed_intent": None,
+            "messages": messages,
+            "clarification_round": 0,
+            "dialogue_round": dialogue_round,
+            # The TUI NL entry's placeholder stub — not None.
+            "fault_spec": FaultSpec.placeholder_nl(
+                user_description="选一个node注入内存故障",
+                source="tui",
+            ).to_dict(),
+        }
+
+    @pytest.mark.asyncio
+    async def test_placeholder_with_complete_submit_bootstraps(self):
+        """sess_c0402de35872 scenario: complete structured args against a
+        placeholder stub (the model rendered the plan in prose and never
+        wrote a trailer) must advance to inject on the FIRST submit."""
+        mock_llm = AsyncMock()
+        ai_submit = AIMessage(
+            content="已确定目标节点与完整演练方案，现在提交注入意图：",
+            tool_calls=[_submit_fault_tc(
+                fault_type="node-mem-load",
+                scope="node",
+                target="mem",
+                action="load",
+                namespace="",
+                names=["cn-shanghai.10.0.0.126"],
+                params={"mode": "ram", "mem-percent": "80"},
+                duration_seconds=0,
+                user_description="选一个node注入内存故障",
+            )],
+            id="ai_submit_placeholder",
+        )
+        tool_msg = ToolMessage(
+            content="✓ Fault-injection intent submitted",
+            name="submit_fault_intent",
+            tool_call_id="call_submit_1",
+        )
+        messages = [
+            HumanMessage(content="选一个node注入内存故障", id="h1"),
+            ai_submit,
+            tool_msg,
+        ]
+        node = make_intent_clarification(llm=mock_llm)
+        result = await node(self._placeholder_state(messages))
+        assert result["confirmed_intent"] == "inject"
+        fi = intent_dict_from_result(result)
+        assert fi["fault_type"] == "node-mem-load"
+        assert fi["scope"] == "node"
+        assert fi["target"] == "mem"
+        assert fi["action"] == "load"
+        assert fi["names"] == ["cn-shanghai.10.0.0.126"]
+        assert fi["params"] == {"mode": "ram", "mem-percent": "80"}
+        # duration_seconds=0 is the "system recommended" sentinel: the
+        # bootstrap lifts it to a positive default so is_complete holds.
+        assert fi["duration_seconds"] > 0
+        # The placeholder's identity field survives via inheritance.
+        assert fi["user_description"] == "选一个node注入内存故障"
+        mock_llm.bind_tools.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_placeholder_with_incomplete_submit_still_rejected(self):
+        """An incomplete submission cannot bootstrap a complete contract:
+        the placeholder stays and the node rejects with the
+        incomplete-contract wording — a legitimate refusal (the submit
+        itself lacks contract fields), not a trailer accident."""
+        mock_llm = AsyncMock()
+        ai_submit = AIMessage(
+            content="",
+            tool_calls=[_submit_fault_tc(
+                fault_type="pod-cpu-fullload",
+                scope="pod",
+                target="cpu",
+                action="fullload",
+                namespace="",  # pod scope requires one — submit is incomplete
+            )],
+            id="ai_submit_bad",
+        )
+        tool_msg = ToolMessage(
+            content="✓ 故障注入意图已提交",
+            name="submit_fault_intent",
+            tool_call_id="call_submit_1",
+        )
+        messages = [
+            HumanMessage(content="对 pod 注入 cpu 故障", id="h1"),
+            ai_submit,
+            tool_msg,
+        ]
+        node = make_intent_clarification(llm=mock_llm)
+        result = await node(self._placeholder_state(messages))
+        assert result.get("confirmed_intent") != "inject"
+        assert intent_dict_from_result(result) == {}
+        ai_msgs = [m for m in result.get("messages", []) if isinstance(m, AIMessage)]
+        assert len(ai_msgs) == 1
+        assert "form a contract yet" in ai_msgs[0].content
+        mock_llm.bind_tools.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_complete_contract_still_gates_mismatched_submit(self):
+        """Anti-smuggling regression guard: with a COMPLETE reviewed contract
+        in state, bootstrap never fires and a deviating submit is rejected
+        with the mismatch wording."""
+        from chaos_agent.agent.spec.fault_spec import FaultSpec
+        mock_llm = AsyncMock()
+        ai_submit = AIMessage(
+            content="",
+            tool_calls=[_submit_fault_tc(
+                fault_type="pod-cpu-fullload",
+                scope="pod",
+                target="cpu",
+                action="fullload",
+                namespace="production",  # deviates from the reviewed default
+            )],
+            id="ai_submit_smuggle",
+        )
+        tool_msg = ToolMessage(
+            content="✓ 故障注入意图已提交",
+            name="submit_fault_intent",
+            tool_call_id="call_submit_1",
+        )
+        messages = [
+            HumanMessage(content="对 pod 注入 cpu 故障", id="h1"),
+            ai_submit,
+            tool_msg,
+        ]
+        reviewed = FaultSpec(
+            scope="pod", fault_target="cpu", fault_action="fullload",
+            namespace="default", names=["nginx-1"], duration_seconds=600,
+        )
+        node = make_intent_clarification(llm=mock_llm)
+        result = await node({
+            "confirmed_intent": None,
+            "messages": messages,
+            "clarification_round": 0,
+            "dialogue_round": 3,
+            "fault_spec": reviewed.to_dict(),
+        })
+        assert result.get("confirmed_intent") != "inject"
+        ai_msgs = [m for m in result.get("messages", []) if isinstance(m, AIMessage)]
+        assert len(ai_msgs) == 1
+        assert "differ from the reviewed contract" in ai_msgs[0].content
+        mock_llm.bind_tools.assert_not_called()
+
+
 class TestHookIntegration:
     """Tests for PreReasoningHook integration (merge_hook_updates)."""
 
@@ -1559,7 +1780,7 @@ class TestHookIntegration:
         node = make_intent_clarification(llm=mock_llm)
         from chaos_agent.agent.spec.fault_spec import FaultSpec
         _spec = FaultSpec(
-            scope="pod", blade_target="cpu", blade_action="fullload",
+            scope="pod", fault_target="cpu", fault_action="fullload",
             namespace="default", labels={"app": "myapp"},
             duration_seconds=600,
         )
@@ -1637,7 +1858,7 @@ class TestHookIntegration:
         node = make_intent_clarification(llm=mock_llm, hook=mock_hook)
         from chaos_agent.agent.spec.fault_spec import FaultSpec
         _spec_hook = FaultSpec(
-            scope="pod", blade_target="cpu", blade_action="fullload",
+            scope="pod", fault_target="cpu", fault_action="fullload",
             namespace="default", labels={"app": "myapp"},
             duration_seconds=600,
         )
@@ -1670,8 +1891,8 @@ class TestReviewedFaultSpecSection:
     def _spec(self, **overrides):
         base = {
             "scope": "pod",
-            "blade_target": "cpu",
-            "blade_action": "fullload",
+            "fault_target": "cpu",
+            "fault_action": "fullload",
             "namespace": "default",
             "names": ["nginx"],
             "revision": 2,
@@ -1697,18 +1918,21 @@ class TestReviewedFaultSpecSection:
         assert '"target": "cpu"' in section
         assert '"action": "fullload"' in section
 
-    def test_server_owned_revision_is_surfaced(self):
+    def test_server_owned_revision_is_hidden_from_intent_view(self):
+        """The intent surface never shows or instructs about the revision:
+        the submit replay compares execution fields only, and the same-turn
+        trailer can advance the revision beyond what the model observed —
+        a value it cannot carry correctly must not exist in its world."""
         section = get_intent_completeness_section(self._spec(revision=7))
-        assert '"revision": 7' in section
-        # The guidance must instruct the LLM to preserve the revision.
-        assert "revision" in section
+        assert '"revision"' not in section
+        assert "revision" not in section
 
     def test_batch_faults_render_multiple(self):
         section = get_intent_completeness_section(
             batch_faults=[
-                self._spec(scope="pod", blade_target="cpu"),
-                self._spec(scope="node", blade_target="disk",
-                           blade_action="fill", names=["node-a"]),
+                self._spec(scope="pod", fault_target="cpu"),
+                self._spec(scope="node", fault_target="disk",
+                           fault_action="fill", names=["node-a"]),
             ],
         )
         assert '"scope": "pod"' in section
@@ -1728,7 +1952,7 @@ class TestBatchFastPathDurationContract:
     @staticmethod
     def _spec(name: str) -> FaultSpec:
         return FaultSpec(
-            scope="pod", blade_target="cpu", blade_action="fullload",
+            scope="pod", fault_target="cpu", fault_action="fullload",
             namespace="ns", names=(name,), duration_seconds=600, revision=1,
         )
 
@@ -1793,4 +2017,54 @@ class TestBatchFastPathDurationContract:
         ))
         assert result.get("confirmed_intent") != "batch_inject"
         assert "duration_seconds" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_field_mismatch_rejection_names_the_differing_fault_field(self):
+        """Batch replay diffs are indexed per fault so the model can repair
+        exactly the entry that strayed from the reviewed contract."""
+        s1, s2 = self._spec("p1"), self._spec("p2")
+        bad = self._replay(s2)
+        bad["params"] = {"cpu-percent": "80"}
+        node = make_intent_clarification(llm=AsyncMock())
+        result = await node(self._state(
+            [s1, s2], [self._replay(s1), bad], s1.revision,
+        ))
+        assert result.get("confirmed_intent") != "batch_inject"
+        reason = result["messages"][0].content
+        assert "differs from the reviewed contract" in reason
+        assert "fault[2].params" in reason and "cpu-percent" in reason
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_converges_when_no_reviewed_batch_exists(self):
+        """Regression pin for the trailer-less batch submission: without a
+        reviewed contract the replay gate used to diff the submission against
+        an empty review — a guaranteed rejection the model could never
+        repair.  The structured submission bootstraps the contract, exactly
+        like the single-fault path."""
+        s1, s2 = self._spec("p1"), self._spec("p2")
+        state = self._state(
+            [], [self._replay(s1), self._replay(s2)], 0,
+        )
+        state["batch_submit_args"] = None
+        node = make_intent_clarification(llm=AsyncMock())
+        result = await node(state)
+        assert result.get("confirmed_intent") == "batch_inject"
+        assert len(result["batch_submit_args"]["faults"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_incomplete_bootstrapped_batch_rejected_actionably(self):
+        """A bootstrapped batch missing a locator/namespace must be rejected
+        with the incomplete wording — never the misleading 'differs from the
+        reviewed contract' phrasing when no review existed."""
+        good = self._replay(self._spec("p1"))
+        bad = self._replay(self._spec("p2"))
+        bad["namespace"] = ""
+        state = self._state([], [good, bad], 0)
+        state["batch_submit_args"] = None
+        node = make_intent_clarification(llm=AsyncMock())
+        result = await node(state)
+        assert result.get("confirmed_intent") != "batch_inject"
+        reason = result["messages"][0].content
+        assert "incomplete" in reason
+        assert "differs from the reviewed contract" not in reason
 

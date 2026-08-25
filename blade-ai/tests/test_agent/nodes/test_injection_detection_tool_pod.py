@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from chaos_agent.agent.nodes.execute._injection_detection import (
-    _parse_tool_pod_rows,
+from chaos_agent.tools.pod_discovery import (
+    parse_tool_pod_rows as _parse_tool_pod_rows,
     discover_tool_pod_on_node,
 )
 

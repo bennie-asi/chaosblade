@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _build_recover_verifier_prompt(
-    *, layer1_label: str = "blade_destroy", profile: str = PROFILE_K8S,
+    *, layer1_label: str = "deterministic destroy", profile: str = PROFILE_K8S,
     ledger_section: str = "",
 ) -> str:
     """Build the recover verifier system prompt using U-shaped composition.
@@ -35,9 +35,10 @@ def _build_recover_verifier_prompt(
     low-priority information in the middle.
 
     Args:
-        layer1_label: The label describing what Layer 1 did — "blade_destroy"
-            for deterministic ChaosBlade recovery, "recovery execution" for the
-            LLM-driven (kubectl-exec / non-ChaosBlade) path.
+        layer1_label: The label describing what Layer 1 did — "deterministic
+            destroy" for the carrier's programmatic experiment destroy,
+            "recovery execution" for the LLM-driven (kubectl-exec /
+            non-experiment-carrier) path.
         profile: Channel profile ("k8s"|"host").
     """
     from chaos_agent.agent.prompts.sections.recovery import build_recover_verifier_system_prompt

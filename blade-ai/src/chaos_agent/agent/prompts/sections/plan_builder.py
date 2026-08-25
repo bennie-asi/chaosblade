@@ -213,7 +213,7 @@ def get_plan_builder_progress_section(
 
     if fault_spec and not collected_faults:
         known = []
-        for k in ("scope", "blade_target", "blade_action", "namespace", "names"):
+        for k in ("scope", "fault_target", "fault_action", "namespace", "names"):
             v = getattr(fault_spec, k, None)
             if v:
                 known.append(f"{k}={v}")

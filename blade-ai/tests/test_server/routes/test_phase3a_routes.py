@@ -814,8 +814,8 @@ class TestIntentConfirmDryRunSkip:
             "task_id": "task-test",
             "fault_spec": {
                 "scope": "node",
-                "blade_target": "cpu",
-                "blade_action": "fullload",
+                "fault_target": "cpu",
+                "fault_action": "fullload",
                 "namespace": "",
                 "names": [],
                 "labels": {},
@@ -855,8 +855,8 @@ class TestIntentConfirmDryRunSkip:
             "task_id": "task-test",
             "fault_spec": {
                 "scope": "node",
-                "blade_target": "cpu",
-                "blade_action": "fullload",
+                "fault_target": "cpu",
+                "fault_action": "fullload",
                 "namespace": "",
                 "names": [],
                 "labels": {},

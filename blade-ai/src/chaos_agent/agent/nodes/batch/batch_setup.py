@@ -46,8 +46,8 @@ def _normalize_batch_args(state: dict) -> dict:
     return {
         "faults": [{
             "scope": spec_dict.get("scope", ""),
-            "target": spec_dict.get("blade_target", ""),
-            "action": spec_dict.get("blade_action", ""),
+            "target": spec_dict.get("fault_target", ""),
+            "action": spec_dict.get("fault_action", ""),
             "namespace": spec_dict.get("namespace", ""),
             "names": list(spec_dict.get("names", [])),
             "labels": dict(spec_dict.get("labels", {})),
@@ -65,7 +65,7 @@ def _build_agent_prompt(spec: FaultSpec, idx: int, total: int) -> str:
     if total > 1:
         parts.append(f"Batch fault injection ({idx + 1}/{total})")
     parts.append("Plan and execute the injection for the following fault:")
-    parts.append(f"- Fault type: {spec.scope}-{spec.blade_target}-{spec.blade_action}")
+    parts.append(f"- Fault type: {spec.scope}-{spec.fault_target}-{spec.fault_action}")
     if spec.namespace:
         parts.append(f"- Namespace: {spec.namespace}")
     if spec.names:
@@ -98,8 +98,14 @@ async def batch_setup(state: AgentState) -> dict:
             scope=current.get("scope") or existing.get("scope", ""),
             names=tuple(current.get("names") or existing.get("names", [])),
             labels=dict(current.get("labels") or existing.get("labels", {})),
-            blade_target=current.get("target") or existing.get("blade_target", ""),
-            blade_action=current.get("action") or existing.get("blade_action", ""),
+            fault_target=(
+                current.get("target")
+                or existing.get("fault_target", "")
+            ),
+            fault_action=(
+                current.get("action")
+                or existing.get("fault_action", "")
+            ),
             params=dict(current.get("params") or existing.get("params", {})),
             params_flags=list(existing.get("params_flags", [])),
             duration_seconds=int(existing.get("duration_seconds", 0)),
@@ -116,7 +122,7 @@ async def batch_setup(state: AgentState) -> dict:
     try:
         from chaos_agent.agent.nodes.planning.intent_clarification import bootstrap_task_session
         from langchain_core.messages import SystemMessage
-        desc = f"{spec.scope}-{spec.blade_target} {spec.blade_action}"
+        desc = f"{spec.scope}-{spec.fault_target} {spec.fault_action}"
         label = f"Batch fault {idx + 1}/{len(faults)}: {desc}" if len(faults) > 1 else desc
         bootstrap_task_session(new_task_id, "inject", tui_sid, SystemMessage(content=label))
     except Exception:

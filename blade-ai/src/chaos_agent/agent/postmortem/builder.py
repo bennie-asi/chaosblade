@@ -44,7 +44,7 @@ def should_generate_postmortem(state: dict, settings) -> bool:
          a) verification completed (injection reached the verifier)
          b) task failed with a category outside the skip list
 
-    Deliberately NOT keyed on ``blade_uid`` (task-349ccf5d): the uid
+    Deliberately NOT keyed on ``experiment_uid`` (task-349ccf5d): the uid
     can be wiped by a replan path while the experiment DID happen —
     gating on it suppresses the report exactly when the failure was
     systemic enough to lose its own record.
@@ -124,12 +124,14 @@ def build_postmortem_context(state: dict, *, max_messages: int = 30) -> dict[str
 
     fault_type = fault_type_from_state(state)
 
+    experiment_uid_out = state.get("experiment_uid") or ""
+
     return {
         "task_id": state.get("task_id", ""),
         "fault_type": fault_type,
         "skill_name": fault_type,
         "fault_spec": fault_spec_dict,
-        "blade_uid": state.get("blade_uid", "") or "",
+        "experiment_uid": experiment_uid_out,
         "result": {
             "status": result.get("status", "") if isinstance(result, dict) else "",
             "task_state": state.get("task_state", "") or result.get("task_state", "") if isinstance(result, dict) else state.get("task_state", ""),

@@ -25,15 +25,15 @@ class TestFreezeApprovedTarget:
                 "labels": {}, "resource_type": "pod",
             },
             params={"scope": "pod", "target": "cpu", "action": "fullload"},
-            blade_scope="pod",
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_scope="pod",
+            fault_target="cpu",
+            fault_action="fullload",
         )
         assert d == {
             "scope": "pod", "namespace": "prod",
             "names": ["pod-a"], "labels": {},
             "is_namespace_wide": False,
-            "blade_target": "cpu", "blade_action": "fullload",
+            "fault_target": "cpu", "fault_action": "fullload",
             "lock_fault_type": True,
             "owner_names": [],
             "resolved_names": [],
@@ -47,7 +47,7 @@ class TestFreezeApprovedTarget:
         d = freeze_approved_target(
             target={"namespace": "ns", "names": ["p1"]},
             params={"scope": "container"},
-            blade_scope=None, blade_target="jvm", blade_action="oom",
+            fault_scope=None, fault_target="jvm", fault_action="oom",
         )
         assert d["scope"] == "pod"
 
@@ -55,7 +55,7 @@ class TestFreezeApprovedTarget:
         d = freeze_approved_target(
             target={"namespace": "leftover", "names": ["node-1"]},
             params={"scope": "node"},
-            blade_scope="node", blade_target="cpu", blade_action="fullload",
+            fault_scope="node", fault_target="cpu", fault_action="fullload",
         )
         assert d["scope"] == "node"
         # Cluster-scoped → namespace nulled in the snapshot.
@@ -65,7 +65,7 @@ class TestFreezeApprovedTarget:
         d = freeze_approved_target(
             target={"names": ["p1"]},  # no namespace
             params={"scope": "pod"},
-            blade_scope=None, blade_target=None, blade_action=None,
+            fault_scope=None, fault_target=None, fault_action=None,
         )
         assert d["namespace"] == "default"
 
@@ -73,7 +73,7 @@ class TestFreezeApprovedTarget:
         d = freeze_approved_target(
             target={"namespace": "ns"},
             params={"scope": "pod"},
-            blade_scope=None, blade_target=None, blade_action=None,
+            fault_scope=None, fault_target=None, fault_action=None,
         )
         assert d["is_namespace_wide"] is True
 
@@ -81,7 +81,7 @@ class TestFreezeApprovedTarget:
         d = freeze_approved_target(
             target={"namespace": "ns", "labels": {"app": "demo"}},
             params={"scope": "pod"},
-            blade_scope=None, blade_target=None, blade_action=None,
+            fault_scope=None, fault_target=None, fault_action=None,
         )
         assert d["is_namespace_wide"] is False
 
@@ -90,7 +90,7 @@ class TestFreezeApprovedTarget:
         d = freeze_approved_target(
             target={"namespace": "ns", "names": "a,b,c"},
             params={"scope": "pod"},
-            blade_scope=None, blade_target=None, blade_action=None,
+            fault_scope=None, fault_target=None, fault_action=None,
         )
         assert d["names"] == ["a", "b", "c"]
 
@@ -98,21 +98,21 @@ class TestFreezeApprovedTarget:
         d = freeze_approved_target(
             target={"namespace": "ns", "names": ["p"]},
             params={"target": "mem", "action": "ram"},
-            blade_scope="pod",
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_scope="pod",
+            fault_target="cpu",
+            fault_action="fullload",
         )
-        assert d["blade_target"] == "cpu"
-        assert d["blade_action"] == "fullload"
+        assert d["fault_target"] == "cpu"
+        assert d["fault_action"] == "fullload"
 
     def test_falls_back_to_params_when_blade_fields_empty(self):
         d = freeze_approved_target(
             target={"namespace": "ns", "names": ["p"]},
             params={"scope": "pod", "target": "mem", "action": "ram"},
-            blade_scope=None, blade_target=None, blade_action=None,
+            fault_scope=None, fault_target=None, fault_action=None,
         )
-        assert d["blade_target"] == "mem"
-        assert d["blade_action"] == "ram"
+        assert d["fault_target"] == "mem"
+        assert d["fault_action"] == "ram"
 
     def test_no_scope_returns_none(self):
         # No scope anywhere — caller should treat as "no approval"
@@ -120,14 +120,14 @@ class TestFreezeApprovedTarget:
         d = freeze_approved_target(
             target={"namespace": "ns", "names": ["p"]},
             params={},
-            blade_scope=None, blade_target=None, blade_action=None,
+            fault_scope=None, fault_target=None, fault_action=None,
         )
         assert d is None
 
     def test_none_target_and_params(self):
         d = freeze_approved_target(
             target=None, params=None,
-            blade_scope=None, blade_target=None, blade_action=None,
+            fault_scope=None, fault_target=None, fault_action=None,
         )
         assert d is None
 
@@ -135,7 +135,7 @@ class TestFreezeApprovedTarget:
         d = freeze_approved_target(
             target={"namespace": "ns", "names": ["p"]},
             params={"scope": "pod"},
-            blade_scope=None, blade_target="cpu", blade_action=None,
+            fault_scope=None, fault_target="cpu", fault_action=None,
         )
         assert d["lock_fault_type"] is True
 
@@ -143,7 +143,7 @@ class TestFreezeApprovedTarget:
         d = freeze_approved_target(
             target={"namespace": "ns", "names": ["p"]},
             params={"scope": "pod"},
-            blade_scope=None, blade_target="cpu", blade_action=None,
+            fault_scope=None, fault_target="cpu", fault_action=None,
             lock_fault_type=False,
         )
         assert d["lock_fault_type"] is False
@@ -156,8 +156,8 @@ class TestFreezeApprovedTargetFromSpec:
             scope="pod",
             names=("pod-a",),
             labels={"app": "demo"},
-            blade_target="network",
-            blade_action="loss",
+            fault_target="network",
+            fault_action="loss",
             params={"percent": "100"},
         )
 
@@ -173,9 +173,9 @@ class TestFreezeApprovedTargetFromSpec:
                 "resource_type": "pod",
             },
             params={"percent": "100"},
-            blade_scope="pod",
-            blade_target="network",
-            blade_action="loss",
+            fault_scope="pod",
+            fault_target="network",
+            fault_action="loss",
             owner_names=("deploy-a",),
         )
 
@@ -186,8 +186,8 @@ class TestFreezeApprovedTargetFromSpec:
             namespace="prod",
             scope="pod",
             names=("pod-a",),
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_target="cpu",
+            fault_action="fullload",
         )
 
         d = freeze_approved_target_from_spec(spec.to_dict())
@@ -196,7 +196,7 @@ class TestFreezeApprovedTargetFromSpec:
         assert d["scope"] == "pod"
         assert d["namespace"] == "prod"
         assert d["names"] == ["pod-a"]
-        assert d["blade_target"] == "cpu"
+        assert d["fault_target"] == "cpu"
 
     def test_none_or_malformed_spec_returns_none(self):
         assert freeze_approved_target_from_spec(None) is None
@@ -208,7 +208,7 @@ class TestApprovedFromDict:
         original = freeze_approved_target(
             target={"namespace": "prod", "names": ["a", "b"]},
             params={"scope": "pod"},
-            blade_scope=None, blade_target="cpu", blade_action="fullload",
+            fault_scope=None, fault_target="cpu", fault_action="fullload",
         )
         approved = approved_from_dict(original)
         assert isinstance(approved, ApprovedTarget)
@@ -216,8 +216,8 @@ class TestApprovedFromDict:
         assert approved.namespace == "prod"
         assert approved.names == ("a", "b")
         assert approved.labels == {}
-        assert approved.blade_target == "cpu"
-        assert approved.blade_action == "fullload"
+        assert approved.fault_target == "cpu"
+        assert approved.fault_action == "fullload"
         assert approved.lock_fault_type is True
 
     def test_none_returns_none(self):
@@ -241,7 +241,7 @@ class TestApprovedFromDict:
         # (safer: lock until operator explicitly relaxes).
         approved = approved_from_dict({
             "scope": "pod", "namespace": "ns",
-            "names": ["a"], "blade_target": "cpu",
+            "names": ["a"], "fault_target": "cpu",
         })
         assert approved is not None
         assert approved.lock_fault_type is True

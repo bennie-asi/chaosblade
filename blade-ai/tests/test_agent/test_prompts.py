@@ -59,6 +59,26 @@ class TestSectionFunctions:
         assert "read-only tools" in section
         assert "finish_planning" in section
 
+    def test_workflow_plan_contract_keeps_execution_steps_mutation_only(self):
+        # Postmortem (inject-3a745506): the planner copied the case's
+        # observation step into "Execution Steps" and Phase 2 executed it
+        # literally — a 90s+ wait consumed the fault window; "2+ checks"
+        # generalized into "≥2 次" and forced the verifier into an empty
+        # second window. The contract keeps observation in Verification
+        # Methods and licenses repeated sampling only for ruling an effect OUT.
+        section = get_workflow_section()
+        assert "MUTATION steps only" in section
+        assert "don't invent observation rounds" in section
+        assert "rule an effect OUT" in section
+
+    def test_execution_directives_skip_planned_observation_steps(self):
+        # Legacy or malformed plans may still carry observation steps; the
+        # executor must treat them as verification work and skip them rather
+        # than executing them (inject-3a745506).
+        section = get_execution_directives_section()
+        assert "verification work" in section
+        assert "skip it" in section
+
     def test_verification_heuristics_encodes_timeout_discipline(self):
         # Postmortem lesson (task-e951696f) generalized: a timeout/failed
         # observation is never proof of success, and partial coverage must not
@@ -105,12 +125,17 @@ class TestSectionFunctions:
         assert "Parallel Calls" in section
         assert "Avoid Redundancy" in section
         assert "read_skill_resource" in section
-        assert "Timeout Protection" in section
+        # Timeout Protection removed: default timeout is a program guarantee
+        # visible in the injection tool's own schema/docstring.
+        assert "Timeout Protection" not in section
 
     def test_guidelines_section_contains_follow_instructions(self):
         section = get_guidelines_section(phase=2)
         assert "Skill-case methods come first" in section
-        assert "Runtime Feedback Priority" in section
+        # Runtime Feedback Priority removed from guidelines: executor Core
+        # Principles + REMEMBER carry the same principle in the
+        # primacy/recency zones; the middle copy added nothing.
+        assert "Runtime Feedback Priority" not in section
 
     def test_core_principles_section_content(self):
         section = get_core_principles_section()
@@ -180,6 +205,16 @@ class TestSectionFunctions:
         # "[Tool call: request_replan]" output that matched no channel).
         assert "request_replan" in section
         assert "<replan_request>" not in section
+
+    def test_executor_remember_rejects_replan_text_marker(self):
+        """The recency-zone mirror must carry the same anti-text-marker
+        contract as Core Principles — alignment tests only check shared
+        bullets, so the REMEMBER-only replan escape rule needs its own
+        negative guard against regression to the printed-marker form."""
+        section = get_executor_remember_section()
+        assert "request_replan" in section
+        assert "<replan_request>" not in section
+        assert "never describe it in prose" in section
 
     def test_executor_core_principles_and_remember_are_aligned(self):
         """REMEMBER must reinforce the same rules as executor Core Principles."""
@@ -418,18 +453,28 @@ class TestIntentClarificationSectionFunctions:
         assert "Chinese" in section
         assert "blade-fault-proposal" in section
         assert "FaultSpec" in section
-        assert "revision" in section
+        # Revision-free replay contract: the model replays execution fields
+        # only; the server-owned revision must never surface as a replay
+        # instruction (strict revision replay caused same-turn trailer+submit
+        # rejections — the model cannot observe the revision its own trailer
+        # just advanced).
+        assert "execution" in section and "fields exactly" in section
+        assert "carry its exact revision" not in section
+        assert "fault_revision" not in section
 
     def test_fault_contract_includes_current_fault_spec(self):
         section = get_intent_completeness_section({
             "revision": 1,
             "objective": "test",
-            "scope": "pod", "blade_target": "network", "blade_action": "drop",
+            "scope": "pod", "fault_target": "network", "fault_action": "drop",
             "namespace": "default", "names": [], "labels": {}, "params": {},
             "boundaries": [], "constraints": [], "assumptions": [],
         })
         assert "Reviewed FaultSpec" in section
         assert '"objective": "test"' in section
+        # The server-owned revision is hidden from the contract view so the
+        # model can never carry or quote it.
+        assert '"revision"' not in section
 
     def test_fault_contract_shows_partial_collection_state(self):
         section = get_intent_completeness_section({"scope": "pod"})
@@ -480,7 +525,7 @@ class TestBuildIntentClarificationPrompt:
             fault_spec={
                 "revision": 1,
                 "objective": "network isolation",
-                "scope": "pod", "blade_target": "network", "blade_action": "drop",
+                "scope": "pod", "fault_target": "network", "fault_action": "drop",
                 "namespace": "default", "names": [], "labels": {}, "params": {},
                 "boundaries": [], "constraints": [], "assumptions": [],
             },

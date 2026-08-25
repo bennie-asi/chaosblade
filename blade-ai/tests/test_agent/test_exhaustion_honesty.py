@@ -34,7 +34,7 @@ class TestExhaustionRoutesToVerification:
     def test_budget_exhaustion_goes_to_verifier(self, mock_settings):
         mock_settings.max_execute_loop = 100
         mock_settings.max_inject_seconds = 0
-        state = {"execute_loop_count": 100, "blade_uid": "uid-1", "error": None}
+        state = {"execute_loop_count": 100, "experiment_uid": "uid-1", "error": None}
         assert should_continue_execute_loop(state) == "verifier"
 
     @patch("chaos_agent.agent.router.settings")
@@ -47,8 +47,8 @@ class TestExhaustionRoutesToVerification:
         """
         mock_settings.max_execute_loop = 100
         mock_settings.max_inject_seconds = 0
-        exhausted = {"execute_loop_count": 100, "blade_uid": "u", "error": None}
-        errored = {"execute_loop_count": 1, "blade_uid": "u", "error": "boom"}
+        exhausted = {"execute_loop_count": 100, "experiment_uid": "u", "error": None}
+        errored = {"execute_loop_count": 1, "experiment_uid": "u", "error": "boom"}
         assert should_continue_execute_loop(exhausted) == \
             should_continue_execute_loop(errored) == "verifier"
 
@@ -155,7 +155,7 @@ class TestTerminalStateIsSharedAcrossPaths:
     def test_unverified_is_failed_not_in_progress(self):
         from chaos_agent.agent.state import infer_task_state, terminal_task_state
 
-        unverified = {"confirmed_intent": "inject", "blade_uid": "u1"}
+        unverified = {"confirmed_intent": "inject", "experiment_uid": "u1"}
         # ``infer_task_state`` answers "where is this run" — in progress.
         assert infer_task_state(unverified) == "injecting"
         # At a terminal point that answer is unavailable, so it must not leak out.
@@ -165,7 +165,7 @@ class TestTerminalStateIsSharedAcrossPaths:
         from chaos_agent.agent.state import terminal_task_state
 
         verified = {
-            "confirmed_intent": "inject", "blade_uid": "u1",
+            "confirmed_intent": "inject", "experiment_uid": "u1",
             "verification": {"layer1": {"status": "passed"},
                              "layer2": {"status": "passed"}},
         }
@@ -183,9 +183,9 @@ class TestUnverifiedIsNotSuccess:
 
         state = {
             "confirmed_intent": "inject",
-            "blade_uid": "40d9b8e9ec1a1552",
-            "fault_spec": {"scope": "pod", "blade_target": "mem",
-                           "blade_action": "load", "namespace": "arms-prom"},
+            "experiment_uid": "40d9b8e9ec1a1552",
+            "fault_spec": {"scope": "pod", "fault_target": "mem",
+                           "fault_action": "load", "namespace": "arms-prom"},
         }
         state.update(overrides)
         return build_inject_data_from_state(state, "task-1")
@@ -201,7 +201,8 @@ class TestUnverifiedIsNotSuccess:
         """An unverified experiment may still be live; it must stay recoverable."""
         data = self._build()
         assert data["recovery_handle"] == {
-            "kind": "blade_uid", "value": "40d9b8e9ec1a1552",
+            "kind": "experiment_uid", "value": "40d9b8e9ec1a1552",
+            "experiment_uid": "40d9b8e9ec1a1552",
         }
 
     def test_verified_injection_is_still_injected(self):
@@ -351,7 +352,7 @@ class TestHardStagnationBlock:
         approved = freeze_approved_target(
             target={"namespace": "arms-prom", "names": ["pod-a"]},
             params={"scope": "pod"},
-            blade_scope="pod", blade_target="mem", blade_action="load",
+            fault_scope="pod", fault_target="mem", fault_action="load",
         )
         base = {
             "approved_target": approved, "execution_artifacts": [],
@@ -624,7 +625,7 @@ class TestEmptyTurnIsNotAConclusion:
     def test_execute_loop_keeps_going_on_an_empty_turn(self, mock_settings, msg):
         mock_settings.max_execute_loop = 100
         mock_settings.max_inject_seconds = 0
-        state = {"execute_loop_count": 50, "blade_uid": "uid-1", "messages": [msg]}
+        state = {"execute_loop_count": 50, "experiment_uid": "uid-1", "messages": [msg]}
         assert should_continue_execute_loop(state) == "continue"
 
     @patch("chaos_agent.agent.router.settings")
@@ -633,7 +634,7 @@ class TestEmptyTurnIsNotAConclusion:
         mock_settings.max_execute_loop = 100
         mock_settings.max_inject_seconds = 0
         state = {
-            "execute_loop_count": 50, "blade_uid": "uid-1", "messages": [self.REAL],
+            "execute_loop_count": 50, "experiment_uid": "uid-1", "messages": [self.REAL],
         }
         assert should_continue_execute_loop(state) == "verifier"
 
@@ -662,7 +663,7 @@ class TestEmptyTurnIsNotAConclusion:
         msg = AIMessage(content="", tool_calls=[
             {"name": "kubectl", "args": {"subcommand": "get"}, "id": "c1"},
         ])
-        state = {"execute_loop_count": 50, "blade_uid": "uid-1", "messages": [msg]}
+        state = {"execute_loop_count": 50, "experiment_uid": "uid-1", "messages": [msg]}
         assert should_continue_execute_loop(state) == "continue"
 
     def test_empty_turn_predicate_ignores_non_ai_messages(self):

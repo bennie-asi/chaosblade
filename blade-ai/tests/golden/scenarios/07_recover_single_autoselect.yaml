@@ -1,0 +1,27 @@
+# Golden 07 — recover with exactly one active experiment: auto-selected
+# with enriched detail, no user prompt needed.
+name: recover-single-autoselect
+description: 单一活跃实验被自动选中进入恢复
+surface: recover
+input:
+  user_message: "帮我恢复刚才的故障"
+  store_rows:
+    - task_id: "task-001"
+      experiment_uid: "exp-abc"
+      skill: "k8s-chaos-skills"
+      fault_type: "pod-cpu-fullload"
+      target:
+        namespace: "cms-demo"
+        names: ["accounting"]
+      gmt_create: "2026-08-18T10:00:00+08:00"
+      plan_summary: ""
+  store_get:
+    task_id: "task-001"
+    fault_type: "pod-cpu-fullload"
+    experiment_uid: "exp-abc"
+    target:
+      namespace: "cms-demo"
+expected:
+  operation: recover
+  recover_task_id: "task-001"
+  message_contains: ["task-001"]

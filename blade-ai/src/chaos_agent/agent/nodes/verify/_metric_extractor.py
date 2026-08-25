@@ -317,8 +317,8 @@ def _parse_kubectl_logs(stdout: str) -> dict[str, str]:
 
 def extract_baseline_metrics(
     baseline: dict[str, Any] | None,
-    blade_target: str,
-    blade_action: str,
+    fault_target: str,
+    fault_action: str,
 ) -> dict[str, str]:
     """Walk a baseline ``observations`` list and aggregate metrics.
 
@@ -347,7 +347,7 @@ def extract_baseline_metrics(
         cmd = obs.get("command") or obs.get("description", "") or ""
         metrics.update(extract_metrics("baseline", cmd, stdout))
 
-    return _filter_metrics_by_fault(metrics, blade_target, blade_action)
+    return _filter_metrics_by_fault(metrics, fault_target, fault_action)
 
 
 # ---------------------------------------------------------------------------
@@ -371,11 +371,11 @@ _FAULT_METRICS: dict[str, frozenset[str]] = {
 
 def _filter_metrics_by_fault(
     metrics: dict[str, str],
-    blade_target: str,
-    blade_action: str,
+    fault_target: str,
+    fault_action: str,
 ) -> dict[str, str]:
     """Keep only fault-relevant metrics (prefix-match on metric name)."""
-    target_key = (blade_target or "").lower()
+    target_key = (fault_target or "").lower()
     if target_key not in _FAULT_METRICS:
         # Unknown fault: pass-through with always-keep set merged in.
         return dict(metrics)

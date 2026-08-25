@@ -10,8 +10,8 @@ def test_extract_db_fields_persists_fault_spec_and_legacy_projection():
         scope="pod",
         names=("pod-a", "pod-b"),
         labels={"app": "demo"},
-        blade_target="network",
-        blade_action="loss",
+        fault_target="network",
+        fault_action="loss",
         params={"percent": "100"},
         source="test",
     ).to_dict()
@@ -52,16 +52,16 @@ def test_extract_db_fields_persists_fault_spec_and_legacy_projection():
     [
         # 按 names 选目标的 pod
         (dict(namespace="prod", scope="pod", names=("pod-a",),
-              blade_target="network", blade_action="loss"), "pod"),
+              fault_target="network", fault_action="loss"), "pod"),
         # 按 labels 选目标（names 为空 → target_name 为空，但 target 必须有）
         (dict(namespace="prod", scope="pod", names=(), labels={"app": "demo"},
-              blade_target="cpu", blade_action="fullload"), "pod"),
+              fault_target="cpu", fault_action="fullload"), "pod"),
         # host 作用域（无 namespace、无 names）
         (dict(namespace="", scope="host", names=(),
-              blade_target="cpu", blade_action="fullload"), "host"),
+              fault_target="cpu", fault_action="fullload"), "host"),
         # node 作用域（cluster-scoped）
         (dict(namespace="", scope="node", names=("node-1",),
-              blade_target="disk", blade_action="fill"), "node"),
+              fault_target="disk", fault_action="fill"), "node"),
     ],
 )
 def test_fault_spec_always_projects_target(spec_kwargs, expected_resource_type):
@@ -79,7 +79,7 @@ def test_projection_does_not_override_explicit_target():
     """已显式给出 target 时不得被 fault_spec 覆盖（setdefault 语义）。"""
     spec = FaultSpec(
         namespace="from-spec", scope="pod", names=("from-spec",),
-        blade_target="network", blade_action="loss", source="test",
+        fault_target="network", fault_action="loss", source="test",
     ).to_dict()
     explicit = {"namespace": "explicit", "names": ["explicit-pod"],
                 "labels": {}, "resource_type": "pod"}

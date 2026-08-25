@@ -8,9 +8,9 @@ Pinned behaviors:
    asked to output JSON only; converges within the attempt budget).
 4. Transport failure (LLM invoke raises) → terminal FAILED for that case,
    no case-layer retry (the LLM client owns the transport retry budget).
-5. kubectl cases: direct_cmd stays empty (no blade --direct command), but the
-   kubectl-native triple / structured_cmd are kept — the k8s_native provider
-   injects by triple, so a complete triple means executable=true.
+5. kubectl cases: the kubectl-native triple / structured_cmd are kept —
+   the k8s_native provider injects by triple, so a complete triple means
+   executable=true.
 6. Output registry JSON: v2 envelope (schema_version/lang/generated_at/
    skills_fingerprint/total/cases), atomic write to disk.
 7. Case naming is content-first: the md's own **用例名称** line wins over any
@@ -110,8 +110,6 @@ def _blade_json(**overrides) -> str:
         ],
         "nl_cmd": 'blade-ai inject -i "stress cpu"',
         "structured_cmd": "blade-ai inject --scope pod --target cpu --action fullload",
-        "direct_cmd": "blade-ai inject --direct --scope pod --target cpu --action fullload",
-        "direct_hint": "",
     }
     payload.update(overrides)
     return json.dumps(payload)
@@ -138,7 +136,7 @@ class TestSyncRetryLoop:
 
         assert llm.calls and len(llm.calls) == 2
         assert catalog["total"] == 1
-        assert catalog["cases"][0]["direct_cmd"] == json.loads(good)["direct_cmd"]
+        assert catalog["cases"][0]["structured_cmd"] == json.loads(good)["structured_cmd"]
         # Second call carries the feedback pair
         second = llm.calls[1]
         assert second[-2].content.startswith("Here is some prose")
@@ -155,8 +153,7 @@ class TestSyncRetryLoop:
         assert len(llm.calls) == 1
         case = catalog["cases"][0]
         assert case["inject_kind"] == "unknown"
-        assert case["direct_cmd"] == ""
-        assert "Re-run blade-ai capabilities-sync" in case["direct_hint"]
+        assert case["structured_cmd"] == ""
         # 无三元组的失败 case 不可执行（如实呈现，不伪装能力）
         assert case["executable"] is False
 
@@ -166,18 +163,15 @@ class TestSyncRetryLoop:
 # ---------------------------------------------------------------------------
 
 class TestSyncKubectl:
-    def test_kubectl_case_keeps_triple_forces_empty_direct(self, tmp_path):
+    def test_kubectl_case_keeps_triple(self, tmp_path):
         """Control-plane case: kubectl-native triple 与 structured_cmd 保留
-        （k8s_native provider 按三元组注入/反向恢复），仅 direct_cmd 强制
-        为空——无 blade --direct 命令不等于不可执行。"""
+        （k8s_native provider 按三元组注入/反向恢复）。"""
         payload = _blade_json(
             inject_kind="kubectl",
             scope="node",
             target="schedule",
             action="drain",
             structured_cmd="blade-ai inject --scope node --target schedule --action drain",
-            direct_cmd="blade-ai inject --direct --scope node",
-            direct_hint="Control-plane fault",
         )
         llm = FakeLLM([payload])
         roots = {"s1": _make_catalogue(tmp_path / "s1", "Node", {"caseA": "# a"})}
@@ -186,9 +180,7 @@ class TestSyncKubectl:
 
         case = catalog["cases"][0]
         assert case["inject_kind"] == "kubectl"
-        assert case["direct_cmd"] == ""
         assert "--action drain" in case["structured_cmd"]
-        assert case["direct_hint"] == "Control-plane fault"
         # 三元组齐备 → 可一键注入（kubectl-native 后端）
         assert case["executable"] is True
         assert (case["scope"], case["target"], case["action"]) == ("node", "schedule", "drain")
@@ -199,7 +191,6 @@ class TestSyncKubectl:
             inject_kind="kubectl",
             scope="", target="", action="",
             structured_cmd="",
-            direct_cmd="",
         )
         llm = FakeLLM([payload])
         roots = {"s1": _make_catalogue(tmp_path / "s1", "Node", {"caseA": "# a"})}
@@ -208,7 +199,6 @@ class TestSyncKubectl:
 
         case = catalog["cases"][0]
         assert case["executable"] is False
-        assert case["direct_cmd"] == ""
 
 
 # ---------------------------------------------------------------------------

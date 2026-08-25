@@ -59,7 +59,7 @@ In your analysis, chronologically identify:
 2. What skill was activated?
 3. What target was selected?
 4. What has been done so far? (pre-checks, injection, verification)
-5. What critical data was produced? (blade_uid, status codes, errors)
+5. What critical data was produced? (experiment_uid, status codes, errors)
 6. What remains to be done?
 7. Pay special attention to specific user feedback that you received.
 
@@ -101,7 +101,7 @@ Your summary should include the following sections:
 2. Target: The Kubernetes resource being targeted (namespace, pod/node name, labels)
 3. Skill & Parameters: The activated skill and fault parameters
 4. Progress: What has been accomplished so far (pre-checks, injection, verification)
-5. Key Results: Critical data: blade_uid, status codes, error messages, timing
+5. Key Results: Critical data: experiment_uid, status codes, error messages, timing
 6. Errors and Fixes: List all errors encountered and how they were resolved
 7. Next Steps: What remains to be done
 
@@ -122,11 +122,11 @@ Your summary should include the following sections:
 
 4. Progress:
    - [x] Pre-checks completed
-   - [x] Fault injected (blade_uid: ...)
+   - [x] Fault injected (experiment_uid: ...)
    - [ ] Verification pending
 
 5. Key Results:
-   - blade_uid: ...
+   - experiment_uid: ...
    - status: ...
 
 6. Errors and Fixes:
@@ -371,27 +371,46 @@ def extract_critical_context(messages: list, state: dict) -> dict:
     """
     context = {}
 
-    # 1. Active blade_uid (from tool_result / ToolMessage content)
+    # 1. Active experiment_uid (from tool_result / ToolMessage content)
     for msg in reversed(messages):
         content = getattr(msg, "content", "")
-        if isinstance(content, str) and "blade_uid" in content:
-            # Match blade_uid followed by separators and a hex/hyphen value
-            match = re.search(r'blade_uid[":\s]+([0-9a-fA-F\-]+)', content)
+        if isinstance(content, str) and "experiment_uid" in content:
+            # Match experiment_uid followed by separators and a hex/hyphen
+            # value. Single-key regex: the pre-phase-9 ``blade_uid`` alias
+            # was retired in phase-14 G5 (fresh-database ruling), so old
+            # session messages no longer match.
+            match = re.search(
+                r'experiment_uid[":\s]+([0-9a-fA-F\-]+)', content
+            )
             if match:
-                context["active_blade_uid"] = match.group(1)
+                context["active_experiment_uid"] = match.group(1)
                 break
         # Also check for UID in JSON-format tool results
         # blade create returns: {"code":200,"success":true,"result":"<uid>"}
         if isinstance(content, str) and '"result"' in content:
             match = re.search(r'"result"\s*:\s*"([0-9a-fA-F\-]+)"', content)
             if match:
-                context["active_blade_uid"] = match.group(1)
+                context["active_experiment_uid"] = match.group(1)
                 break
 
-    # 2. Blade UID from state (direct field) — only used as fallback
+    # 2. Experiment UID from state (direct field) — only used as fallback
     #    if not already found from message content
-    if state.get("blade_uid") and "active_blade_uid" not in context:
-        context["active_blade_uid"] = state["blade_uid"]
+    _state_uid = state.get("experiment_uid")
+    if _state_uid and "active_experiment_uid" not in context:
+        context["active_experiment_uid"] = _state_uid
+
+    # 2b. Carrier-neutral fault identity (Task A): a UID-less native fault has
+    #    nothing the UID scan above can see, so the materialized handle — the
+    #    attribution facts the execute loop committed — is pinned explicitly.
+    #    Without it, compaction silently orphans a native fault's identity.
+    try:
+        from chaos_agent.agent.state import materialize_fault_handle
+
+        _handle = materialize_fault_handle(state)
+        if _handle:
+            context["active_fault_handle"] = _handle
+    except Exception:
+        logger.debug("fault handle pin skipped", exc_info=True)
 
     # 3. Active skill info (from state) — with content preservation
     #    Aligned with Claude Code's createSkillAttachmentIfNeeded(), but the
@@ -455,8 +474,8 @@ def extract_critical_context(messages: list, state: dict) -> dict:
                 context["active_skill_content"] = "\n---\n".join(skill_contents)
 
     # 4-6. Fault context — read from FaultSpec, project to the keys
-    # post-compact context consumers expect (target dict / blade_scope /
-    # blade_target / blade_action). This is read-only projection;
+    # post-compact context consumers expect (target dict / fault_scope /
+    # fault_target / fault_action). This is read-only projection;
     # state.fault_spec remains the single source of truth.
     from chaos_agent.agent.spec.fault_spec import read_fault_spec
     spec = read_fault_spec(state)
@@ -468,11 +487,11 @@ def extract_critical_context(messages: list, state: dict) -> dict:
             "resource_type": spec.scope,
         }
         if spec.scope:
-            context["blade_scope"] = spec.scope
-        if spec.blade_target:
-            context["blade_target"] = spec.blade_target
-        if spec.blade_action:
-            context["blade_action"] = spec.blade_action
+            context["fault_scope"] = spec.scope
+        if spec.fault_target:
+            context["fault_target"] = spec.fault_target
+        if spec.fault_action:
+            context["fault_action"] = spec.fault_action
 
     # 5. Plan info
     if state.get("plan_path"):
@@ -510,10 +529,22 @@ def build_post_compact_context_message(critical_context: dict) -> str:
 
     parts = ["[Context preserved after compaction]"]
 
-    if "active_blade_uid" in critical_context:
+    if "active_experiment_uid" in critical_context:
         parts.append(
-            f"Active experiment blade_uid: {critical_context['active_blade_uid']}"
+            f"Active experiment_uid: {critical_context['active_experiment_uid']}"
         )
+    # Task A: render the neutral identity only when it is NOT an experiment
+    # carrier's UID handle (the experiment_uid line above already carries
+    # it; UID-less carriers — the whole reason this pin exists — otherwise
+    # never surface).
+    #
+    # phase-14 G7: the kind literal follows the renamed carrier constant
+    # ("experiment_uid"); handles from pre-phase-14 checkpoints (whose
+    # kind was the old blade-family spelling) no longer suppress this
+    # line (fresh-database ruling).
+    _fh = critical_context.get("active_fault_handle")
+    if isinstance(_fh, dict) and _fh.get("kind") != "experiment_uid":
+        parts.append(f"Active fault handle: {_fh}")
     if "active_skill" in critical_context:
         parts.append(f"Active skill: {critical_context['active_skill']}")
     if "active_skill_content" in critical_context:
@@ -541,12 +572,12 @@ def build_post_compact_context_message(critical_context: dict) -> str:
     metadata_parts = []
     if "injection_method" in critical_context:
         metadata_parts.append(f"method={critical_context['injection_method']}")
-    if "blade_scope" in critical_context:
-        metadata_parts.append(f"scope={critical_context['blade_scope']}")
-    if "blade_target" in critical_context:
-        metadata_parts.append(f"target={critical_context['blade_target']}")
-    if "blade_action" in critical_context:
-        metadata_parts.append(f"action={critical_context['blade_action']}")
+    if "fault_scope" in critical_context:
+        metadata_parts.append(f"scope={critical_context['fault_scope']}")
+    if "fault_target" in critical_context:
+        metadata_parts.append(f"target={critical_context['fault_target']}")
+    if "fault_action" in critical_context:
+        metadata_parts.append(f"action={critical_context['fault_action']}")
     if metadata_parts:
         parts.append(f"Injection: {' | '.join(metadata_parts)}")
 
@@ -609,7 +640,7 @@ def resolve_compaction_input_chars() -> int:
 # good. The instructions therefore have to be explicit about carrying facts
 # forward rather than trusting "build upon" to imply it.
 #
-# ``blade_uid`` is called out by name because it is the one value the recovery
+# ``experiment_uid`` is called out by name because it is the one value the recovery
 # path cannot reconstruct: without it an injected experiment can no longer be
 # destroyed, turning a summarisation slip into a fault left running on a
 # cluster.
@@ -624,9 +655,9 @@ every fact in it as if it had appeared in the conversation itself.
 Rules:
 - PRESERVE every fact from the previous summary that is still true. Do not drop
   a detail merely because the recent messages did not mention it again.
-- PRESERVE identifiers and literals EXACTLY: blade_uid, namespace, pod and node
+- PRESERVE identifiers and literals EXACTLY: experiment_uid, namespace, pod and node
   names, labels, file paths, command lines, error text. An altered or missing
-  blade_uid makes the experiment unrecoverable.
+  experiment_uid makes the experiment unrecoverable.
 - UPDATE Progress by moving finished items from pending to done, and refresh
   Next Steps to reflect what is now outstanding.
 - MERGE rather than append: one coherent state of the drill, not the old summary
@@ -673,7 +704,7 @@ async def compact_memory(
     - PARTIAL: Incremental update (only summarize recent messages).
     - UP_TO: Summarize up to a point (later messages are preserved).
 
-    When state is provided, extracts critical context (blade_uid, skill,
+    When state is provided, extracts critical context (experiment_uid, skill,
     target, plan) before compaction and prepends a recovery message
     after compaction.
 
@@ -776,7 +807,7 @@ def _prepare_compaction_messages(messages: list) -> list:
 # 1,625-character carried-forward summary down by 69%. Both are fixed counts,
 # blind to how much room is actually available, and they contradict the rules the
 # LLM path is held to (``INCREMENTAL_SUMMARY_RULES``: preserve every fact, keep
-# blade_uid exactly, "when unsure, keep it").
+# experiment_uid exactly, "when unsure, keep it").
 #
 # This path cannot be lossless — without an LLM there is no real summarisation,
 # only selection. The budget makes the loss bounded and explainable instead of

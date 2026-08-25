@@ -40,7 +40,7 @@ def inject_kubeconfig_into_tool_calls(
     response: AIMessage,
     kubeconfig: str,
 ) -> None:
-    """Inject kubeconfig into kubectl/blade tool calls that are missing it.
+    """Inject kubeconfig into cluster-facing tool calls that are missing it.
 
     This is a programmatic safety net: even if the LLM forgets to include
     kubeconfig in its tool call arguments, this function ensures it is present
@@ -49,7 +49,8 @@ def inject_kubeconfig_into_tool_calls(
     Mutates response.tool_calls in-place.
 
     Rules:
-    - Only injects into tools whose name starts with "kubectl" or "blade"
+    - Only injects into tools that declare a ``kubeconfig`` parameter (the
+      provider-union ``kubeconfig_scoped_tool_names``)
     - Only injects when the existing kubeconfig arg is empty/falsy
     - Does NOT override if the LLM already set a kubeconfig value
     - Skips entirely when the provided kubeconfig is empty
@@ -81,6 +82,16 @@ def inject_kubeconfig_into_tool_calls(
     if not kubeconfig:
         return
 
+    # Phase-7 T2: precise enumeration over the provider-declared union —
+    # every tool whose signature declares ``kubeconfig`` — replacing the old
+    # ``startswith("kubectl")/("blade")`` prefix match, which also swept in
+    # tools that never take the parameter (blade_help, blade_python_*).
+    from chaos_agent.agent.providers.registry import FaultProviderRegistry
+
+    kubeconfig_scoped = FaultProviderRegistry.union_tool_names(
+        "kubeconfig_scoped_tool_names"
+    )
+
     injected_count = 0
     for tc in tool_calls:
         # Handle both dict and namedtuple-style access
@@ -91,8 +102,8 @@ def inject_kubeconfig_into_tool_calls(
             name = getattr(tc, "name", "")
             args = getattr(tc, "args", {})
 
-        # Only inject into kubectl/blade tools
-        if not (name.startswith("kubectl") or name.startswith("blade")):
+        # Only inject into tools that declare a kubeconfig parameter
+        if name not in kubeconfig_scoped:
             continue
 
         # Only inject when kubeconfig is missing or empty
@@ -125,9 +136,6 @@ def inject_kubeconfig_into_tool_calls(
         )
 
 
-_TASK_SCOPED_TOOLS = frozenset({"blade_create", "host_inject", "host_read"})
-
-
 def inject_task_id_into_tool_calls(response: AIMessage, task_id: str) -> None:
     """Bind audit-bearing execution tools to the graph's current task.
 
@@ -140,6 +148,14 @@ def inject_task_id_into_tool_calls(response: AIMessage, task_id: str) -> None:
     if not task_id:
         return
 
+    # Phase-7 T2: the binding set is the provider-declared union of tools
+    # whose signature declares ``task_id``, replacing the hardcoded
+    # ``_TASK_SCOPED_TOOLS`` literal — which had drifted: all three
+    # blade_python_* tools declare ``task_id`` but were never bound.
+    from chaos_agent.agent.providers.registry import FaultProviderRegistry
+
+    audit_scoped = FaultProviderRegistry.union_tool_names("audit_scoped_tool_names")
+
     for tool_call in getattr(response, "tool_calls", None) or []:
         if isinstance(tool_call, dict):
             name = tool_call.get("name", "")
@@ -147,7 +163,7 @@ def inject_task_id_into_tool_calls(response: AIMessage, task_id: str) -> None:
         else:
             name = getattr(tool_call, "name", "")
             args = getattr(tool_call, "args", {})
-        if name not in _TASK_SCOPED_TOOLS or not isinstance(args, dict):
+        if name not in audit_scoped or not isinstance(args, dict):
             continue
         args["task_id"] = task_id
 

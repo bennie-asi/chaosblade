@@ -32,7 +32,6 @@ class InjectRequest(BaseModel):
     confirm: bool = Field(False, description="Whether to require confirmation before execution")
     labels: Optional[dict] = Field(None, description="K8s label selector for blade --labels targeting (e.g. {'app': 'accounting'})")
     input: Optional[str] = Field(None, description="Natural language description (alternative to structured params)")
-    direct: bool = Field(False, description="Skip LLM, execute blade command directly")
     kubeconfig: Optional[str] = Field(None, description="Path to kubeconfig file (overrides BLADE_AI_KUBECONFIG_PATH and KUBECONFIG env)")
     context: Optional[str] = Field(None, description="Kubeconfig context name (overrides BLADE_AI_KUBE_CONTEXT)")
     # KubeWiz gateway targeting (overrides BLADE_AI_KUBEWIZ_* settings per-request)
@@ -60,12 +59,6 @@ class InjectRequest(BaseModel):
         if not has_input and not has_structured:
             raise ValueError(
                 "Provide either 'input' or all of: scope, target, action, (target_name or labels), namespace"
-            )
-        if self.direct and self.input:
-            raise ValueError("'direct' is not compatible with 'input'")
-        if self.direct and not has_structured:
-            raise ValueError(
-                "'direct' requires all structured params: scope, target, action, (target_name or labels), namespace"
             )
         if has_structured and self.scope not in aggregate_scopes():
             raise ValueError(
@@ -111,7 +104,7 @@ class InjectResponse(BaseModel):
     task_id: str
     result: str = "pending"
     fault_type: str = ""
-    blade_uid: str = ""
+    experiment_uid: str = ""
     recovery_handle: Optional[dict] = None
     targets: list[TargetInfo] = []
     verification: Optional[dict] = None
@@ -123,7 +116,7 @@ class RecoverResponse(BaseModel):
 
     task_id: str
     result: str = "pending"
-    blade_uid: str = ""
+    experiment_uid: str = ""
     recovery_handle: Optional[dict] = None
     targets: list[TargetInfo] = []
     verification: Optional[dict] = None
@@ -159,7 +152,6 @@ class FaultTypeInfo(BaseModel):
     target_types: list[str] = []
     params: list[SkillParameterInfo] = []
     example_cmd: str = ""
-    example_cmd_direct: str = ""
 
 
 class CategoryInfo(BaseModel):
@@ -187,8 +179,6 @@ class FaultCase(BaseModel):
     inject_kind: str = "unknown"
     nl_cmd: str = ""
     structured_cmd: str = ""
-    direct_cmd: str = ""
-    direct_hint: str = ""
 
 
 class CapabilitiesListResponse(BaseModel):

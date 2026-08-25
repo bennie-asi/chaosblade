@@ -90,7 +90,7 @@ class TestDiscoveryUsesBackoff:
         approved = approved_from_dict(freeze_approved_target(
             target={"namespace": "", "names": ["node-a"]},
             params={"scope": "node"},
-            blade_scope="node", blade_target="network", blade_action="drop",
+            fault_scope="node", fault_target="network", fault_action="drop",
         ))
         v_args = (
             "node-debugger-node-a-abc12 -n kubewiz -- "

@@ -1,0 +1,12 @@
+# Golden 06 — recover with nothing active: the handler must inform the
+# user and complete cleanly (no crash, no task selection prompt).
+name: recover-no-active
+description: 无活跃实验时恢复请求得到干净告知
+surface: recover
+input:
+  user_message: "恢复所有故障"
+  store_rows: []
+expected:
+  operation: recover
+  result_status: completed
+  message_contains: ["no active fault-injection experiments"]

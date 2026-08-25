@@ -7,7 +7,7 @@ BY DESIGN, so mid-task the whitelist went empty and the agent could no
 longer destroy its OWN injection: the very recovery step failed the
 provenance gate.
 
-The fix unions the message scan with ``state["blade_uid"]`` — the
+The fix unions the message scan with ``state["experiment_uid"]`` — the
 framework's durable record of the live experiment, maintained by the
 execution loop and preserved by the compressed-history restore path. The
 gate's semantics are unchanged: every UID admitted is still proven
@@ -27,7 +27,7 @@ record. These tests pin:
 from langchain_core.messages import ToolMessage
 
 from chaos_agent.agent.nodes.planning.tool_screener import (
-    _blade_uids_created_by_current_task,
+    _experiment_uids_created_by_current_task,
     _screen_blade_destroy,
 )
 from chaos_agent.agent.target_guard import GuardVerdict
@@ -47,7 +47,7 @@ def _create_result(uid: str) -> ToolMessage:
 
 class TestMessageScanRemainsPrimary:
     def test_success_create_proves_uid(self):
-        uids = _blade_uids_created_by_current_task([_create_result(OWN_UID)])
+        uids = _experiment_uids_created_by_current_task([_create_result(OWN_UID)])
         assert uids == {OWN_UID}
 
     def test_failed_create_crd_uid_still_counted(self):
@@ -59,7 +59,7 @@ class TestMessageScanRemainsPrimary:
             name="blade_create",
             tool_call_id="call-fail",
         )
-        uids = _blade_uids_created_by_current_task([msg])
+        uids = _experiment_uids_created_by_current_task([msg])
         assert FAILED_CREATE_UID in uids
 
     def test_destroy_allowed_from_message_history(self):
@@ -74,14 +74,14 @@ class TestDurableRecordRestoresProvenance:
         # The blade_create ToolMessage is gone (compacted by design); the
         # framework still records the live experiment in state.
         _, decision = _screen_blade_destroy(
-            {"uid": OWN_UID}, [], {"blade_uid": OWN_UID},
+            {"uid": OWN_UID}, [], {"experiment_uid": OWN_UID},
         )
         assert decision.verdict == GuardVerdict.ALLOW
 
     def test_union_covers_both_sources(self):
         messages = [_create_result(FAILED_CREATE_UID)]
-        state = {"blade_uid": OWN_UID}
-        uids = _blade_uids_created_by_current_task(messages, state)
+        state = {"experiment_uid": OWN_UID}
+        uids = _experiment_uids_created_by_current_task(messages, state)
         assert uids == {OWN_UID, FAILED_CREATE_UID}
 
     def test_durable_uid_survives_partial_compaction(self):
@@ -90,7 +90,7 @@ class TestDurableRecordRestoresProvenance:
         _, decision = _screen_blade_destroy(
             {"uid": OWN_UID},
             [ToolMessage(content="ok", name="kubectl_get", tool_call_id="c")],
-            {"blade_uid": OWN_UID},
+            {"experiment_uid": OWN_UID},
         )
         assert decision.verdict == GuardVerdict.ALLOW
 
@@ -98,7 +98,7 @@ class TestDurableRecordRestoresProvenance:
 class TestGateNotWeakened:
     def test_foreign_uid_rejected_with_durable_record(self):
         _, decision = _screen_blade_destroy(
-            {"uid": FOREIGN_UID}, [], {"blade_uid": OWN_UID},
+            {"uid": FOREIGN_UID}, [], {"experiment_uid": OWN_UID},
         )
         assert decision.verdict == GuardVerdict.REJECT_UNKNOWN
 
@@ -107,20 +107,20 @@ class TestGateNotWeakened:
         assert decision.verdict == GuardVerdict.REJECT_UNKNOWN
 
     def test_empty_uid_rejected(self):
-        _, decision = _screen_blade_destroy({"uid": "  "}, [], {"blade_uid": OWN_UID})
+        _, decision = _screen_blade_destroy({"uid": "  "}, [], {"experiment_uid": OWN_UID})
         assert decision.verdict == GuardVerdict.REJECT_UNKNOWN
 
 
 class TestDurableRecordHygiene:
     def test_blank_durable_uid_contributes_nothing(self):
-        assert _blade_uids_created_by_current_task([], {"blade_uid": ""}) == set()
-        assert _blade_uids_created_by_current_task([], {"blade_uid": "   "}) == set()
+        assert _experiment_uids_created_by_current_task([], {"experiment_uid": ""}) == set()
+        assert _experiment_uids_created_by_current_task([], {"experiment_uid": "   "}) == set()
 
     def test_non_string_durable_uid_is_coerced_safely(self):
-        assert _blade_uids_created_by_current_task([], {"blade_uid": None}) == set()
+        assert _experiment_uids_created_by_current_task([], {"experiment_uid": None}) == set()
 
     def test_durable_uid_is_stripped(self):
-        uids = _blade_uids_created_by_current_task([], {"blade_uid": f" {OWN_UID} "})
+        uids = _experiment_uids_created_by_current_task([], {"experiment_uid": f" {OWN_UID} "})
         assert uids == {OWN_UID}
 
 

@@ -77,9 +77,9 @@ class TestRulesStateWhatMustSurvive:
     def test_requires_preserving_still_true_facts(self):
         assert "PRESERVE every fact" in INCREMENTAL_SUMMARY_RULES
 
-    def test_names_blade_uid_explicitly(self):
+    def test_names_experiment_uid_explicitly(self):
         """The only identifier whose loss makes a fault unrecoverable."""
-        assert "blade_uid" in INCREMENTAL_SUMMARY_RULES
+        assert "experiment_uid" in INCREMENTAL_SUMMARY_RULES
         assert "unrecoverable" in INCREMENTAL_SUMMARY_RULES
 
     def test_names_the_other_literals_that_cannot_be_reconstructed(self):
@@ -124,7 +124,7 @@ class TestFallbackSummaryIsBudgetedNotCounted:
     def _history(count: int = 40) -> list:
         msgs: list = [HumanMessage(content="对 pod 注入 80% 丢包", id="h0")]
         for i in range(count):
-            msgs.append(AIMessage(content=f"第{i}轮 blade_uid=uid-{i}", id=f"a{i}"))
+            msgs.append(AIMessage(content=f"第{i}轮 experiment_uid=uid-{i}", id=f"a{i}"))
             msgs.append(ToolMessage(content=f"结果{i}", tool_call_id=f"c{i}", id=f"t{i}"))
         return msgs
 
@@ -153,7 +153,7 @@ class TestFallbackSummaryIsBudgetedNotCounted:
     def test_carried_forward_summary_is_not_cut_to_a_fixed_length(self):
         from chaos_agent.memory.compactor import _simple_compact
 
-        previous = "累积摘要：" + "已完成注入并验证，blade_uid=abc-123。" * 60
+        previous = "累积摘要：" + "已完成注入并验证，experiment_uid=abc-123。" * 60
         assert len(previous) > 500, "fixture must exceed the old 500-char cut"
         assert previous in _simple_compact(self._history(), previous_summary=previous)
 

@@ -3,14 +3,17 @@
 A :class:`FaultFamily` groups the scopes that belong to one fault domain (K8s +
 ChaosBlade today, host tomorrow, cloud API later) together with the ordered
 *carriers* that can execute it. The per-carrier target/action vocabulary is NOT
-stored on the family — it is declared once on each FaultProvider
-(``supported_targets`` / ``supported_actions``) and aggregated here via
-``carrier_types``, so a carrier's words live in exactly one place.
+stored on the family — each carrier declares it once in its lightweight
+``declaration`` module (``providers/<carrier>/declaration.py``), and the
+providers assembly point registers it here via
+``declare_carrier_vocabulary`` at package-import time, so a carrier's words
+live in exactly one place.
 
 ``INTENT_SCOPES`` / ``INTENT_TARGETS`` / ``INTENT_ACTIONS`` in ``fault_spec.py``
 are DERIVED from this registry. Adding a new fault type therefore means
-registering a family here (scopes + carriers) and declaring the vocabulary on
-its provider — not editing hardcoded whitelists scattered across the CLI, HTTP
+registering a family here (scopes + carriers), declaring the vocabulary in
+the carrier's ``declaration.py`` and registering it at the providers assembly
+point — not editing hardcoded whitelists scattered across the CLI, HTTP
 schema, LLM schema and prompt layers.
 
 Design note
@@ -24,31 +27,91 @@ order; new families only ever *append* previously-unseen values.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
-from chaos_agent.agent.providers.chaosblade import ChaosbladeProvider
-from chaos_agent.agent.providers.chaosblade_python import ChaosbladePythonProvider
-from chaos_agent.agent.providers.host_shell import HostShellProvider
-from chaos_agent.agent.providers.k8s_native import K8sNativeProvider
 from chaos_agent.transports import PROFILE_HOST, PROFILE_K8S
 
-# Per-carrier intent vocabulary source. Built from the provider CLASSES
-# (class attributes only — no instantiation, no runtime-registry mutation) so
-# ``INTENT_TARGETS`` / ``INTENT_ACTIONS`` can be derived at fault_spec import
-# time regardless of whether the runtime provider registry has been bootstrapped
-# yet. This is the single source of the per-carrier target/action words; the
-# FaultFamily below owns only the scopes / cluster-scoped domain metadata and
-# names its ``carrier_types``. Importing these three classes is cycle-free:
-# provider modules import only ``providers.base`` (stdlib) at module level and
-# reverse-import ``fault_registry`` lazily inside methods.
-_CARRIER_VOCAB: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    cls.carrier: (cls.supported_targets, cls.supported_actions)
-    for cls in (
-        ChaosbladeProvider,
-        K8sNativeProvider,
-        HostShellProvider,
-        ChaosbladePythonProvider,
+# Per-carrier intent vocabulary, DECLARED by each carrier's lightweight
+# ``declaration`` module and registered here through the providers package
+# assembly point (``chaos_agent.agent.providers`` imports every declaration
+# module at package-import time and calls ``declare_carrier_vocabulary``).
+# Registration data only — no provider module is imported here (phase-12
+# spec-import-retirement), so this family catalogue stays a pure knowledge
+# module. ``fault_spec`` imports the assembly point before deriving
+# ``INTENT_TARGETS`` / ``INTENT_ACTIONS`` at import time; the defensive
+# ``_ensure_carrier_vocab`` below re-triggers assembly for callers that
+# imported this module directly.
+_CARRIER_VOCAB: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+_CARRIER_VOCAB_ASSEMBLED = False
+
+#: Command-preview builders, registered per carrier (phase-12 D3). Keyed by
+#: carrier id — same registration channel as the vocabulary above.
+_PREVIEW_BUILDERS: dict[str, Callable[..., str]] = {}
+
+
+def declare_carrier_vocabulary(
+    carrier: str,
+    targets: tuple[str, ...],
+    actions: tuple[str, ...],
+) -> None:
+    """Register (or replace) a carrier's intent vocabulary declaration."""
+    global _CARRIER_VOCAB_ASSEMBLED
+    _CARRIER_VOCAB[carrier] = (tuple(targets), tuple(actions))
+    _CARRIER_VOCAB_ASSEMBLED = True
+
+
+def declare_command_preview(carrier: str, builder: Callable[..., str]) -> None:
+    """Register (or replace) a carrier's ``## Injection Command`` preview
+    builder (phase-12 D3 — the spec layer's plan generator resolves preview
+    construction through :func:`command_preview_for` instead of importing
+    the carrier implementation)."""
+    _PREVIEW_BUILDERS[carrier] = builder
+
+
+def command_preview_for(scope: str, **spec_fields) -> str | None:
+    """Render the ``## Injection Command`` preview for a spec (phase-12 D3).
+
+    Resolves the scope's family and walks its ``carrier_types`` in
+    precedence order, delegating to the first carrier that registered a
+    preview builder. Returns ``None`` when the scope has no family or no
+    carrier declared a builder — the plan generator renders no section for
+    that case (matching the former hardcoded behaviour, which only ever
+    served blade-shaped specs). Carriers that never produce command
+    previews simply do not register a builder; no special-casing here.
+
+    Note: builders receive ``params`` as-is and MAY mutate it (the blade
+    builder's single ``--timeout`` guarantee rewrites a pre-existing
+    ``timeout`` key). Callers must pass a copy they own — e.g.
+    ``dict(spec.params)`` — never a dict they expect to stay untouched.
+    """
+    _ensure_carrier_vocab()
+    family = family_for_scope(scope)
+    if family is None:
+        return None
+    for carrier in family.carrier_types:
+        builder = _PREVIEW_BUILDERS.get(carrier)
+        if builder is not None:
+            return builder(scope=scope, **spec_fields)
+    return None
+
+
+def _ensure_carrier_vocab() -> None:
+    """Defensive assembly trigger for direct importers.
+
+    ``fault_spec`` triggers assembly explicitly; any caller that imports
+    this module directly (bypassing fault_spec) and asks for vocabulary
+    before assembly would otherwise see an empty aggregate. Lazy import
+    keeps the module-level dependency graph acyclic: this module has no
+    module-level providers import, and the assembly point only reads the
+    ``declare_*`` functions defined above.
+    """
+    if _CARRIER_VOCAB_ASSEMBLED:
+        return
+    import chaos_agent.agent.providers  # noqa: F401 — assembly side effect
+    assert _CARRIER_VOCAB_ASSEMBLED, (
+        "providers assembly point imported without declaring carrier "
+        "vocabulary — INTENT_* derivation would be empty"
     )
-}
 
 
 @dataclass(frozen=True)
@@ -62,9 +125,10 @@ class FaultFamily:
     scopes:
         The scope vocabulary this family contributes. The *target* / *action*
         vocabulary is NOT declared here — it is owned per-carrier by the
-        FaultProvider (``supported_targets`` / ``supported_actions``) and
-        aggregated via ``carrier_types``, so a carrier's words live in exactly
-        one place.
+        carrier's ``declaration`` module (the provider class reads the same
+        constants as its ``supported_targets`` / ``supported_actions``) and
+        registered with this registry via the providers assembly point, so a
+        carrier's words live in exactly one place.
     carrier_types:
         Ordered candidate execution backends (provider ``carrier`` ids) that
         can serve this family's scopes, in precedence order. Pre-injection the
@@ -139,12 +203,13 @@ def _aggregate_carrier_vocab(index: int) -> tuple[str, ...]:
     """Aggregate a per-carrier vocabulary across families.
 
     Walks each family (registration order) and, within it, each
-    ``carrier_types`` entry (precedence order), reading the provider-declared
-    tuple (``index`` 0 = targets, 1 = actions). First-occurrence dedup is
-    preserved, so the derived INTENT vocabulary is byte-identical to the former
-    flat tuple that lived on the family — only its *source* moved to the
-    providers.
+    ``carrier_types`` entry (precedence order), reading the registered
+    declaration tuple (``index`` 0 = targets, 1 = actions). First-occurrence
+    dedup is preserved, so the derived INTENT vocabulary is byte-identical to
+    the former flat tuple that lived on the family — only its *source* moved
+    to the carriers.
     """
+    _ensure_carrier_vocab()
     collected: tuple[str, ...] = ()
     for family in _REGISTRY.values():
         for carrier in family.carrier_types:
@@ -154,11 +219,13 @@ def _aggregate_carrier_vocab(index: int) -> tuple[str, ...]:
 
 def carrier_targets(carrier: str) -> tuple[str, ...]:
     """Fault target TYPES declared by ``carrier`` (empty tuple if unknown)."""
+    _ensure_carrier_vocab()
     return _CARRIER_VOCAB.get(carrier, ((), ()))[0]
 
 
 def carrier_actions(carrier: str) -> tuple[str, ...]:
     """Fault action verbs declared by ``carrier`` (empty tuple if unknown)."""
+    _ensure_carrier_vocab()
     return _CARRIER_VOCAB.get(carrier, ((), ()))[1]
 
 
@@ -261,11 +328,11 @@ def is_memory_burn_scope(scope: str | None, target: str | None) -> bool:
     """True for the pod-memory fault shape whose downstream logic is
     memory-burn specific (pod memory-limit prefetch + OOMKill risk warning).
 
-    Single source for the ``scope == "pod" and target == "mem"`` gate that used
-    to be duplicated in ``direct_setup`` (pod memory-limit prefetch) and
-    ``direct_execute`` (OOMKill risk warning). Comparison is exact — callers
-    pass the same (already-normalised) operands they compared before, so the
-    gate's behaviour is unchanged.
+    Single source for the ``scope == "pod" and target == "mem"`` gate that
+    used to be duplicated across the setup / execute nodes (pod memory-limit
+    prefetch + OOMKill risk warning). Comparison is exact — callers pass the
+    same (already-normalised) operands they compared before, so the gate's
+    behaviour is unchanged.
     """
     return scope == "pod" and target == "mem"
 

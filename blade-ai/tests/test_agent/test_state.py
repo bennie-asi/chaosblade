@@ -3,8 +3,10 @@
 from chaos_agent.agent.state import (
     AgentState,
     build_status_data,
+    has_active_fault,
     infer_phase,
     infer_task_state,
+    materialize_fault_handle,
 )
 from chaos_agent.agent.state_mgmt.state_lifecycle import (
     STATE_DURABLE_FACT_FIELDS,
@@ -59,7 +61,6 @@ class TestAgentStateDefaults:
         assert state.get("blade_target") is None
         assert state.get("blade_action") is None
         assert state.get("params_flags") is None
-        assert state.get("direct", False) is False
 
     def test_declares_runtime_checkpoint_fields(self):
         annotations = AgentState.__annotations__
@@ -89,7 +90,7 @@ class TestAgentStateDefaults:
                 seen[field] = group
 
         assert duplicates == {}
-        assert state_field_group("blade_uid") == "execution"
+        assert state_field_group("experiment_uid") == "execution"
         assert state_field_group("recover_verification") == "verification"
 
     def test_durable_facts_are_not_cleared_by_per_fault_reset(self):
@@ -98,7 +99,7 @@ class TestAgentStateDefaults:
         classified = set(iter_state_fields())
 
         assert reset_fields - classified == set()
-        assert "blade_uid" in reset_fields
+        assert "experiment_uid" in reset_fields
         assert "verification" in reset_fields
         assert "task_id" not in reset_fields
         assert "kubeconfig" not in reset_fields
@@ -126,12 +127,12 @@ class TestAgentStateDefaults:
             if policy.reset_on_recover
         }
 
-        blade_policy = state_field_policy("blade_uid")
-        assert blade_policy is not None
-        assert blade_policy.group == "execution"
-        assert blade_policy.durable is True
-        assert blade_policy.reset_on_batch_fault is True
-        assert blade_policy.reset_on_recover is False
+        experiment_policy = state_field_policy("experiment_uid")
+        assert experiment_policy is not None
+        assert experiment_policy.group == "execution"
+        assert experiment_policy.durable is True
+        assert experiment_policy.reset_on_batch_fault is True
+        assert experiment_policy.reset_on_recover is False
 
         recover_policy = state_field_policy("recover_verification")
         assert recover_policy is not None
@@ -257,8 +258,8 @@ class TestInferTaskState:
         }
         assert infer_task_state(state) == "failed"
 
-    def test_replan_exhausted_no_blade_uid_returns_failed(self):
-        """Replan was attempted but graph completed without blade_uid or verification → failed."""
+    def test_replan_exhausted_no_experiment_uid_returns_failed(self):
+        """Replan was attempted but graph completed without experiment_uid or verification → failed."""
         state = {
             "operation": "inject",
             "skill_name": "k8s-chaos-skills",
@@ -267,12 +268,12 @@ class TestInferTaskState:
         }
         assert infer_task_state(state) == "failed"
 
-    def test_replan_exhausted_with_blade_uid_returns_injecting(self):
-        """Replan was attempted but blade_uid exists (partial success) → injecting."""
+    def test_replan_exhausted_with_experiment_uid_returns_injecting(self):
+        """Replan was attempted but experiment_uid exists (partial success) → injecting."""
         state = {
             "operation": "inject",
             "skill_name": "k8s-chaos-skills",
-            "blade_uid": "abc123",
+            "experiment_uid": "abc123",
             "replan_count": 2,
             "replan_context": {"error_summary": "partial failure"},
         }
@@ -283,7 +284,7 @@ class TestInferTaskState:
         state = {
             "operation": "inject",
             "skill_name": "k8s-chaos-skills",
-            "blade_uid": "abc123",
+            "experiment_uid": "abc123",
             "replan_count": 1,
             "replan_context": {"error_summary": "previous attempt failed"},
             "verification": {
@@ -323,17 +324,16 @@ class TestInferTaskState:
 class TestInferPhase:
     """Test infer_phase() logic for ChaosBlade vs non-ChaosBlade verification.
 
-    Note: infer_phase() has an early exit `if not blade_uid: return "planning"`
-    that prevents non-ChaosBlade faults from reaching the verification result
-    section. This is a pre-existing design limitation. The core bug fix is in
-    infer_task_state(), which correctly handles the non-ChaosBlade case.
+    Note: phase presence gates on has_active_fault() (a materialized fault
+    handle — either an explicit fault_handle or derivable attribution
+    facts), never on a carrier field spelling directly.
     """
 
     def test_l1_passed_l2_unknown_returns_verification_passed(self):
         """ChaosBlade: L1=passed + L2=unknown → verification_passed."""
         state = {
             "operation": "inject",
-            "blade_uid": "abc123",
+            "experiment_uid": "abc123",
             "skill_name": "cpu-stress",
             "verification": {
                 "level": "partial",
@@ -347,7 +347,7 @@ class TestInferPhase:
         """ChaosBlade: L1=passed + L2=passed → verification_passed."""
         state = {
             "operation": "inject",
-            "blade_uid": "abc123",
+            "experiment_uid": "abc123",
             "skill_name": "cpu-stress",
             "verification": {
                 "level": "verified",
@@ -361,7 +361,7 @@ class TestInferPhase:
         """ChaosBlade: L1=passed + L2=failed → verification_failed."""
         state = {
             "operation": "inject",
-            "blade_uid": "abc123",
+            "experiment_uid": "abc123",
             "skill_name": "cpu-stress",
             "verification": {
                 "level": "unverified",
@@ -371,17 +371,14 @@ class TestInferPhase:
         }
         assert infer_phase(state) == "verification_failed"
 
-    def test_non_chaosblade_no_blade_uid_returns_planning(self):
-        """Non-ChaosBlade: no blade_uid → infer_phase returns 'planning' (known limitation).
-
-        infer_phase() has early exits based on blade_uid, so non-ChaosBlade faults
-        never reach the verification result section. The correct state inference is
-        handled by infer_task_state() instead.
-        """
+    def test_non_attributed_no_experiment_uid_returns_planning(self):
+        """No experiment_uid AND no attributed method → infer_phase returns
+        'planning': nothing claims a committed fault, so a native handle is
+        never fabricated for an injection that never happened."""
         state = {
             "operation": "inject",
             "skill_name": "pvc-pending",
-            "blade_uid": "",
+            "experiment_uid": "",
             "verification": {
                 "level": "unverified",
                 "layer1": {"status": "skipped"},
@@ -389,6 +386,101 @@ class TestInferPhase:
             },
         }
         assert infer_phase(state) == "planning"
+
+    def test_native_attributed_fault_is_not_stuck_planning(self):
+        """Regression: phase gates used to key on ``blade_uid`` alone, which
+        stranded attributed native faults (no UID) in planning/safety_check.
+        An attributed kubectl-native injection committed a fault, so it must
+        progress to executing."""
+        state = {
+            "operation": "inject",
+            "skill_name": "pvc-pending",
+            "injection_method": "kubectl_native",
+            "experiment_uid": "",
+            "safety_status": "safe",
+        }
+        assert infer_phase(state) == "executing"
+
+    def test_native_attributed_fault_reaches_verification_section(self):
+        """Regression: an attributed native fault with a verdict must reach
+        the verification-result section (L1 skipped → L2 decides)."""
+        base = {
+            "operation": "inject",
+            "skill_name": "pvc-pending",
+            "injection_method": "kubectl_native",
+            "experiment_uid": "",
+        }
+        passed = {
+            **base,
+            "verification": {
+                "level": "verified",
+                "layer1": {"status": "skipped"},
+                "layer2": {"status": "passed"},
+            },
+        }
+        assert infer_phase(passed) == "verification_passed"
+        failed = {
+            **base,
+            "verification": {
+                "level": "unverified",
+                "layer1": {"status": "skipped"},
+                "layer2": {"status": "failed"},
+            },
+        }
+        assert infer_phase(failed) == "verification_failed"
+
+
+class TestFaultHandlePredicate:
+    """``materialize_fault_handle`` / ``has_active_fault`` — the carrier-neutral
+    fault-presence predicate every gate/judgement keys on."""
+
+    def test_blade_legacy_fields_materialize_blade_handle(self):
+        # [已翻转] phase-14 G4 EOL 后：provider 侧旧键 fallback 读取拆除
+        # （design 五文件清单之外的盘点盲区），仅旧键 attribution 不再产
+        # 生 handle——旧键视作不存在。新键 attribution 走同族测试（下）。
+        state = {"blade_uid": "uid-9", "injection_method": "host_blade"}
+        assert materialize_fault_handle(state) is None
+        assert not has_active_fault(state)
+
+    def test_native_attribution_materializes_native_handle_without_uid(self):
+        state = {"injection_method": "kubectl_native"}
+        assert materialize_fault_handle(state) == {
+            "kind": "native", "method": "kubectl_native",
+        }
+        assert has_active_fault(state)
+
+    def test_existing_handle_wins_over_legacy_derivation(self):
+        state = {
+            "fault_handle": {"kind": "native", "method": "host_native"},
+            "experiment_uid": "uid-legacy",
+        }
+        assert materialize_fault_handle(state) == {
+            "kind": "native", "method": "host_native",
+        }
+
+    def test_empty_state_has_no_active_fault(self):
+        assert materialize_fault_handle({}) is None
+        assert not has_active_fault({})
+
+    def test_unattributed_uid_still_claimed_in_registration_order(self):
+        """Pre-handle checkpoints may carry a UID without a method: the
+        hydration seam must still claim it (ChaosBlade first in precedence)."""
+        state = {"experiment_uid": "uid-orphan"}
+        assert materialize_fault_handle(state) == {
+            "kind": "experiment_uid", "value": "uid-orphan", "method": "",
+        }
+
+    def test_combo_facts_materialize_the_native_attribution(self):
+        """Combo task (blade experiment live + native attribution): the plain
+        materialization reports the NATIVE attribution — attribution is the
+        answer to "who owns this fault". The recover dispatch intentionally
+        disagrees (its claim-1 experiment handle carries the blade uid); that
+        combo-safe split is pinned in test_registry.py and the finalize uid
+        contract test."""
+        state = {"experiment_uid": "uid-combo", "injection_method": "kubectl_native"}
+        assert materialize_fault_handle(state) == {
+            "kind": "native", "method": "kubectl_native",
+        }
 
 
 class TestBuildStatusDataExposedFields:
@@ -417,8 +509,8 @@ class TestBuildStatusDataExposedFields:
                     "scope": "pod",
                     "names": ["pod-a"],
                     "labels": {"app": "demo"},
-                    "blade_target": "network",
-                    "blade_action": "loss",
+                    "fault_target": "network",
+                    "fault_action": "loss",
                     "params": {"percent": "100"},
                     "params_flags": [],
                     "duration_seconds": 0,

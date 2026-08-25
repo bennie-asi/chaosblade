@@ -63,7 +63,7 @@ class TestClassifierRecordsExecPodBinding:
         eff = infer_effective_target("kubectl", _exec_command(_INCIDENT_EXEC))
         assert eff.scope == "node"
         assert eff.names == ()
-        assert eff.blade_target == "mem"
+        assert eff.fault_target == "mem"
         assert eff.exec_pod_name == _TOOL_POD
         assert eff.exec_pod_namespace == "chaosblade"
 
@@ -124,7 +124,7 @@ class TestScreenerNodeBinding:
             "approved_target": freeze_approved_target(
                 target={"namespace": "", "names": [_APPROVED_NODE]},
                 params={"scope": "node"},
-                blade_scope="node", blade_target="mem", blade_action="load",
+                fault_scope="node", fault_target="mem", fault_action="load",
             ),
         }
         state.update(extra)

@@ -1,14 +1,15 @@
 """Pre-reasoning hook: unified memory management entry point.
 
 Called before each LLM reasoning step in agent_loop and execute_loop.
-Handles: tool output truncation → context check → async persistence → sync compaction.
+Handles: tool output truncation → context check → async persistence → sync
+compaction → U-shaped recency anchors (post-compaction notice, budget warning).
 """
 
 import asyncio
 import logging
 import time
 
-from langchain_core.messages import SystemMessage, RemoveMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 
 from chaos_agent.agent.node_names import MEMORY_HOOK, TOOL_RESULT
 from chaos_agent.memory.compactor import compact_memory
@@ -16,8 +17,10 @@ from chaos_agent.memory.context_manager import (
     COMPRESSED_HISTORY_PREFIX,
     INEFFECTIVE_COMPACTION_RATIO,
     MAX_CONSECUTIVE_COMPACT_FAILURES,
+    CompactLevel,
     CompactTrackingState,
     ContextManager,
+    calculate_token_warning_state,
     strip_large_outputs,
 )
 from chaos_agent.memory.session_store import SessionStore
@@ -251,6 +254,98 @@ def _extract_tool_metrics(messages: list) -> None:
                 logger.debug("metric summary prepend failed: %s", e)
 
 
+# ---------------------------------------------------------------------------
+# U-shaped Stage B — recency anchors injected from the pre-reasoning hook.
+# The primacy side (system-prompt tag binding) lives in
+# ``agent/prompts/reminder.py``; these two functions are the recency side:
+# state the model must not lose just because the conversation grew long.
+# ---------------------------------------------------------------------------
+
+
+def _build_compaction_notice() -> HumanMessage:
+    """Post-compaction behaviour guide, appended right after the summary.
+
+    The summary message carries DATA only; nothing in it tells the model how
+    to treat what was lost (Claude Code ships the same class of reminder:
+    "file contents may have been summarized away"). Without it the model
+    quotes summarised tool outputs as if it had seen them whole — worst
+    exactly when the drill is long, i.e. when the summary exists.
+
+    Stable id: repeat compactions REPLACE this notice via ``add_messages``
+    instead of stacking a copy per compaction.
+    """
+    # Lazy import: ``prompts.reminder`` sits in the agent package, and agent
+    # nodes import this module at load time; a module-level edge would make
+    # the cycle reachable during interpreter start-up.
+    from chaos_agent.agent.prompts.reminder import wrap_system_reminder
+
+    text = (
+        "Earlier conversation history has just been compacted into the "
+        "[Compressed History] message. Tool outputs and file reads from "
+        "before that point are SUMMARIES, not full contents — do not assume "
+        "you have already seen complete outputs. When an exact value matters "
+        "(file content, command output, error text, experiment identifiers), "
+        "fetch it again instead of quoting the summary. Task state and "
+        "correction counters live outside the message history and are "
+        "unaffected by compaction."
+    )
+    return HumanMessage(
+        content=wrap_system_reminder(text),
+        id="hint:compaction:notice",
+    )
+
+
+def _build_budget_warning(
+    total_tokens: int,
+    max_tokens: int,
+    compact_ratio: float,
+) -> HumanMessage | None:
+    """Context-budget visibility for the MODEL (the UI already has it).
+
+    ``_emit_context_size_event`` reports usage to the TUI Footer only; the
+    model receives no signal as usage climbs toward the compaction trigger,
+    so it keeps opening explorations whose details the next compaction will
+    summarise away. Claude Code's context-management reminders fill the same
+    gap. The level comes from the SAME calculator that drives the trigger
+    (``calculate_token_warning_state``), so the model's warning and the
+    harness's trigger can never disagree.
+
+    Returns ``None`` below the WARNING band. The stable id means the warning
+    is REPLACED (never stacked) while usage stays in the band; there is no
+    retract once usage drops — the persisted copy simply states the last
+    reading it was true at, and a later re-entry into the band updates it.
+    """
+    warning = calculate_token_warning_state(
+        total_tokens,
+        max_tokens,
+        auto_compact_enabled=True,
+        compact_ratio=compact_ratio,
+    )
+    if warning.level not in (CompactLevel.WARNING, CompactLevel.ERROR):
+        return None
+
+    from chaos_agent.agent.prompts.reminder import wrap_system_reminder
+
+    used_pct = 100 - warning.percent_left
+    urgency = (
+        " Compaction will trigger very soon — start closing out now."
+        if warning.level is CompactLevel.ERROR
+        else ""
+    )
+    text = (
+        f"Context usage has reached ~{used_pct}% of the compaction trigger. "
+        "Prioritise convergence: finish the current verification or "
+        "reporting step and state your conclusion. Avoid opening new large "
+        "explorations — their details would be summarised away by the next "
+        "compaction. Reuse outputs you have already fetched instead of "
+        f"fetching them again.{urgency}"
+    )
+    return HumanMessage(
+        content=wrap_system_reminder(text),
+        id="hint:context:budget",
+    )
+
+
 class PreReasoningHook:
     """Unified memory management hook called before each LLM reasoning step."""
 
@@ -429,7 +524,9 @@ class PreReasoningHook:
 
         Returns LangGraph-compatible state updates:
         - Tool truncation: returns updated messages (replaced by ID via add_messages reducer)
-        - Compression: returns RemoveMessage entries + summary message
+        - Compression: returns RemoveMessage entries + summary message + post-compaction notice
+        - Budget warning: returns one replaceable reminder when usage is in the
+          WARNING/ERROR band but below the compaction trigger
 
         Args:
             state: Agent state dict with 'messages' key
@@ -522,6 +619,15 @@ class PreReasoningHook:
                 f"Memory OK: {len(messages)} messages, ~{total_tokens} tokens",
             )
             self._emit_context_size_snapshot(task_id, total_tokens, len(messages))
+            # U-shaped Stage B: surface the budget to the model too, not only
+            # the UI. Same tokens, same threshold source as the trigger.
+            budget_warning = _build_budget_warning(
+                total_tokens,
+                self.context_manager.max_tokens,
+                self.context_manager.compact_ratio,
+            )
+            if budget_warning is not None:
+                return {**obs_update, "messages": [budget_warning]}
             return obs_update
 
         # --- Intermediate route: try aggressive tool output truncation first ---
@@ -609,7 +715,7 @@ class PreReasoningHook:
 
         # 4. Sync compaction (generate structured summary).
         # Pass ``state`` so compact_memory's extract_critical_context
-        # pulls structured fields (active blade_uid, skill, target,
+        # pulls structured fields (active experiment_uid, skill, target,
         # plan_path) out of state and prepends them as a recovery
         # header on the summary. Without this, those fields rely
         # entirely on the LLM remembering to copy them — fine on a
@@ -782,7 +888,10 @@ class PreReasoningHook:
         return {
             **obs_update,
             **epoch_update,
-            "messages": remove_messages + [summary_message],
+            # The notice rides in the same update as the summary so the model
+            # first sees them together — the data and how to treat it.
+            "messages": remove_messages
+            + [summary_message, _build_compaction_notice()],
             "compressed_summary": summary,
         }
 

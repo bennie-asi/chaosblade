@@ -79,14 +79,14 @@ def real_post_inject_state():
         "task_id": "task-e2e12345",
         "confirmed_intent": "inject",
         "skill_name": "k8s-chaos-skills",
-        "blade_uid": "blade-uid-e2e",
+        "experiment_uid": "blade-uid-e2e",
         "input": "对 cms-demo 做 CPU 压测",
         "fault_spec": {
             "namespace": "cms-demo",
             "scope": "pod",
             "names": ("payment-7b4f8c-x1z",),
-            "blade_target": "cpu",
-            "blade_action": "fullload",
+            "fault_target": "cpu",
+            "fault_action": "fullload",
             "params": {"time": "300", "percent": "80"},
             "user_description": "对 cms-demo 做 CPU 压测",
         },
@@ -293,7 +293,7 @@ class TestPostmortemE2E:
         rejected_state = {
             "task_id": "task-rejected1",
             "confirmed_intent": "inject",
-            "blade_uid": "",  # never injected
+            "experiment_uid": "",  # never injected
             "failure_detail": {
                 "category": "user_rejected",
                 "context": "user said no at confirm gate",
@@ -343,7 +343,7 @@ class TestPostmortemE2E:
         state = {
             "task_id": "task-safety01",
             "confirmed_intent": "inject",
-            "blade_uid": "",
+            "experiment_uid": "",
             "failure_detail": {
                 "category": "safety_rejected",
                 "context": "namespace in blacklist",
@@ -394,7 +394,7 @@ class TestPostmortemE2E:
         state = {
             "task_id": "task-stale001",
             "confirmed_intent": "inject",
-            "blade_uid": "",
+            "experiment_uid": "",
             "failure_detail": {"category": "user_rejected"},
             "messages": [],
             # Stale leftover from the previous inject on this thread:
@@ -535,13 +535,13 @@ class TestResultPayloadShape:
         fake_state.values = {
             "task_id": "task-envelope1",
             "confirmed_intent": "inject",
-            "blade_uid": "blade-x",
+            "experiment_uid": "blade-x",
             "skill_name": "k8s-chaos-skills",
             "fault_spec": {
                 "namespace": "demo",
                 "scope": "pod",
-                "blade_target": "cpu",
-                "blade_action": "fullload",
+                "fault_target": "cpu",
+                "fault_action": "fullload",
             },
             "verification": {"level": "verified"},
             "postmortem": {
@@ -575,7 +575,7 @@ class TestResultPayloadShape:
         fake_state.values = {
             "task_id": "task-noemv",
             "confirmed_intent": "inject",
-            "blade_uid": "blade-x",
+            "experiment_uid": "blade-x",
             "skill_name": "k8s",
             "fault_spec": {},
             "verification": {"level": "verified"},

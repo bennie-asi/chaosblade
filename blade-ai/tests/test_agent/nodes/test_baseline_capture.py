@@ -113,7 +113,7 @@ class TestTemplateResolution:
 
     def test_multi_target_expansion_marks_sampled_target_entries(self):
         state = {
-            "blade_scope": "node",
+            "fault_scope": "node",
             "target": {"names": [f"node-{index}" for index in range(12)]},
         }
         result = _resolve_templates(
@@ -133,7 +133,7 @@ class TestTargetCoverage:
         spec = FaultSpec(
             scope="node",
             names=tuple(f"node-{index}" for index in range(4)),
-            blade_target="network",
+            fault_target="network",
         )
         coverage = _target_coverage(
             spec,
@@ -148,7 +148,7 @@ class TestTargetCoverage:
 
     def test_target_name_is_not_matched_as_a_prefix_of_another_name(self):
         spec = FaultSpec(
-            scope="node", names=("node-1", "node-10"), blade_target="network",
+            scope="node", names=("node-1", "node-10"), fault_target="network",
         )
         coverage = _target_coverage(
             spec, [], [{"stdout": "node-10 Ready"}],
@@ -162,7 +162,7 @@ class TestEvidenceSupplements:
     def test_host_identity_and_cross_metric_are_added_for_incomplete_baseline(self):
         supplements = _evidence_supplement_commands(
             "host",
-            FaultSpec(scope="node", blade_target="mem"),
+            FaultSpec(scope="node", fault_target="mem"),
             [{"description": "Host memory", "command": "free -m"}],
         )
 
@@ -176,7 +176,7 @@ class TestEvidenceSupplements:
     def test_k8s_cross_metric_is_added_without_guessing_a_new_target(self):
         supplements = _evidence_supplement_commands(
             "k8s",
-            FaultSpec(scope="node", names=("node-a",), blade_target="cpu"),
+            FaultSpec(scope="node", names=("node-a",), fault_target="cpu"),
             [{"description": "Node CPU", "command": "kubectl top node node-a"}],
         )
 
@@ -191,7 +191,7 @@ class TestEvidenceSupplements:
                 scope="container",
                 namespace="prod",
                 names=("api-0",),
-                blade_target="cpu",
+                fault_target="cpu",
             ),
             [],
         )
@@ -211,10 +211,10 @@ class TestTemplateResolutionNodeScope:
     """
 
     def test_node_scope_pod_name_unresolved(self):
-        """When blade_scope=node, {pod_name} should remain unresolved
+        """When fault_scope=node, {pod_name} should remain unresolved
         even though names is non-empty."""
         state = {
-            "blade_scope": "node",
+            "fault_scope": "node",
             "target": {
                 "namespace": "",
                 "names": ["cn-hongkong.10.0.1.120"],
@@ -228,9 +228,9 @@ class TestTemplateResolutionNodeScope:
         assert "cn-hongkong" not in result[0]["v_args"]
 
     def test_pod_scope_pod_name_resolved(self):
-        """When blade_scope=pod, {pod_name} should still be resolved normally."""
+        """When fault_scope=pod, {pod_name} should still be resolved normally."""
         state = {
-            "blade_scope": "pod",
+            "fault_scope": "pod",
             "target": {
                 "namespace": "cms-demo",
                 "names": ["accounting-abc"],
@@ -243,9 +243,9 @@ class TestTemplateResolutionNodeScope:
         assert "accounting-abc" in result[0]["v_args"]
 
     def test_node_scope_node_name_still_resolved(self):
-        """When blade_scope=node, {node_name} should still resolve correctly."""
+        """When fault_scope=node, {node_name} should still resolve correctly."""
         state = {
-            "blade_scope": "node",
+            "fault_scope": "node",
             "target": {
                 "namespace": "",
                 "names": ["cn-hongkong.10.0.1.120"],
@@ -408,9 +408,9 @@ class TestFallbackChain:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "test-1",
-            "blade_scope": "node",
-            "blade_target": "disk",
-            "blade_action": "fill",
+            "fault_scope": "node",
+            "fault_target": "disk",
+            "fault_action": "fill",
             "target": {
                 "namespace": "default",
                 "names": ["test-node"],
@@ -429,9 +429,9 @@ class TestFallbackChain:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "test-2",
-            "blade_scope": "node",
-            "blade_target": "nonexistent",
-            "blade_action": "nonexistent",
+            "fault_scope": "node",
+            "fault_target": "nonexistent",
+            "fault_action": "nonexistent",
             "target": {
                 "namespace": "default",
                 "names": ["test-node"],
@@ -452,9 +452,9 @@ class TestFallbackChain:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "test-2b",
-            "blade_scope": "container",
-            "blade_target": "cpu",
-            "blade_action": "fullload",
+            "fault_scope": "container",
+            "fault_target": "cpu",
+            "fault_action": "fullload",
             "target": {
                 "namespace": "default",
                 "names": ["test-container"],
@@ -478,9 +478,9 @@ class TestFallbackChain:
         node = make_baseline_capture(llm=mock_llm, registry=None)
         state = {
             "task_id": "test-3",
-            "blade_scope": "node",
-            "blade_target": "disk",
-            "blade_action": "fill",
+            "fault_scope": "node",
+            "fault_target": "disk",
+            "fault_action": "fill",
             "skill_case_content": "some skill content",
             "target": {
                 "namespace": "default",
@@ -519,9 +519,9 @@ class TestExceptionSafety:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "test-err",
-            "blade_scope": "node",
-            "blade_target": "disk",
-            "blade_action": "fill",
+            "fault_scope": "node",
+            "fault_target": "disk",
+            "fault_action": "fill",
         }
         # Force an exception in the registry strategy via mock.
         # The strategy chain should catch it and try scope_fallback next.
@@ -551,9 +551,9 @@ class TestObservability:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "test-obs",
-            "blade_scope": "node",
-            "blade_target": "disk",
-            "blade_action": "fill",
+            "fault_scope": "node",
+            "fault_target": "disk",
+            "fault_action": "fill",
             "target": {
                 "namespace": "default",
                 "names": ["test-node"],
@@ -660,7 +660,7 @@ class TestResolveTemplatesNamespaceAndMode:
     def test_mode_auto_correction_in_resolve(self):
         """If {debug_pod} present but mode is simple, resolve corrects it."""
         state = {
-            "blade_scope": "node",
+            "fault_scope": "node",
             "target": {"namespace": "", "names": ["test-node"], "labels": {}},
         }
         cmds = [BaselineCommand("Node disk",
@@ -673,7 +673,7 @@ class TestResolveTemplatesNamespaceAndMode:
     def test_namespace_normalized_for_debug_two_step(self):
         """debug_two_step commands get namespace normalized to chaosblade."""
         state = {
-            "blade_scope": "node",
+            "fault_scope": "node",
             "target": {"namespace": "", "names": ["test-node"], "labels": {}},
         }
         cmds = [BaselineCommand("Node disk",
@@ -873,7 +873,7 @@ class TestExtractorFramework:
         # Lock down that the production registry has the extractor
         # wired up. If someone deletes it, the next ``pod cpu`` /
         # ``pod mem`` drill silently goes back to two ``kubectl top``
-        # roundtrips (one in baseline, one in direct_execute).
+        # roundtrips (once here, once again in the execute loop).
         from chaos_agent.agent.baseline_extractors import extract_pod_top_metrics
 
         for key in (("pod", "cpu"), ("pod", "mem")):
@@ -918,17 +918,17 @@ class TestExtractorFramework:
 
         node = make_baseline_capture(llm=None, registry=None)
         state = {
-            "blade_scope": "pod",
-            "blade_target": "mem",
-            "blade_action": "burn",
+            "fault_scope": "pod",
+            "fault_target": "mem",
+            "fault_action": "burn",
             "kubeconfig": "/path/to/kube",
             "target": {
                 "namespace": "ns",
                 "names": ["target-pod-xyz"],
                 "labels": {"app": "demo"},
             },
-            # direct_setup ran first → existing metadata must be
-            # PRESERVED across the extractor merge.
+            # pre-existing metadata must be PRESERVED across the
+            # extractor merge.
             "target_metadata": {"pod_memory_limit_mb": 240},
             "task_id": "t-extractor",
             "skill_case_content": "",
@@ -977,9 +977,9 @@ class TestExtractorFramework:
         ]
         node = make_baseline_capture(llm=None, registry=None)
         state = {
-            "blade_scope": "pod",
-            "blade_target": "mem",
-            "blade_action": "burn",
+            "fault_scope": "pod",
+            "fault_target": "mem",
+            "fault_action": "burn",
             "kubeconfig": "/k",
             "target": {"namespace": "ns", "names": ["p"], "labels": {}},
             "task_id": "t-boom",
@@ -1036,7 +1036,7 @@ class TestExtractorFramework:
         ]
         node = make_baseline_capture(llm=None, registry=None)
         state = {
-            "blade_scope": "pod", "blade_target": "mem", "blade_action": "burn",
+            "fault_scope": "pod", "fault_target": "mem", "fault_action": "burn",
             "kubeconfig": "/k",
             "target": {"namespace": "ns", "names": ["p"], "labels": {}},
             "task_id": "t-skip",
@@ -1082,7 +1082,7 @@ class TestExtractorFramework:
         ]
         node = make_baseline_capture(llm=None, registry=None)
         state = {
-            "blade_scope": "pod", "blade_target": "mem", "blade_action": "burn",
+            "fault_scope": "pod", "fault_target": "mem", "fault_action": "burn",
             "kubeconfig": "/k",
             "target": {"namespace": "ns", "names": ["p"], "labels": {}},
             "task_id": "t-bad-contract",
@@ -1264,9 +1264,9 @@ class TestBaselineCaptureRetryIntegration:
         node = make_baseline_capture(llm=mock_llm, registry=None)
         state = {
             "task_id": "test-retry",
-            "blade_scope": "pod",
-            "blade_target": "process",
-            "blade_action": "kill",
+            "fault_scope": "pod",
+            "fault_target": "process",
+            "fault_action": "kill",
             "skill_case_content": "some skill case content",
             "target": {
                 "namespace": "cms-demo",
@@ -1313,9 +1313,9 @@ class TestBaselineCaptureRetryIntegration:
         node = make_baseline_capture(llm=mock_llm, registry=None)
         state = {
             "task_id": "test-no-retry",
-            "blade_scope": "pod",
-            "blade_target": "process",
-            "blade_action": "kill",
+            "fault_scope": "pod",
+            "fault_target": "process",
+            "fault_action": "kill",
             "skill_case_content": "skill case",
             "target": {
                 "namespace": "cms-demo",
@@ -1409,9 +1409,9 @@ class TestBaselineCaptureRetryIntegration:
         node = make_baseline_capture(llm=mock_llm, registry=None)
         state = {
             "task_id": "test-partial",
-            "blade_scope": "pod",
-            "blade_target": "process",
-            "blade_action": "kill",
+            "fault_scope": "pod",
+            "fault_target": "process",
+            "fault_action": "kill",
             "skill_case_content": "skill case",
             "target": {
                 "namespace": "cms-demo",
@@ -1455,9 +1455,9 @@ class TestBaselineCaptureRetryIntegration:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "test-no-retry-registry",
-            "blade_scope": "pod",
-            "blade_target": "process",
-            "blade_action": "kill",
+            "fault_scope": "pod",
+            "fault_target": "process",
+            "fault_action": "kill",
             "target": {
                 "namespace": "cms-demo",
                 "names": ["rec-pod"],
@@ -1508,9 +1508,9 @@ class TestHostProfileBaseline:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "host-1",
-            "blade_scope": "node",
-            "blade_target": "cpu",
-            "blade_action": "fullload",
+            "fault_scope": "node",
+            "fault_target": "cpu",
+            "fault_action": "fullload",
             "target": {"namespace": "", "names": ["10.0.0.9"], "labels": {}},
         }
         with patch(
@@ -1555,9 +1555,9 @@ class TestHostProfileBaseline:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "host-io",
-            "blade_scope": "node",
-            "blade_target": "disk",
-            "blade_action": "burn",
+            "fault_scope": "node",
+            "fault_target": "disk",
+            "fault_action": "burn",
             "target": {"namespace": "", "names": ["h"], "labels": {}},
         }
         with patch(
@@ -1592,9 +1592,9 @@ class TestHostProfileBaseline:
         node = make_baseline_capture(llm=mock_llm, registry=None)
         state = {
             "task_id": "host-llm",
-            "blade_scope": "node",
-            "blade_target": "cpu",
-            "blade_action": "fullload",
+            "fault_scope": "node",
+            "fault_target": "cpu",
+            "fault_action": "fullload",
             "skill_case_content": "some skill content",
             "target": {"namespace": "", "names": ["h"], "labels": {}},
         }
@@ -1633,9 +1633,9 @@ class TestHostProfileBaseline:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": f"host-{blade_target}",
-            "blade_scope": "node",
-            "blade_target": blade_target,
-            "blade_action": "fullload",
+            "fault_scope": "node",
+            "fault_target": blade_target,
+            "fault_action": "fullload",
             "target": {"namespace": "", "names": ["h"], "labels": {}},
         }
         with patch(
@@ -1665,9 +1665,9 @@ class TestHostProfileBaseline:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "host-fb",
-            "blade_scope": "node",
-            "blade_target": "unknown-target",  # not in _HOST_BASELINE_COMMANDS
-            "blade_action": "fullload",
+            "fault_scope": "node",
+            "fault_target": "unknown-target",  # not in _HOST_BASELINE_COMMANDS
+            "fault_action": "fullload",
             "target": {"namespace": "", "names": ["h"], "labels": {}},
         }
         with patch(
@@ -1696,9 +1696,9 @@ class TestHostProfileBaseline:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "host-fail",
-            "blade_scope": "node",
-            "blade_target": "process",  # ps aux + uptime, no /proc fallback
-            "blade_action": "kill",
+            "fault_scope": "node",
+            "fault_target": "process",  # ps aux + uptime, no /proc fallback
+            "fault_action": "kill",
             "target": {"namespace": "", "names": ["h"], "labels": {}},
         }
         with patch(
@@ -1726,9 +1726,9 @@ class TestK8sProfileBaseline:
         node = make_baseline_capture(llm=None, registry=None)
         state = {
             "task_id": "k8s-dbg",
-            "blade_scope": "node",
-            "blade_target": "disk",
-            "blade_action": "fill",
+            "fault_scope": "node",
+            "fault_target": "disk",
+            "fault_action": "fill",
             "target": {"namespace": "", "names": ["cn-node-1"], "labels": {}},
             "kubeconfig": "/kc",
         }

@@ -26,11 +26,11 @@ Output:
        profile compares scope / namespace / names / labels (k8s) or host
        name (host).
     6. **fault-type checks** — a scope change crossing FAULT FAMILIES
-       (``_cross_family_scope_change``) needs a usable blade_target as the
-       only remaining discriminator; then the **blade_target lock**
+       (``_cross_family_scope_change``) needs a usable fault_target as the
+       only remaining discriminator; then the **fault_target lock**
        (``_fault_type_lock_drift``) compares fault types when
        ``approved.lock_fault_type`` is True AND both sides carry a
-       blade_target. Method switches (kubectl-native ↔ blade) are
+       fault_target. Method switches (kubectl-native ↔ blade) are
        intentionally NOT drift.
 
 Why low-confidence is treated specially: the classifier can fail in
@@ -77,7 +77,7 @@ def _fault_type_lock_drift(
 ) -> Optional[GuardDecision]:
     """Carrier-agnostic fault-TYPE lock (not method).
 
-    Only compare when BOTH sides carry a blade_target. Switching between
+    Only compare when BOTH sides carry a fault_target. Switching between
     blade and kubectl-native methods on the same target is method autonomy,
     not drift — that is the explicit requirement from the user spec
     ("方式可以变, 身份不能变"). Shared by every carrier (k8s and host).
@@ -89,12 +89,12 @@ def _fault_type_lock_drift(
     unusable comparison must fail closed instead of falling through to ALLOW.
     """
     if approved.lock_fault_type:
-        a_bt = (approved.blade_target or "").lower()
-        e_bt = (effective.blade_target or "").lower()
+        a_bt = (approved.fault_target or "").lower()
+        e_bt = (effective.fault_target or "").lower()
         if a_bt and e_bt and a_bt != e_bt:
             return GuardDecision(
                 verdict=GuardVerdict.REJECT_DRIFT,
-                reason=f"blade_target drift: approved={a_bt} effective={e_bt}",
+                reason=f"fault_target drift: approved={a_bt} effective={e_bt}",
                 effective=effective,
                 suggestion=f"approved fault type is {a_bt}; trigger replan to switch types",
             )
@@ -121,7 +121,7 @@ def _cross_family_scope_change(
     them either: it compares host names, and a python-agent call carries none.
 
     The fault TYPE is therefore the only discriminator left, so it must be
-    USABLE. When either side lacks a ``blade_target`` there is no evidence the
+    USABLE. When either side lacks a ``fault_target`` there is no evidence the
     call is the approved experiment, and the guard refuses rather than allowing a
     match it cannot prove.
 
@@ -147,8 +147,8 @@ def _cross_family_scope_change(
     if approved_family.family_id == effective_family.family_id:
         return None  # same family: owner relationships are step 5's business
 
-    if (approved.blade_target or "").strip() and (
-        effective.blade_target or ""
+    if (approved.fault_target or "").strip() and (
+        effective.fault_target or ""
     ).strip():
         # Comparable: ``_fault_type_lock_drift`` renders the verdict.
         return None
@@ -157,9 +157,9 @@ def _cross_family_scope_change(
         reason=(
             f"fault family changed (approved={approved_scope} "
             f"effective={effective_scope}) and the fault type cannot be "
-            f"compared (approved blade_target="
-            f"{approved.blade_target or '<empty>'}, effective blade_target="
-            f"{effective.blade_target or '<empty>'})"
+            f"compared (approved fault_target="
+            f"{approved.fault_target or '<empty>'}, effective fault_target="
+            f"{effective.fault_target or '<empty>'})"
         ),
         effective=effective,
         suggestion=_build_suggestion(approved),

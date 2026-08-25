@@ -30,8 +30,10 @@ from chaos_agent.agent.result.operation_outcome import write_recover_verificatio
 from chaos_agent.agent.nodes.execute._kubeconfig_inject import _resolve_kubeconfig, sync_kubewiz_runtime
 from chaos_agent.agent.nodes.recover._recover_layer1 import (
     RecoverLayer1Result,
-    _recover_layer1_to_dict,
 )
+# Phase-7 T1: canonical address — the storage-shape helper lives beside the
+# Layer1Result data class in result/verdict.py.
+from chaos_agent.agent.result.verdict import layer1_to_dict
 from chaos_agent.agent.nodes.recover._recover_layer2_parse import _parse_recovery_verification_result
 from chaos_agent.agent.nodes.store._store_sync import sync_to_store
 from chaos_agent.agent.nodes.verify._verifier_finalize import _cleanup_debug_pods
@@ -146,7 +148,22 @@ def make_finalize_recover_verification(registry=None):
     async def finalize_recover_verification(state: AgentState) -> dict:
         task_id = state.get("task_id", "")
         skill_name = read_active_skill_name(state)
-        blade_uid = state.get("blade_uid", "")
+        # Experiment UID via the carrier-agnostic identity (mirrors the
+        # recover entries): dispatch identity first (combo-safe — for a combo
+        # task the EXPERIMENT handle outranks the native attribution the
+        # plain materialization would return), materialized attribution as
+        # fallback.
+        from chaos_agent.agent.nodes.recover._recover_verifier_loop import (
+            _experiment_uid_of,
+            _provider_for_recover,
+            _resolve_recover_dispatch,
+        )
+        from chaos_agent.agent.state import materialize_fault_handle
+
+        _, _identity_fr = _resolve_recover_dispatch(state)
+        experiment_uid = _experiment_uid_of(_identity_fr) or _experiment_uid_of(
+            materialize_fault_handle(state)
+        )
         kubeconfig = _resolve_kubeconfig(state)
         sync_kubewiz_runtime(state)
         count = state.get("verifier_loop_count", 0)
@@ -157,7 +174,7 @@ def make_finalize_recover_verification(registry=None):
             StatusCategory.NODE,
             "finalize_recover_verification",
             "Finalizing recovery verdict",
-            {"blade_uid": blade_uid},
+            {"experiment_uid": experiment_uid},
         )
 
         # Restore Layer 1 from cache.
@@ -220,7 +237,7 @@ def make_finalize_recover_verification(registry=None):
             await sync_to_store(state, result_update)
             return result_update
 
-        verification["layer1"] = _recover_layer1_to_dict(layer1)
+        verification["layer1"] = layer1_to_dict(layer1)
 
         # ---- Baseline confidence + enforcement ----
         if "baseline_confidence" not in verification:
@@ -235,24 +252,31 @@ def make_finalize_recover_verification(registry=None):
         # ---- Retry-recovery: fault still active → retry once, loop back ----
         _rl1_type = state.get("recover_layer1_type")
         if _rl1_type is None:
-            _rl1_type = "deterministic" if blade_uid else "llm_driven"
+            _rl1_type = (
+                "deterministic"
+                if experiment_uid and _provider_for_recover(state).has_deterministic_recover
+                else "llm_driven"
+            )
         _layer1_is_deterministic = _rl1_type == "deterministic"
         l2_status = verification.get("layer2", {}).get("status", "unknown")
         already_retried = _phrase_in_messages(messages, _RETRY_MARKER)
         if l2_status == "failed" and not already_retried and count < settings.max_recover_verifier_loop - 1:
-            if blade_uid and _layer1_is_deterministic:
+            if experiment_uid and _layer1_is_deterministic:
                 logger.warning(
-                    "Recover Layer 2 detected fault still active for task %s, retrying blade_destroy (uid=%s)",
-                    task_id, blade_uid,
+                    "Recover Layer 2 detected fault still active for task %s, retrying the deterministic destroy (uid=%s)",
+                    task_id, experiment_uid,
                 )
-                tracker.update("Fault still active, retrying blade_destroy", {"retry": True, "blade_uid": blade_uid})
+                tracker.update("Fault still active, retrying the deterministic destroy", {"retry": True, "experiment_uid": experiment_uid})
                 try:
-                    from chaos_agent.tools.blade import blade_destroy as _blade_destroy
-                    retry_output = await _blade_destroy.ainvoke({"uid": blade_uid, "kubeconfig": kubeconfig})
-                    retry_raw = retry_output if isinstance(retry_output, str) else str(retry_output)
+                    # Bare retry destroy through the dispatched carrier's
+                    # execution domain (no status verification — the prompt
+                    # only needs the destroy output).
+                    retry_raw = await _provider_for_recover(state).layer1_raw_destroy(
+                        experiment_uid, kubeconfig,
+                    )
                     result_update["messages"] = [HumanMessage(content=wrap_system_reminder(
                         f"**{_RETRY_MARKER} executed**\n"
-                        f"blade_destroy output: {retry_raw[:500]}\n\n"
+                        f"layer-1 destroy output: {retry_raw[:500]}\n\n"
                         f"Please verify again whether the fault has been removed, then call "
                         f"submit_recover_verification."
                     ))]
@@ -279,7 +303,8 @@ def make_finalize_recover_verification(registry=None):
         result = {
             "task_id": task_id,
             "skill": skill_name,
-            "blade_uid": blade_uid,
+            # External contract key (L4/Web/DB) — permanent compatibility.
+            "experiment_uid": experiment_uid,
             "recovered": verification["level"] in ("recovered", "partial"),
             "recovery_level": verification["level"],
         }

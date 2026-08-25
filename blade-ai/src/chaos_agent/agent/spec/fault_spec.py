@@ -1,8 +1,11 @@
 """FaultSpec — single source of truth for fault injection intent.
 
 Replaces the historically scattered fields (state.target / state.fault_intent /
-state.blade_scope / state.blade_target / state.blade_action / state.params /
-state.params_flags / state.duration) with a single typed dataclass.
+state.fault_scope / state.fault_target / state.fault_action / state.params /
+state.params_flags / state.duration) with a single typed dataclass. The
+scatter-field keys were renamed off the carrier vocabulary
+(blade_scope/blade_target/blade_action) in phase-9; legacy checkpoints
+carrying the old names hydrate through the read-side fallback.
 
 Design
 ------
@@ -13,7 +16,6 @@ All input modes converge through one of the constructors:
   - ``FaultSpec.from_cli_nl(input)``          — CLI with ``--input "natural language"``
   - ``FaultSpec.from_http_request(request)``  — HTTP /inject endpoint (both structured and NL)
   - ``FaultSpec.from_intent_args(args)``      — TUI / any NL flow after ``submit_fault_intent``
-  - ``FaultSpec.from_direct_setup(spec, …)``  — direct mode after ``direct_setup``
   - ``FaultSpec.placeholder_nl(...)``         — initial stub at NL entry; later rewritten
 
 All consumers go through ``read_fault_spec(state)`` to get a strongly-typed
@@ -69,6 +71,13 @@ from chaos_agent.agent.spec.fault_registry import (
     carrier_actions,
     family_for_scope,
 )
+# Phase-12 assembly trigger: importing the providers package registers every
+# carrier's vocabulary declaration with fault_registry (see the assembly
+# point in providers/__init__.py), so the INTENT_* derivation below reads a
+# complete aggregate at import time. This import is what lets fault_registry
+# itself stay free of provider imports — assembly is triggered here, by the
+# spec layer that needs the vocabulary, not embedded in the registry.
+import chaos_agent.agent.providers  # noqa: F401  (assembly side effect)
 from chaos_agent.utils.coerce import (
     coerce_to_dict,
     coerce_to_int,
@@ -89,7 +98,6 @@ SOURCE_CLI_NL = "cli_nl"
 SOURCE_HTTP_STRUCTURED = "http_structured"
 SOURCE_HTTP_NL = "http_nl"
 SOURCE_TUI = "tui"
-SOURCE_DIRECT = "direct"
 
 FAULT_PROPOSAL_OPEN = "<blade-fault-proposal>"
 FAULT_PROPOSAL_CLOSE = "</blade-fault-proposal>"
@@ -172,8 +180,8 @@ class FaultSpec:
     labels: dict[str, str] = field(default_factory=dict)
 
     # ---- Fault Type: WHAT subsystem to break ------------------------------
-    blade_target: str = ""                       # "cpu" | "mem" | "network" | ...
-    blade_action: str = ""                       # "fullload" | "burn" | "drop" | ...
+    fault_target: str = ""                       # "cpu" | "mem" | "network" | ...
+    fault_action: str = ""                       # "fullload" | "burn" | "drop" | ...
 
     # ---- Tuning: HOW to break it ------------------------------------------
     params: dict[str, str] = field(default_factory=dict)
@@ -181,7 +189,7 @@ class FaultSpec:
     duration_seconds: int = 0
 
     # ---- Origin metadata (audit only) -------------------------------------
-    source: str = ""                             # "cli_structured" | "cli_nl" | "http_structured" | "http_nl" | "tui" | "direct"
+    source: str = ""                             # "cli_structured" | "cli_nl" | "http_structured" | "http_nl" | "tui"
     user_description: str = ""
     # Case file the intent dialogue settled on — a path RELATIVE to the
     # skill directory, i.e. exactly what ``read_skill_resource`` consumes.
@@ -223,7 +231,7 @@ class FaultSpec:
     @property
     def fault_type(self) -> str:
         """Composite label e.g. ``node-cpu-fullload``."""
-        return "-".join(p for p in (self.scope, self.blade_target, self.blade_action) if p)
+        return "-".join(p for p in (self.scope, self.fault_target, self.fault_action) if p)
 
     @property
     def is_namespace_wide(self) -> bool:
@@ -238,7 +246,7 @@ class FaultSpec:
         (complete) or stay in clarification (incomplete).
 
         Acceptance rules:
-          - scope / blade_target / blade_action all non-empty.
+          - scope / fault_target / fault_action all non-empty.
           - For non-cluster-scoped scopes (pod / container / deployment /
             ...), namespace must be set; cluster-scoped (node / pv / ...)
             don't carry one.
@@ -254,7 +262,7 @@ class FaultSpec:
         valid. Callers that want stricter intent (must have names or
         labels) should check ``is_namespace_wide`` themselves.
         """
-        if not (self.scope and self.blade_target and self.blade_action):
+        if not (self.scope and self.fault_target and self.fault_action):
             return False
         if family_for_scope(self.scope) is None:
             return False
@@ -298,8 +306,8 @@ class FaultSpec:
             scope=coerce_to_str(kwargs.get("scope"), default=""),
             names=names,
             labels=_normalise_labels(kwargs.get("labels")),
-            blade_target=coerce_to_str(kwargs.get("target"), default=""),
-            blade_action=coerce_to_str(kwargs.get("action"), default=""),
+            fault_target=coerce_to_str(kwargs.get("target"), default=""),
+            fault_action=coerce_to_str(kwargs.get("action"), default=""),
             params=params,
             params_flags=tuple(kwargs.get("params_flags") or ()),
             duration_seconds=coerce_to_int(kwargs.get("duration"), default=0),
@@ -368,8 +376,8 @@ class FaultSpec:
             scope=coerce_to_str(scope, default=""),
             names=names,
             labels=_normalise_labels(labels),
-            blade_target=coerce_to_str(getattr(request, "target", ""), default=""),
-            blade_action=coerce_to_str(getattr(request, "action", ""), default=""),
+            fault_target=coerce_to_str(getattr(request, "target", ""), default=""),
+            fault_action=coerce_to_str(getattr(request, "action", ""), default=""),
             params=params,
             params_flags=tuple(getattr(request, "params_flags", None) or ()),
             duration_seconds=coerce_to_int(getattr(request, "duration", 0), default=0),
@@ -437,8 +445,8 @@ class FaultSpec:
                 _normalise_labels(args.get("labels"))
                 if "labels" in args else (dict(existing.labels) if existing else {})
             ),
-            blade_target=inherited_text("target", existing.blade_target if existing else ""),
-            blade_action=inherited_text("action", existing.blade_action if existing else ""),
+            fault_target=inherited_text("target", existing.fault_target if existing else ""),
+            fault_action=inherited_text("action", existing.fault_action if existing else ""),
             params=params,
             params_flags=(
                 tuple(str(item) for item in coerce_to_list(args.get("params_flags")))
@@ -463,30 +471,6 @@ class FaultSpec:
                 if "assumptions" in args else (existing.assumptions if existing else ())
             ),
         ))
-
-    @classmethod
-    def from_direct_setup(
-        cls,
-        *,
-        base: "FaultSpec",
-        skill_meta: Optional[dict] = None,
-    ) -> "FaultSpec":
-        """direct mode enrichment hook.
-
-        ``direct_setup`` may want to attach skill-derived defaults
-        (e.g. action timeout, labels from skill registry). The base
-        spec (from CLI structured at entry) is the canonical input;
-        skill_meta only fills gaps and never overrides explicit user
-        values.
-        """
-        if not skill_meta:
-            return _with_default_duration(base)
-        updates: dict[str, Any] = {}
-        if not base.duration_seconds and skill_meta.get("default_duration"):
-            updates["duration_seconds"] = coerce_to_int(
-                skill_meta["default_duration"], default=0,
-            )
-        return _with_default_duration(base.replace(**updates) if updates else base)
 
     # ---- Mutation (frozen → returns new instance) -------------------------
 
@@ -516,8 +500,8 @@ class FaultSpec:
         return {
             "fault_type": self.fault_type,
             "scope": self.scope,
-            "target": self.blade_target,
-            "action": self.blade_action,
+            "target": self.fault_target,
+            "action": self.fault_action,
             "namespace": self.namespace,
             "names": list(self.names),
             "labels": dict(self.labels),
@@ -537,8 +521,8 @@ class FaultSpec:
         """Return the complete reviewed contract used for equality checks."""
         return {
             "scope": self.scope,
-            "target": self.blade_target,
-            "action": self.blade_action,
+            "target": self.fault_target,
+            "action": self.fault_action,
             "namespace": self.namespace,
             "names": list(self.names),
             "labels": dict(self.labels),
@@ -565,8 +549,8 @@ class FaultSpec:
             "scope": self.scope,
             "names": list(self.names),
             "labels": dict(self.labels),
-            "blade_target": self.blade_target,
-            "blade_action": self.blade_action,
+            "fault_target": self.fault_target,
+            "fault_action": self.fault_action,
             "params": dict(self.params),
             "params_flags": list(self.params_flags),
             "duration_seconds": self.duration_seconds,
@@ -601,8 +585,12 @@ class FaultSpec:
                 scope=coerce_to_str(d.get("scope"), default=""),
                 names=_normalise_names(d.get("names")),
                 labels=_normalise_labels(d.get("labels")),
-                blade_target=coerce_to_str(d.get("blade_target"), default=""),
-                blade_action=coerce_to_str(d.get("blade_action"), default=""),
+                fault_target=coerce_to_str(
+                    d.get("fault_target"), default=""
+                ),
+                fault_action=coerce_to_str(
+                    d.get("fault_action"), default=""
+                ),
                 params=_normalise_params(d.get("params")),
                 params_flags=tuple(coerce_to_list(d.get("params_flags"))),
                 duration_seconds=coerce_to_int(d.get("duration_seconds"), default=0),
@@ -685,7 +673,7 @@ def _with_default_duration(spec: "FaultSpec") -> "FaultSpec":
     of last resort.
     """
     effective = ensure_min_duration(
-        spec.duration_seconds, spec.scope, spec.blade_target, spec.blade_action,
+        spec.duration_seconds, spec.scope, spec.fault_target, spec.fault_action,
     )
     if effective == spec.duration_seconds:
         return spec
@@ -757,7 +745,7 @@ def legacy_params_dict(state_or_values: dict) -> dict:
 
 
 def fault_parts_from_name(name: str) -> tuple[str, str, str]:
-    """Infer scope/blade_target/blade_action from names like pod-cpu-fullload."""
+    """Infer scope/fault_target/fault_action from names like pod-cpu-fullload."""
     if not isinstance(name, str) or not name:
         return "", "", ""
     parts = [p for p in name.split("-") if p]
@@ -781,7 +769,7 @@ def fault_spec_from_legacy_state(
     target = coerce_to_dict(state.get("target"), context="fault_spec.legacy.target")
     params = coerce_to_dict(state.get("params"), context="fault_spec.legacy.params")
 
-    scope, blade_target, blade_action = fault_parts_from_name(
+    scope, fault_target, fault_action = fault_parts_from_name(
         coerce_to_str(
             state.get("skill_name") or state.get("fault_type"),
             default="",
@@ -789,17 +777,29 @@ def fault_spec_from_legacy_state(
         )
     )
     scope = (
-        coerce_to_str(state.get("blade_scope"), default="", context="fault_spec.legacy.blade_scope")
+        coerce_to_str(
+            state.get("fault_scope"),
+            default="",
+            context="fault_spec.legacy.scope",
+        )
         or coerce_to_str(target.get("resource_type"), default="", context="fault_spec.legacy.resource_type")
         or scope
     )
-    blade_target = (
-        coerce_to_str(state.get("blade_target"), default="", context="fault_spec.legacy.blade_target")
-        or blade_target
+    fault_target = (
+        coerce_to_str(
+            state.get("fault_target"),
+            default="",
+            context="fault_spec.legacy.fault_target",
+        )
+        or fault_target
     )
-    blade_action = (
-        coerce_to_str(state.get("blade_action"), default="", context="fault_spec.legacy.blade_action")
-        or blade_action
+    fault_action = (
+        coerce_to_str(
+            state.get("fault_action"),
+            default="",
+            context="fault_spec.legacy.fault_action",
+        )
+        or fault_action
     )
     params_flags = tuple(
         str(item) for item in coerce_to_list(
@@ -813,7 +813,7 @@ def fault_spec_from_legacy_state(
         context="fault_spec.legacy.duration",
     )
 
-    if not any((target, scope, blade_target, blade_action, params, params_flags, duration_seconds)):
+    if not any((target, scope, fault_target, fault_action, params, params_flags, duration_seconds)):
         return None
 
     return FaultSpec(
@@ -826,8 +826,8 @@ def fault_spec_from_legacy_state(
             )
         ),
         labels=coerce_to_dict(target.get("labels"), context="fault_spec.legacy.labels"),
-        blade_target=blade_target,
-        blade_action=blade_action,
+        fault_target=fault_target,
+        fault_action=fault_action,
         params=params,
         params_flags=params_flags,
         duration_seconds=duration_seconds,
@@ -868,8 +868,8 @@ def read_fault_spec(state: dict) -> Optional[FaultSpec]:
 
     Defensive legacy-shape projection: if ``state.fault_spec`` is
     missing but the caller still passes the old scattered fields
-    (``state.target`` / ``state.blade_scope`` / ``state.blade_target``
-    / ``state.blade_action`` / ``state.params`` / ``state.params_flags``
+    (``state.target`` / ``state.fault_scope`` / ``state.fault_target``
+    / ``state.fault_action`` / ``state.params`` / ``state.params_flags``
     / ``state.duration``), we construct a spec from those. This lets
     older test fixtures (and any out-of-tree caller that hasn't yet
     migrated) keep working. Production entry points always set
@@ -886,7 +886,7 @@ def read_fault_spec(state: dict) -> Optional[FaultSpec]:
         "scattered fields. Entry point may have forgotten to call "
         "FaultSpec.from_xxx (state keys present: %s).",
         sorted(k for k in state if k in (
-            "target", "blade_scope", "blade_target", "blade_action",
+            "target", "fault_scope", "fault_target", "fault_action",
             "params", "params_flags", "duration", "duration_seconds",
             "skill_name", "fault_type",
         )),
@@ -967,5 +967,4 @@ __all__ = [
     "SOURCE_HTTP_STRUCTURED",
     "SOURCE_HTTP_NL",
     "SOURCE_TUI",
-    "SOURCE_DIRECT",
 ]

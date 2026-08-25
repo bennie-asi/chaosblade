@@ -159,9 +159,7 @@ async def _node_channel_factory(req: _ChannelRequest) -> Optional[EffectSampleCh
     node_name = (req.names or "").strip()
     if not node_name:
         return None
-    from chaos_agent.agent.nodes.execute._injection_detection import (
-        discover_tool_pod_on_node,
-    )
+    from chaos_agent.tools.pod_discovery import discover_tool_pod_on_node
     pod = await discover_tool_pod_on_node(node_name, req.kubeconfig, req.task_id)
     if not pod:
         logger.warning(
@@ -180,9 +178,7 @@ async def _node_channel_factory(req: _ChannelRequest) -> Optional[EffectSampleCh
 
 async def _pod_channel_factory(req: _ChannelRequest) -> Optional[EffectSampleChannel]:
     from chaos_agent.tools.kubectl import build_kubectl_cmd
-    from chaos_agent.agent.nodes.execute._injection_detection import (
-        discover_tool_pod_on_node,
-    )
+    from chaos_agent.tools.pod_discovery import discover_tool_pod_on_node
     pod_name = (req.names or "").split(",")[0].strip()
     if not pod_name:
         return None

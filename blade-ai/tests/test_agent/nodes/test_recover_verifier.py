@@ -6,14 +6,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from chaos_agent.agent.nodes.execute._injection_detection import (
-    _was_kubectl_blade_injection_successful,
-    _was_blade_create_attempted,
+# Phase-13 T2: the blade-success scan's canonical address (the generic-layer
+# shim was retired with the detection import; kept under the historical call
+# name as the equivalence anchor for the successful-test group). Phase-14 G1:
+# the scan's physical address moved from the retired chaosblade/detection.py
+# to chaosblade/verify.py.
+from chaos_agent.agent.providers.chaosblade.verify import (
+    scan_kubectl_blade_success as _was_kubectl_blade_injection_successful,
+)
+# Phase-4 T2 canonical address (kept under the historical call name as the
+# equivalence anchor for the attempted-test group).
+from chaos_agent.agent.providers.chaosblade.verify import (
+    was_blade_create_attempted as _was_blade_create_attempted,
 )
 from chaos_agent.agent.nodes.recover.recover_verifier import (
     RecoverLayer1Result,
-    _parse_blade_destroy_output,
-    _parse_blade_status_destroyed,
     _parse_recovery_verification_result,
     _parse_recovery_checklist_items,
     _has_recovery_checklist,
@@ -25,10 +32,20 @@ from chaos_agent.agent.nodes.recover.recover_verifier import (
     _build_recover_verifier_prompt,
     _build_layer1_recovery_prompt,
     _extract_recovery_verification_section,
-    _layer1_to_dict,
     recover_verifier,
     make_recover_verifier,
 )
+# Phase-9: the carrier-owned destroy-output parsers are imported from their
+# canonical provider home — the recover_verifier facade no longer re-exports
+# carrier symbols (generic-layer direction violation; this test file was the
+# sole consumer of those re-exports).
+from chaos_agent.agent.providers.chaosblade.recover import (
+    parse_blade_destroy_output as _parse_blade_destroy_output,
+    parse_blade_status_destroyed as _parse_blade_status_destroyed,
+)
+# Phase-7 T1: the Layer-1 storage-shape helper lives beside the data class
+# (result/verdict.py) — the recover_verifier facade no longer re-exports it.
+from chaos_agent.agent.result.verdict import layer1_to_dict as _layer1_to_dict
 from chaos_agent.agent.prompts.sections.recovery import (
     build_recover_verifier_system_prompt,
 )
@@ -268,7 +285,7 @@ class TestRecoverVerifierNoLLM:
     @pytest.mark.asyncio
     async def test_no_blade_uid(self):
         """No blade_uid + no blade_create in messages → non-ChaosBlade, Layer 1 skipped, cannot verify without LLM."""
-        state = {"task_id": "t1", "blade_uid": "", "skill_name": "cpu-stress", "kubeconfig": "", "messages": []}
+        state = {"task_id": "t1", "experiment_uid": "", "skill_name": "cpu-stress", "kubeconfig": "", "messages": []}
         result = await recover_verifier(state)
         # Non-ChaosBlade fault: Layer 1 skipped, cannot verify without LLM
         assert result["result"]["recovered"] is False
@@ -277,8 +294,8 @@ class TestRecoverVerifierNoLLM:
     @pytest.mark.asyncio
     async def test_successful_recovery(self):
         # No-LLM path now delegates to ChaosbladeProvider.recover, which imports
-        # _run_recover_layer1 from its canonical module at call time — patch there.
-        with patch("chaos_agent.agent.nodes.recover._recover_layer1._run_recover_layer1") as mock_l1:
+        # run_layer1_destroy from its canonical module at call time — patch there.
+        with patch("chaos_agent.agent.providers.chaosblade.recover.run_layer1_destroy") as mock_l1:
             mock_l1.return_value = RecoverLayer1Result(
                 status="passed",
                 details="blade_destroy: success, blade_status confirms: Destroyed",
@@ -286,7 +303,7 @@ class TestRecoverVerifierNoLLM:
             )
             state = {
                 "task_id": "t1",
-                "blade_uid": "abc123",
+                "experiment_uid": "abc123",
                 "skill_name": "cpu-stress",
                 "kubeconfig": "",
             }
@@ -299,20 +316,51 @@ class TestRecoverVerifierNoLLM:
     @pytest.mark.asyncio
     async def test_failed_recovery(self):
         # No-LLM path delegates to ChaosbladeProvider.recover — patch the canonical module.
-        with patch("chaos_agent.agent.nodes.recover._recover_layer1._run_recover_layer1") as mock_l1:
+        with patch("chaos_agent.agent.providers.chaosblade.recover.run_layer1_destroy") as mock_l1:
             mock_l1.return_value = RecoverLayer1Result(
                 status="failed",
                 details="blade_destroy failed",
             )
             state = {
                 "task_id": "t1",
-                "blade_uid": "abc123",
+                "experiment_uid": "abc123",
                 "skill_name": "cpu-stress",
                 "kubeconfig": "",
             }
             result = await recover_verifier(state)
             assert result["result"]["recovered"] is False
             assert result["recover_verification"]["level"] == "unrecovered"
+
+    @pytest.mark.asyncio
+    async def test_uid_from_message_history_routes_destroy(self):
+        """Legacy/compacted checkpoint (no durable uid/method facts): the
+        experiment UID recovered from the message history must still route
+        to the experiment carrier's deterministic destroy (the dispatch's
+        message-history claim), never to the UID-less native default —
+        preserving the pre-dispatch ``if blade_uid:`` contract."""
+        from langchain_core.messages import ToolMessage
+
+        with patch("chaos_agent.agent.providers.chaosblade.recover.run_layer1_destroy") as mock_l1:
+            mock_l1.return_value = RecoverLayer1Result(
+                status="passed",
+                details="blade_destroy: success, blade_status confirms: Destroyed",
+                raw_output='{"code": 200}',
+            )
+            state = {
+                "task_id": "t1",
+                "skill_name": "cpu-stress",
+                "kubeconfig": "",
+                "messages": [
+                    ToolMessage(
+                        content='{"code":200,"success":true,"result":"uid-mh"}',
+                        name="blade_create", tool_call_id="c1",
+                    ),
+                ],
+            }
+            result = await recover_verifier(state)
+            assert mock_l1.await_count == 1
+            assert mock_l1.await_args.args[0] == "uid-mh"
+            assert result["result"]["recovered"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -330,14 +378,14 @@ class TestMakeRecoverVerifier:
         mock_llm = MagicMock()
         node = make_recover_verifier(llm=mock_llm, tools=[], registry=None)
 
-        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._run_recover_layer1") as mock_l1:
+        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._layer1_destroy_via_provider") as mock_l1:
             mock_l1.return_value = RecoverLayer1Result(
                 status="failed",
                 details="blade still running",
             )
             state = {
                 "task_id": "t1",
-                "blade_uid": "abc",
+                "experiment_uid": "abc",
                 "skill_name": "cpu-stress",
                 "kubeconfig": "",
                 "verifier_loop_count": 0,
@@ -373,11 +421,11 @@ class TestMakeRecoverVerifier:
 
         node = make_recover_verifier(llm=mock_llm, tools=[], registry=None)
 
-        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._run_recover_layer1") as mock_l1:
+        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._layer1_destroy_via_provider") as mock_l1:
             mock_l1.return_value = RecoverLayer1Result(status="passed", details="ok", raw_output="ok")
             state = {
                 "task_id": "t1",
-                "blade_uid": "abc",
+                "experiment_uid": "abc",
                 "skill_name": "unknown-skill",
                 "kubeconfig": "",
                 "verifier_loop_count": 0,
@@ -419,11 +467,11 @@ class TestMakeRecoverVerifier:
 
         node = make_recover_verifier(llm=mock_llm, tools=[], registry=None)
 
-        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._run_recover_layer1") as mock_l1:
+        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._layer1_destroy_via_provider") as mock_l1:
             mock_l1.return_value = RecoverLayer1Result(status="passed", details="ok", raw_output="ok")
             state = {
                 "task_id": "t1",
-                "blade_uid": "abc",
+                "experiment_uid": "abc",
                 "skill_name": "cpu-stress",
                 "kubeconfig": "",
                 "verifier_loop_count": 2,  # Non-first iteration — guard bypassed
@@ -450,11 +498,11 @@ class TestMakeRecoverVerifier:
 
         node = make_recover_verifier(llm=mock_llm, tools=["kubectl"], registry=None)
 
-        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._run_recover_layer1") as mock_l1:
+        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._layer1_destroy_via_provider") as mock_l1:
             mock_l1.return_value = RecoverLayer1Result(status="passed", details="ok")
             state = {
                 "task_id": "t1",
-                "blade_uid": "abc",
+                "experiment_uid": "abc",
                 "skill_name": "pod-kill",
                 "kubeconfig": "",
                 "verifier_loop_count": 0,
@@ -469,7 +517,7 @@ class TestMakeRecoverVerifier:
         node = make_recover_verifier(llm=AsyncMock(), tools=[], registry=None)
         state = {
             "task_id": "t1",
-            "blade_uid": "abc",
+            "experiment_uid": "abc",
             "skill_name": "cpu-stress",
             "kubeconfig": "",
             "verifier_loop_count": settings.max_recover_verifier_loop + 1,
@@ -486,7 +534,7 @@ class TestMakeRecoverVerifier:
 class TestRunRecoverLayer1:
     @pytest.mark.asyncio
     async def test_no_blade_uid_skipped(self):
-        from chaos_agent.agent.nodes.recover.recover_verifier import _run_recover_layer1
+        from chaos_agent.agent.providers.chaosblade.recover import run_layer1_destroy as _run_recover_layer1
         result = await _run_recover_layer1("", "")
         assert result.status == "skipped"
 
@@ -538,10 +586,10 @@ class TestParseLayer1RecoveryResult:
 
 class TestBuildRecoverVerifierPrompt:
     def test_chaosblade_label(self):
-        prompt = _build_recover_verifier_prompt(layer1_label="blade_destroy")
+        prompt = _build_recover_verifier_prompt(layer1_label="deterministic destroy")
         # Scheme B: verdict submitted via submit_recover_verification; the
-        # blade_destroy label still appears in the text fallback block.
-        assert "blade_destroy" in prompt
+        # deterministic-destroy label still appears in the text fallback block.
+        assert "deterministic destroy" in prompt
         assert "submit_recover_verification" in prompt
 
     def test_non_chaosblade_label(self):
@@ -557,11 +605,11 @@ class TestBuildRecoverVerifierPrompt:
 class TestBuildLayer1RecoveryPrompt:
     def test_contains_constraints(self):
         prompt = _build_layer1_recovery_prompt()
-        # Generic (non-ChaosBlade) recovery: Layer 2 owns verification, no
-        # ChaosBlade experiment here, and no TTY-bound interactive commands.
+        # Generic (native-carrier) recovery: Layer 2 owns verification, no
+        # experiment carrier here, and no TTY-bound interactive commands.
         assert "Do NOT verify the fault has been removed" in prompt
         assert "Do NOT use interactive commands" in prompt
-        assert "there is no ChaosBlade" in prompt
+        assert "there is no experiment carrier" in prompt
 
     def test_landed_reminder_kept_but_no_heuristic_gate(self):
         """Batch 2 (revised): enforcement is programmatic (Layer 1 success
@@ -741,7 +789,7 @@ class TestMakeRecoverVerifierNonChaosBlade:
         # Iteration 1: Layer 1 execution
         state1 = {
             "task_id": "t1",
-            "blade_uid": "",
+            "experiment_uid": "",
             "skill_name": "pod-terminating",
             "kubeconfig": "/path/to/config",
             "verifier_loop_count": 0,
@@ -816,7 +864,7 @@ class TestMakeRecoverVerifierNonChaosBlade:
 
         state = {
             "task_id": "t1",
-            "blade_uid": "",
+            "experiment_uid": "",
             "skill_name": "pod-terminating",
             "kubeconfig": "",
             "verifier_loop_count": 0,
@@ -868,7 +916,7 @@ class TestMakeRecoverVerifierNonChaosBlade:
         # Iteration 1: Layer 1 skipped → Layer 2 first iteration (tool call)
         state1 = {
             "task_id": "t1",
-            "blade_uid": "",
+            "experiment_uid": "",
             "skill_name": "pod-terminating",
             "kubeconfig": "",
             "verifier_loop_count": 0,
@@ -929,7 +977,7 @@ class TestMakeRecoverVerifierNonChaosBlade:
 
         node = make_recover_verifier(llm=mock_llm, tools=["kubectl"], registry=None)
 
-        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._run_recover_layer1") as mock_l1:
+        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._layer1_destroy_via_provider") as mock_l1:
             mock_l1.return_value = RecoverLayer1Result(
                 status="passed",
                 details="blade_destroy: success",
@@ -938,7 +986,7 @@ class TestMakeRecoverVerifierNonChaosBlade:
             # Iteration 1: deterministic Layer 1 + Layer 2 first iteration (tool call)
             state1 = {
                 "task_id": "t1",
-                "blade_uid": "abc123",
+                "experiment_uid": "abc123",
                 "skill_name": "cpu-stress",
                 "kubeconfig": "",
                 "verifier_loop_count": 0,
@@ -1135,7 +1183,7 @@ class TestRunRecoverLayer1KubectlRouting:
     async def test_blade_destroy_failed_but_experiment_gone_passes(self):
         """When blade_destroy fails but experiment CRD is already gone (not found),
         Layer 1 passes — the experiment was auto-recovered (timeout expiry)."""
-        from chaos_agent.agent.nodes.recover.recover_verifier import _run_recover_layer1
+        from chaos_agent.agent.providers.chaosblade.recover import run_layer1_destroy as _run_recover_layer1
 
         destroy_output = json.dumps({
             "code": 500, "success": False,
@@ -1146,9 +1194,9 @@ class TestRunRecoverLayer1KubectlRouting:
             "error": "Error from server (NotFound): chaosblades.chaosblade.io \"uid-k8s-abc\" not found"
         })
 
-        with patch("chaos_agent.tools.blade.blade_destroy") as mock_destroy:
+        with patch("chaos_agent.agent.providers.chaosblade.cli.blade_destroy") as mock_destroy:
             mock_destroy.ainvoke = AsyncMock(return_value=destroy_output)
-            with patch("chaos_agent.tools.blade.blade_status") as mock_status:
+            with patch("chaos_agent.agent.providers.chaosblade.cli.blade_status") as mock_status:
                 mock_status.ainvoke = AsyncMock(return_value=status_output)
 
                 result = await _run_recover_layer1(
@@ -1160,7 +1208,7 @@ class TestRunRecoverLayer1KubectlRouting:
     async def test_blade_destroy_failed_experiment_still_running(self):
         """When blade_destroy fails and experiment is still Running,
         Layer 1 stays 'failed'."""
-        from chaos_agent.agent.nodes.recover.recover_verifier import _run_recover_layer1
+        from chaos_agent.agent.providers.chaosblade.recover import run_layer1_destroy as _run_recover_layer1
 
         destroy_output = json.dumps({
             "code": 500, "success": False,
@@ -1171,9 +1219,9 @@ class TestRunRecoverLayer1KubectlRouting:
             "result": {"uid": "uid-k8s-abc", "status": "Running"}
         })
 
-        with patch("chaos_agent.tools.blade.blade_destroy") as mock_destroy:
+        with patch("chaos_agent.agent.providers.chaosblade.cli.blade_destroy") as mock_destroy:
             mock_destroy.ainvoke = AsyncMock(return_value=destroy_output)
-            with patch("chaos_agent.tools.blade.blade_status") as mock_status:
+            with patch("chaos_agent.agent.providers.chaosblade.cli.blade_status") as mock_status:
                 mock_status.ainvoke = AsyncMock(return_value=status_output)
 
                 result = await _run_recover_layer1(
@@ -1185,13 +1233,13 @@ class TestRunRecoverLayer1KubectlRouting:
     @pytest.mark.asyncio
     async def test_blade_destroy_succeeds_normally(self):
         """Normal blade_destroy succeeds."""
-        from chaos_agent.agent.nodes.recover.recover_verifier import _run_recover_layer1
+        from chaos_agent.agent.providers.chaosblade.recover import run_layer1_destroy as _run_recover_layer1
 
         destroy_output = json.dumps({"code": 200, "success": True, "result": "uid-abc"})
 
-        with patch("chaos_agent.tools.blade.blade_destroy") as mock_destroy:
+        with patch("chaos_agent.agent.providers.chaosblade.cli.blade_destroy") as mock_destroy:
             mock_destroy.ainvoke = AsyncMock(return_value=destroy_output)
-            with patch("chaos_agent.tools.blade.blade_status") as mock_status:
+            with patch("chaos_agent.agent.providers.chaosblade.cli.blade_status") as mock_status:
                 mock_status.ainvoke = AsyncMock(return_value=json.dumps({"code": 406, "success": False}))
 
                 result = await _run_recover_layer1(
@@ -1202,9 +1250,9 @@ class TestRunRecoverLayer1KubectlRouting:
     @pytest.mark.asyncio
     async def test_blade_tools_exception_stays_error(self):
         """When blade tools throw exceptions, stays 'error'."""
-        from chaos_agent.agent.nodes.recover.recover_verifier import _run_recover_layer1
+        from chaos_agent.agent.providers.chaosblade.recover import run_layer1_destroy as _run_recover_layer1
 
-        with patch("chaos_agent.tools.blade.blade_destroy") as mock_destroy:
+        with patch("chaos_agent.agent.providers.chaosblade.cli.blade_destroy") as mock_destroy:
             mock_destroy.ainvoke = AsyncMock(side_effect=Exception("blade binary not found"))
 
             result = await _run_recover_layer1(
@@ -1220,8 +1268,8 @@ class TestRunRecoverLayer1KubectlRouting:
 
 class TestBuildRecoverVerifierPromptSignature:
     def test_chaosblade_prompt(self):
-        prompt = _build_recover_verifier_prompt(layer1_label="blade_destroy")
-        assert "blade_destroy" in prompt
+        prompt = _build_recover_verifier_prompt(layer1_label="deterministic destroy")
+        assert "deterministic destroy" in prompt
 
     def test_non_chaosblade_prompt(self):
         prompt = _build_recover_verifier_prompt(layer1_label="recovery execution")
@@ -1252,7 +1300,7 @@ class TestRecoverVerifierNoLLMKubectlRouting:
 
         state = {
             "task_id": "t1",
-            "blade_uid": "uid-k8s-abc",
+            "experiment_uid": "uid-k8s-abc",
             "skill_name": "cpu-stress",
             "kubeconfig": "/path/to/kubeconfig",
             "messages": kubectl_msgs,
@@ -1270,7 +1318,7 @@ class TestRecoverVerifierNoLLMKubectlRouting:
         """Non-ChaosBlade fault (no blade_uid) should still show the old warning."""
         state = {
             "task_id": "t1",
-            "blade_uid": "",
+            "experiment_uid": "",
             "skill_name": "pod-terminating",
             "kubeconfig": "",
             "messages": [],
@@ -1282,10 +1330,10 @@ class TestRecoverVerifierNoLLMKubectlRouting:
 
     @pytest.mark.asyncio
     async def test_normal_chaosblade_still_uses_blade_destroy(self):
-        """Normal ChaosBlade injection (host blade_create) still calls _run_recover_layer1."""
+        """Normal ChaosBlade injection (host blade_create) still runs the deterministic destroy."""
         # No-LLM path delegates to ChaosbladeProvider.recover, which imports
-        # _run_recover_layer1 from its canonical module at call time — patch there.
-        with patch("chaos_agent.agent.nodes.recover._recover_layer1._run_recover_layer1") as mock_l1:
+        # run_layer1_destroy from its canonical module at call time — patch there.
+        with patch("chaos_agent.agent.providers.chaosblade.recover.run_layer1_destroy") as mock_l1:
             mock_l1.return_value = RecoverLayer1Result(
                 status="passed",
                 details="blade_destroy: success",
@@ -1293,7 +1341,7 @@ class TestRecoverVerifierNoLLMKubectlRouting:
             )
             state = {
                 "task_id": "t1",
-                "blade_uid": "uid-host-abc",
+                "experiment_uid": "uid-host-abc",
                 "skill_name": "cpu-stress",
                 "kubeconfig": "",
                 "messages": [],
@@ -1301,6 +1349,194 @@ class TestRecoverVerifierNoLLMKubectlRouting:
             result = await recover_verifier(state)
             mock_l1.assert_called_once()
             assert result["result"]["recovered"] is True
+
+
+# ---------------------------------------------------------------------------
+# recover_layer1_type materialization (phase-4 T1.4)
+# ---------------------------------------------------------------------------
+
+class TestRecoverLayer1TypeMaterialization:
+    """The Layer-1 type must become explicit on state once a deterministic
+    destroy ran (simple entry writes it post-destroy; the LLM flow's Layer-2
+    result materializes the inferred value), while the readers' None
+    fallback keeps serving legacy checkpoints unchanged."""
+
+    @pytest.mark.asyncio
+    async def test_simple_entry_deterministic_write(self):
+        """Deterministic destroy executed in the no-LLM entry → the type is
+        written explicitly instead of being left to reader-side inference."""
+        with patch("chaos_agent.agent.providers.chaosblade.recover.run_layer1_destroy") as mock_l1:
+            mock_l1.return_value = RecoverLayer1Result(
+                status="passed",
+                details="blade_destroy: success",
+                raw_output='{"code": 200}',
+            )
+            state = {
+                "task_id": "t1",
+                "experiment_uid": "uid-host-abc",
+                "skill_name": "cpu-stress",
+                "kubeconfig": "",
+                "messages": [],
+            }
+            result = await recover_verifier(state)
+            mock_l1.assert_called_once()
+            assert result["recover_layer1_type"] == "deterministic"
+
+    @pytest.mark.asyncio
+    async def test_simple_entry_skipped_not_written(self):
+        """kubectl-exec delivery: Layer-1 "skipped" (deterministic destroy not
+        applicable) → the field stays untouched (None default)."""
+        kubectl_msgs = _make_kubectl_tool_call_pair(
+            "tc1", "exec",
+            "otel-c-tool -n chaosblade -- blade create k8s pod-cpu fullload",
+            json.dumps({"code": 200, "success": True, "result": "uid-k8s-abc"}),
+        )
+        state = {
+            "task_id": "t1",
+            "experiment_uid": "uid-k8s-abc",
+            "skill_name": "cpu-stress",
+            "kubeconfig": "/path/to/kubeconfig",
+            "messages": kubectl_msgs,
+        }
+        result = await recover_verifier(state)
+        assert result["recover_verification"]["layer1"]["status"] == "skipped"
+        assert "recover_layer1_type" not in result
+
+    @pytest.mark.asyncio
+    async def test_llm_flow_layer2_materializes_deterministic(self):
+        """Deterministic Layer-1 in the LLM flow never writes the field at its
+        transition — the first Layer-2 result materializes the inferred
+        "deterministic" value."""
+        mock_response = MagicMock()
+        mock_response.content = (
+            "RECOVERY_VERIFICATION_RESULT:\n"
+            "- Layer1 (deterministic destroy): passed - success\n"
+            "- Layer2 (fault-specific): passed - CPU normal\n"
+            "- Overall: recovered\n"
+            "- Warnings: none"
+        )
+        mock_response.tool_calls = []
+
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+
+        node = make_recover_verifier(llm=mock_llm, tools=[], registry=None)
+
+        with patch("chaos_agent.agent.nodes.recover._recover_verifier_loop._layer1_destroy_via_provider") as mock_l1:
+            mock_l1.return_value = RecoverLayer1Result(status="passed", details="ok", raw_output="ok")
+            state = {
+                "task_id": "t1",
+                "experiment_uid": "abc",
+                "skill_name": "unknown-skill",
+                "kubeconfig": "",
+                "verifier_loop_count": 0,
+            }
+            result = await node(state)
+            mock_l1.assert_called_once()
+            assert result["recover_layer1_type"] == "deterministic"
+
+    @pytest.mark.asyncio
+    async def test_llm_flow_explicit_type_not_overwritten(self):
+        """A pre-existing explicit type (e.g. "llm_driven" written at the
+        Layer-1 transition) must survive the Layer-2 result — no re-inference,
+        no overwrite."""
+        mock_response = MagicMock()
+        mock_response.content = (
+            "RECOVERY_VERIFICATION_RESULT:\n"
+            "- Layer1 (recovery execution): passed\n"
+            "- Layer2 (fault-specific): passed - CPU normal\n"
+            "- Overall: recovered\n"
+            "- Warnings: none"
+        )
+        mock_response.tool_calls = []
+
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+
+        node = make_recover_verifier(llm=mock_llm, tools=[], registry=None)
+
+        state = {
+            "task_id": "t1",
+            "experiment_uid": "abc",
+            "skill_name": "cpu-stress",
+            "kubeconfig": "",
+            "verifier_loop_count": 2,  # Non-first iteration
+            "layer2_context_added": True,
+            "recover_phase": "layer2_verification",
+            "recover_layer1_type": "llm_driven",
+        }
+        result = await node(state)
+        # Absent from the update = state's explicit value survives the merge.
+        assert "recover_layer1_type" not in result
+
+    @pytest.fixture
+    def _l2_failed_state(self):
+        """State reaching finalize with a failed Layer-2 verdict on a
+        deterministic Layer-1 (retry-eligible: loop budget available, no
+        retry marker yet). ``layer1_type`` set per-test."""
+        return {
+            "task_id": "t1",
+            "experiment_uid": "abc",
+            "skill_name": "cpu-stress",
+            "kubeconfig": "",
+            "verifier_loop_count": 1,
+            "layer2_context_added": True,
+            "recover_phase": "layer2_verification",
+            "recover_layer2_first": False,
+            "recover_layer1_cache": {"status": "passed", "details": "ok", "raw_output": "ok"},
+            "messages": [
+                AIMessage(content=(
+                    "RECOVERY_VERIFICATION_RESULT:\n"
+                    "- Layer1 (deterministic destroy): passed - success\n"
+                    "- Layer2 (fault-specific): failed - CPU still at 95%\n"
+                    "- Overall: unrecovered\n"
+                    "- Warnings: none"
+                )),
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_finalize_explicit_deterministic_takes_retry_destroy(self, _l2_failed_state):
+        """Explicit "deterministic" on state → finalize retry takes the
+        deterministic-destroy branch directly (no None re-derivation)."""
+        from chaos_agent.agent.nodes.recover._recover_finalize import (
+            make_finalize_recover_verification,
+        )
+
+        state = {**_l2_failed_state, "recover_layer1_type": "deterministic"}
+        with patch("chaos_agent.agent.providers.chaosblade.recover.raw_destroy", new_callable=AsyncMock) as mock_raw:
+            mock_raw.return_value = '{"code": 200, "success": true}'
+            fnode = make_finalize_recover_verification()
+            result = await fnode(state)
+            mock_raw.assert_called_once()
+            assert any(
+                "layer-1 destroy output:" in (getattr(m, "content", "") or "")
+                for m in result.get("messages", [])
+            )
+            assert "recover_verification" not in result  # loop back, not finalized
+
+    @pytest.mark.asyncio
+    async def test_finalize_none_fallback_takes_retry_destroy(self, _l2_failed_state):
+        """Legacy-checkpoint None → the reader-side fallback still derives
+        "deterministic" and the retry branch fires identically."""
+        from chaos_agent.agent.nodes.recover._recover_finalize import (
+            make_finalize_recover_verification,
+        )
+
+        state = {**_l2_failed_state}  # no recover_layer1_type key at all
+        with patch("chaos_agent.agent.providers.chaosblade.recover.raw_destroy", new_callable=AsyncMock) as mock_raw:
+            mock_raw.return_value = '{"code": 200, "success": true}'
+            fnode = make_finalize_recover_verification()
+            result = await fnode(state)
+            mock_raw.assert_called_once()
+            assert any(
+                "layer-1 destroy output:" in (getattr(m, "content", "") or "")
+                for m in result.get("messages", [])
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1356,7 +1592,7 @@ class TestMakeRecoverVerifierKubectlExecRouting:
 
         state1 = {
             "task_id": "t1",
-            "blade_uid": "uid-k8s-abc",
+            "experiment_uid": "uid-k8s-abc",
             "skill_name": "cpu-stress",
             "kubeconfig": "/path/to/kubeconfig",
             "verifier_loop_count": 0,
@@ -1409,7 +1645,7 @@ class TestMakeRecoverVerifierKubectlExecRouting:
 
         state1 = {
             "task_id": "t1",
-            "blade_uid": "uid-k8s-abc",
+            "experiment_uid": "uid-k8s-abc",
             "skill_name": "cpu-stress",
             "kubeconfig": "/path/to/kubeconfig",
             "verifier_loop_count": 0,
@@ -1487,7 +1723,7 @@ class TestMakeRecoverVerifierKubectlExecRouting:
 
         state1 = {
             "task_id": "t1",
-            "blade_uid": "uid-k8s-abc",
+            "experiment_uid": "uid-k8s-abc",
             "skill_name": "cpu-stress",
             "kubeconfig": "/path/to/kubeconfig",
             "verifier_loop_count": 0,
@@ -1548,7 +1784,7 @@ class TestMakeRecoverVerifierKubectlExecRouting:
 
         state = {
             "task_id": "t1",
-            "blade_uid": "uid-k8s-abc",
+            "experiment_uid": "uid-k8s-abc",
             "skill_name": "cpu-stress",
             "kubeconfig": "/path/to/kubeconfig",
             "verifier_loop_count": 0,
@@ -1558,7 +1794,7 @@ class TestMakeRecoverVerifierKubectlExecRouting:
             "recover_phase": "layer1_recovery",
             "layer1_iteration_count": 0,
         }
-        result = await node(state)
+        await node(state)
 
         # The LLM's first call should contain tool-agnostic destroy instructions
         first_call_args = mock_llm.ainvoke.call_args_list[0]
@@ -1611,7 +1847,7 @@ class TestMakeRecoverVerifierKubectlExecRouting:
 
         state1 = {
             "task_id": "t1",
-            "blade_uid": "uid-k8s-abc",
+            "experiment_uid": "uid-k8s-abc",
             "skill_name": "cpu-stress",
             "kubeconfig": "/path/to/kubeconfig",
             "verifier_loop_count": 0,
@@ -1634,7 +1870,7 @@ class TestMakeRecoverVerifierKubectlExecRouting:
             "layer2_context_added": False,
             "recover_layer1_type": "llm_driven",
         }
-        result2 = await node(state2)
+        await node(state2)
 
         # Check that Layer 2 prompt uses "recovery execution" (non-ChaosBlade)
         second_call_args = mock_llm.ainvoke.call_args_list[1]
@@ -1681,14 +1917,14 @@ class TestMakeRecoverVerifierKubectlExecRouting:
             namespace="cms-demo",
             scope="node",
             names=("node-a",),
-            blade_target="disk",
-            blade_action="fill",
+            fault_target="disk",
+            fault_action="fill",
             params={"path": "/", "percent": "80"},
         )
 
         state1 = {
             "task_id": "t1",
-            "blade_uid": "uid-k8s-abc",
+            "experiment_uid": "uid-k8s-abc",
             "skill_name": "disk-fill",
             "kubeconfig": "/path/to/kubeconfig",
             "verifier_loop_count": 0,
@@ -2797,7 +3033,7 @@ class TestFinalizeInProgressDefense:
 
         state = {
             "task_id": "task-test",
-            "blade_uid": "",
+            "experiment_uid": "",
             "skill_name": "pod-terminating",
             "kubeconfig": "",
             "verifier_loop_count": 3,
@@ -2818,6 +3054,36 @@ class TestFinalizeInProgressDefense:
         assert "recover_verification" in fin
         # Layer 1 should be unknown (defense-in-depth), not in_progress
         assert fin["recover_verification"]["layer1"]["status"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# finalize_recover_verification: combo experiment-uid external contract
+# ---------------------------------------------------------------------------
+
+class TestFinalizeComboUidContract:
+    @pytest.mark.asyncio
+    async def test_combo_result_keeps_experiment_uid(self):
+        """Combo task: the external ``result["experiment_uid"]`` contract keeps
+        the EXPERIMENT uid even though the durable attribution is native —
+        the finalize reads the combo-safe dispatch identity (a plain
+        materialization would return the native handle and blank the uid).
+        (Legacy-spelling input pins the hydrate path.)"""
+        state = {
+            "task_id": "t-combo",
+            "skill_name": "pod-delete",
+            "kubeconfig": "",
+            "experiment_uid": "uid-combo",
+            "injection_method": "kubectl_native",
+            "combo_native_issued": True,
+            "recover_layer1_type": "llm_driven",
+            "verifier_loop_count": 2,
+            "messages": [],
+        }
+        fin = await _drive_finalize(state, {})
+        # The external uid contract survives the native attribution (the
+        # verdict itself comes from the messages — out of scope here).
+        assert fin["result"]["experiment_uid"] == "uid-combo"
+        assert "blade_uid" not in fin["result"]
 
 
 # ---------------------------------------------------------------------------
@@ -2862,7 +3128,7 @@ class TestFinalizeMarksInjectTask:
         state = {
             "task_id": recover_task_id,
             "recover_task_id": inject_task_id,
-            "blade_uid": "uid-123",
+            "experiment_uid": "uid-123",
             "skill_name": "pod-cpu-fullload",
             "kubeconfig": "",
             "verifier_loop_count": 3,
@@ -2892,7 +3158,7 @@ class TestFinalizeMarksInjectTask:
             new_callable=AsyncMock,
             return_value=_FakeStore(),
         ):
-            fin = await _drive_finalize(state, {})
+            await _drive_finalize(state, {})
 
         # The original inject task should be marked via update_task_state
         inject_updates = [c for c in update_state_calls if c[0] == inject_task_id]
@@ -2928,7 +3194,7 @@ class TestFinalizeMarksInjectTask:
         state = {
             "task_id": recover_task_id,
             # NO recover_task_id — simulate direct API recover
-            "blade_uid": "uid-123",
+            "experiment_uid": "uid-123",
             "skill_name": "pod-cpu-fullload",
             "kubeconfig": "",
             "verifier_loop_count": 3,
@@ -2958,7 +3224,7 @@ class TestFinalizeMarksInjectTask:
             return_value=_FakeStore(),
         ):
             # Should not crash
-            fin = await _drive_finalize(state, {})
+            await _drive_finalize(state, {})
 
         # No update_task_state should happen (recover_task_id is empty)
         assert len(update_state_calls) == 0, f"Expected no state update, got {update_state_calls}"
@@ -2972,11 +3238,12 @@ class TestMergeComboBladePart:
     """Composite Layer-1 verdict: either part failing fails the whole."""
 
     def _merge(self, layer1, blade_part=None, state=None):
-        from chaos_agent.agent.nodes.recover._recover_verifier_loop import (
-            _merge_combo_blade_part,
-        )
-        return _merge_combo_blade_part(
-            layer1, state or {}, blade_part_override=blade_part
+        # phase-3 T4: the composite combo verdict moved to the experiment
+        # carrier (``merge_deterministic_recover_verdict``).
+        from chaos_agent.agent.providers.chaosblade.provider import ChaosbladeProvider
+
+        return ChaosbladeProvider().merge_deterministic_recover_verdict(
+            layer1, state or {}, part_override=blade_part
         )
 
     def test_no_blade_part_is_identity(self):
@@ -3008,7 +3275,7 @@ class TestComboRecoveryRouting:
     def _combo_state(self):
         return {
             "task_id": "t1",
-            "blade_uid": "uid-combo",
+            "experiment_uid": "uid-combo",
             "skill_name": "combo-skill",
             "kubeconfig": "/path/to/config",
             "verifier_loop_count": 0,
@@ -3044,7 +3311,7 @@ class TestComboRecoveryRouting:
         llm = self._mock_l1_llm()
         node = make_recover_verifier(llm=llm, tools=[], registry=None)
         with patch.object(
-            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            rvl, "_layer1_destroy_via_provider", new_callable=AsyncMock,
             return_value=blade_result,
         ) as mock_l1:
             result = await node(self._combo_state())
@@ -3073,7 +3340,7 @@ class TestComboRecoveryRouting:
         llm = self._mock_l1_llm()
         node = make_recover_verifier(llm=llm, tools=[], registry=None)
         with patch.object(
-            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            rvl, "_layer1_destroy_via_provider", new_callable=AsyncMock,
             return_value=blade_result,
         ):
             result = await node(self._combo_state())
@@ -3100,7 +3367,7 @@ class TestComboRecoveryRouting:
         # live blade_uid.
         state["injection_method"] = "kubectl_native"
         with patch.object(
-            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            rvl, "_layer1_destroy_via_provider", new_callable=AsyncMock,
             return_value=blade_result,
         ) as mock_l1:
             result = await node(state)
@@ -3123,7 +3390,7 @@ class TestComboRecoveryRouting:
         # Pure native run: no blade UID, no marker — but a stale verdict
         # lingers in the inherited state.
         del state["combo_native_issued"]
-        state["blade_uid"] = None
+        state["experiment_uid"] = None
         state["injection_method"] = "kubectl_native"
         state["combo_blade_part"] = {"status": "failed", "details": "stale verdict"}
         result = await node(state)
@@ -3146,7 +3413,7 @@ class TestComboRecoveryRouting:
         state = self._combo_state()
         del state["combo_native_issued"]
         with patch.object(
-            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            rvl, "_layer1_destroy_via_provider", new_callable=AsyncMock,
             return_value=blade_result,
         ) as mock_l1:
             result = await node(state)
@@ -3163,7 +3430,7 @@ class TestComboRecoveryRouting:
     @pytest.mark.asyncio
     async def test_combo_not_stealed_by_stale_blade_message_without_method(self):
         """Regression for the elif-steal edge: a combo marked ONLY by the
-        durable flag (injection_method cleared by a keep_blade_uid replan
+        durable flag (injection_method cleared by a keep_experiment_uid replan
         seam) with a stale failed blade_create ToolMessage still in the
         history must NOT fall into the terminal "blade attempted, no UID"
         branch — the UID exists, the blade part was pre-destroyed, and the
@@ -3181,7 +3448,7 @@ class TestComboRecoveryRouting:
             ToolMessage(content="Error: create failed", name="blade_create", tool_call_id="tc1"),
         ]
         with patch.object(
-            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            rvl, "_layer1_destroy_via_provider", new_callable=AsyncMock,
             return_value=blade_result,
         ) as mock_l1:
             result = await node(state)
@@ -3208,7 +3475,7 @@ class TestComboRecoveryRouting:
         del state["combo_native_issued"]
         state["injection_method"] = "host_native"
         with patch.object(
-            rvl, "_run_recover_layer1", new_callable=AsyncMock,
+            rvl, "_layer1_destroy_via_provider", new_callable=AsyncMock,
             return_value=blade_result,
         ) as mock_l1:
             result = await node(state)
@@ -3429,3 +3696,124 @@ class TestRecoverBaselineTruncationRestore:
         content = msgs[-1].content
         assert "plain short output" in content
         assert "restored from compactor cache" not in content
+
+
+# ---------------------------------------------------------------------------
+# R3: recover_verifier hands a materialized fault handle to provider.recover
+# ---------------------------------------------------------------------------
+
+class TestRecoverVerifierHandleSeam:
+    """The deterministic recover entry routes through the registry's recover
+    dispatch and hands the dispatched IDENTITY handle to ``provider.recover``:
+    ``materialize_fault_handle(state)`` (with legacy hydration for pre-handle
+    checkpoints) — or, for a combo task, the experiment claim that outranks
+    the native attribution."""
+
+    def _fake_provider(self, captured: dict):
+        from chaos_agent.agent.providers.base import RecoverResult
+
+        class _Fake:
+            async def recover(self, state, handle, **kwargs):
+                captured["handle"] = handle
+                captured["kwargs"] = kwargs
+                # Phase-6: mirrors the real providers — the handle is the
+                # single identity source (experiment_uid rendered from
+                # handle['value'], empty for UID-less handles).
+                return RecoverResult(
+                    recovered=True, level="recovered",
+                    experiment_uid=str((handle or {}).get("value") or ""),
+                )
+        return _Fake()
+
+    def _patch_dispatch(self, rvl, captured):
+        """Install the fake provider while keeping the REAL identity
+        derivation (the registry dispatch) in the loop — the hydration chain
+        stays covered end-to-end."""
+        from chaos_agent.agent.providers import FaultProviderRegistry
+
+        fake = self._fake_provider(captured)
+        return patch.object(
+            rvl,
+            "_resolve_recover_dispatch",
+            side_effect=lambda state: (
+                fake,
+                FaultProviderRegistry.resolve_fault_dispatch(state)[1],
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_handle_passes_through(self):
+        from chaos_agent.agent.nodes.recover import _recover_verifier_loop as rvl
+
+        captured: dict = {}
+        handle = {"kind": "experiment_uid", "value": "uid-1", "method": "host_blade"}
+        state = {
+            "task_id": "t1", "experiment_uid": "uid-1",
+            "fault_handle": handle, "messages": [],
+        }
+        with self._patch_dispatch(rvl, captured):
+            await recover_verifier(state)
+        assert captured["handle"] == handle
+
+    @pytest.mark.asyncio
+    async def test_legacy_blade_checkpoint_hydrates_handle(self):
+        """Pre-handle checkpoint (blade_uid only) → registry hydration builds
+        the blade handle; the provider never sees a bare None."""
+        from chaos_agent.agent.nodes.recover import _recover_verifier_loop as rvl
+
+        captured: dict = {}
+        state = {
+            "task_id": "t1", "experiment_uid": "abc123",
+            "injection_method": "kubectl_exec", "messages": [],
+        }
+        with self._patch_dispatch(rvl, captured):
+            await recover_verifier(state)
+        assert captured["handle"] == {
+            "kind": "experiment_uid", "value": "abc123", "method": "kubectl_exec",
+        }
+
+    @pytest.mark.asyncio
+    async def test_legacy_native_checkpoint_hydrates_handle(self):
+        """UID-less native attribution (no blade_uid anywhere) still yields a
+        handle — the whole reason the seam exists."""
+        from chaos_agent.agent.nodes.recover import _recover_verifier_loop as rvl
+
+        captured: dict = {}
+        state = {
+            "task_id": "t1", "experiment_uid": "",
+            "injection_method": "kubectl_native", "messages": [],
+        }
+        with self._patch_dispatch(rvl, captured):
+            await recover_verifier(state)
+        assert captured["handle"] == {"kind": "native", "method": "kubectl_native"}
+
+    @pytest.mark.asyncio
+    async def test_no_attribution_still_calls_with_none(self):
+        """No attribution facts at all → materialize returns None and the node
+        still delegates (skipped verdict comes from the provider, unchanged)."""
+        from chaos_agent.agent.nodes.recover import _recover_verifier_loop as rvl
+
+        captured: dict = {}
+        state = {"task_id": "t1", "experiment_uid": "", "messages": []}
+        with self._patch_dispatch(rvl, captured):
+            await recover_verifier(state)
+        assert captured["handle"] is None
+
+    @pytest.mark.asyncio
+    async def test_combo_dispatches_experiment_identity_not_native(self):
+        """Combo task: attribution is native, yet the dispatch identity is the
+        EXPERIMENT claim (the deterministic destroy must reach the experiment
+        carrier) — the ownership-order contract of ``resolve_fault_dispatch``.
+        """
+        from chaos_agent.agent.providers import FaultProviderRegistry
+
+        state = {
+            "task_id": "t1", "experiment_uid": "uid-combo",
+            "injection_method": "kubectl_native",
+            "combo_native_issued": True, "messages": [],
+        }
+        provider, identity = FaultProviderRegistry.resolve_fault_dispatch(state)
+        assert provider.handle_kind == "experiment_uid"
+        assert identity == {
+            "kind": "experiment_uid", "value": "uid-combo", "method": "kubectl_native",
+        }

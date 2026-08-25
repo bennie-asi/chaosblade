@@ -129,6 +129,16 @@ class _L4RecoveryMixin:
         step_attrs_accumulator: dict = {}
         _pending_phase_completed_r: dict | None = None  # deferred phase_completed event
 
+        # Phase-7 T2: the SAME provider-declared ``log_shipping_tool_names``
+        # union as the inject flow — membership is "runs worth mirroring",
+        # never phase-scoped (the phase label is written below) — replacing
+        # the hardcoded ("blade_destroy", "blade_status", "kubectl") tuple.
+        from chaos_agent.agent.providers.registry import FaultProviderRegistry
+
+        log_shipping_tools = FaultProviderRegistry.union_tool_names(
+            "log_shipping_tool_names"
+        )
+
         def _emit_deferred_phase_completed_r() -> None:
             """Emit the buffered phase_completed (recover path)."""
             nonlocal _pending_phase_completed_r
@@ -193,10 +203,7 @@ class _L4RecoveryMixin:
                 tool_name = event.get("name", "")
                 output = event.get("data", {}).get("output", "")
                 step_attrs_accumulator[f"tool.{tool_name}.status"] = "ok"
-                if (
-                    tool_name in ("blade_destroy", "blade_status", "kubectl")
-                    and runtime
-                ):
+                if tool_name in log_shipping_tools and runtime:
                     try:
                         runtime.tool.execute(
                             "sls_write_logs",
@@ -330,11 +337,12 @@ class _L4RecoveryMixin:
             precomputed_values=recover_result,
         )
 
+        experiment_uid_out = recover_initial.get("experiment_uid") or ""
         extras: dict = {
             "recovery_level": recover_task_state,
             "recover_verification": read_recover_verification(recover_result),
             "inject_task_id": inject_task_id,
-            "blade_uid": recover_initial.get("blade_uid", ""),
+            "experiment_uid": experiment_uid_out,
         }
 
         # Token usage from recover graph

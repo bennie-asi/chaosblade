@@ -41,7 +41,6 @@ otherwise the next LLM iteration sees a malformed conversation.
 from __future__ import annotations
 
 import logging
-import re
 import time
 from dataclasses import replace
 from typing import Any
@@ -90,49 +89,25 @@ from chaos_agent.tools.guard_gateway import decision_to_feedback, get_guard_gate
 logger = logging.getLogger(__name__)
 
 
-_FAILED_CREATE_UID_RE = re.compile(
-    r'(?:UID:\s*|"uid"\s*:\s*")([a-fA-F0-9][a-fA-F0-9-]{7,})'
-)
-
-
-def _blade_uids_created_by_current_task(
+def _experiment_uids_created_by_current_task(
     messages: list, state: AgentState | None = None,
 ) -> set[str]:
-    """Return experiment UIDs proven by this task's blade_create results.
+    """Return experiment UIDs proven by this task's create results.
 
-    Two evidence sources, unioned:
+    Carrier-neutral facade (Task B): the per-carrier evidence — a backend's
+    own create ToolMessages (including failed-create CRDs that still need
+    cleanup) plus its durable state record — lives in each provider's
+    ``created_experiment_ids``; the registry unions them. This keeps the
+    destroy-provenance gate free of carrier vocabulary, so a new backend's
+    experiment ids join the whitelist by registration alone.
 
-    1. ``blade_create`` ToolMessages in the visible history — the primary
-       record, covering every UID the task ever created (including
-       failed-create CRDs that still need cleanup).
-    2. ``state["blade_uid"]`` — the framework's durable record of the
-       live experiment. Source 1 is not durable: compression removes old
-       ToolMessages BY DESIGN, which would empty the whitelist mid-task
-       and leave the agent unable to destroy its own injection. The
-       state field is maintained by the execution loop (and preserved by
-       the compressed-history restore path), so it keeps proving
-       provenance across compaction.
+    Durability note: message evidence is not durable (compression removes old
+    ToolMessages BY DESIGN); each provider also claims its durable state
+    record, so the whitelist keeps proving provenance across compaction.
     """
-    from chaos_agent.utils.blade_uid import extract_blade_uid
+    from chaos_agent.agent.providers import FaultProviderRegistry
 
-    uids: set[str] = set()
-    for message in messages:
-        if not isinstance(message, ToolMessage):
-            continue
-        if (getattr(message, "name", "") or "") != "blade_create":
-            continue
-        content = message.content if isinstance(message.content, str) else ""
-        uid = extract_blade_uid(content)
-        if uid:
-            uids.add(uid)
-        # Terminal create failures deliberately do not count as active UIDs in
-        # extract_blade_uid, but their CRDs still need cleanup.
-        uids.update(match.group(1) for match in _FAILED_CREATE_UID_RE.finditer(content))
-    if state is not None:
-        durable_uid = str(state.get("blade_uid") or "").strip()
-        if durable_uid:
-            uids.add(durable_uid)
-    return uids
+    return FaultProviderRegistry.created_experiment_ids(messages, state or {})
 
 
 async def _discover_vehicle_pods(
@@ -153,7 +128,7 @@ async def _discover_vehicle_pods(
     fault would ride the very API path the fault is severing; the fail-
     closed outcome (the call still reaches drift review) is safe.
     """
-    from chaos_agent.agent.nodes.execute._injection_detection import (
+    from chaos_agent.tools.pod_discovery import (
         discover_tool_pods_cluster_wide,
     )
 
@@ -431,7 +406,7 @@ def _screen_blade_destroy(
         confidence=ConfidenceLevel.HIGH,
         raw_command=f"blade_destroy uid={uid}",
     )
-    if uid and uid in _blade_uids_created_by_current_task(messages, state):
+    if uid and uid in _experiment_uids_created_by_current_task(messages, state):
         return effective, GuardDecision(
             verdict=GuardVerdict.ALLOW,
             reason="experiment UID was created by this task",
@@ -1365,7 +1340,7 @@ def _format_approved_for_card(approved: ApprovedTarget | None) -> dict:
         "namespace": approved.namespace,
         "names": list(approved.names),
         "labels": dict(approved.labels),
-        "blade_target": approved.blade_target,
+        "fault_target": approved.fault_target,
     }
 
 
@@ -1375,7 +1350,7 @@ def _format_effective_for_card(eff: EffectiveTarget) -> dict:
         "namespace": eff.namespace,
         "names": list(eff.names),
         "labels": dict(eff.labels),
-        "blade_target": eff.blade_target,
+        "fault_target": eff.fault_target,
     }
 
 
@@ -1438,6 +1413,29 @@ def _apply_drift_correction(
             "target_guard: drift correction toward vehicle pod(s) %s skipped "
             "(fault_spec must never point at injection machinery)",
             list(eff.names),
+        )
+        return {}
+
+    # Kind-consistency guard (task-51193464): an effective target whose
+    # KIND differs from the spec's scope is not a target CORRECTION — it is
+    # an auxiliary-resource operation (create/delete a PVC the victim pod
+    # needs, a configmap, ...) or a genuine scope escape. Either way the
+    # approval must NOT rewrite the spec's identity: replacing only
+    # ``names``/``namespace`` while the scope stays would freeze a corrupt
+    # hybrid anchor (``scope=node, names=[<pvc-name>]``) that turns every
+    # later legitimate operation — including the REAL injection against the
+    # approved node — into further drift, demanding one confirmation card
+    # after another. An approve here means "allow THIS operation", not "the
+    # fault target has changed": approving is a one-shot pass-through, the
+    # anchor stays as confirmed at the gate. A genuine target change goes
+    # through the planning seam (propose_plan_change) where the full
+    # FaultSpec contract — scope included — is re-reviewed.
+    if canonicalise_kind(eff.scope) != canonicalise_kind(spec.scope):
+        logger.warning(
+            "target_guard: drift correction for kind %s under %s approval "
+            "skipped (auxiliary/scope-change operation approved for THIS "
+            "call only; approved target unchanged)",
+            canonicalise_kind(eff.scope), canonicalise_kind(spec.scope),
         )
         return {}
 

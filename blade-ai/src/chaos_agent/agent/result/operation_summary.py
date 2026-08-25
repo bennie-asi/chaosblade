@@ -16,7 +16,11 @@ from chaos_agent.agent.result.operation_outcome import (
     build_verification_simple,
     read_inject_verification,
 )
-from chaos_agent.agent.state import extract_ui_diagnostics, infer_task_state
+from chaos_agent.agent.state import (
+    extract_ui_diagnostics,
+    has_active_fault,
+    infer_task_state,
+)
 
 
 POST_OPERATION_FRESHNESS_NOTE = (
@@ -95,14 +99,14 @@ def build_task_summary(state_values: Mapping[str, Any] | None, task_id: str) -> 
     task_state = infer_task_state(values) if values else "unknown"
     fault_type = fault_type_from_state(values) if values else ""
     target_text = _format_state_target(values) if values else ""
-    blade_uid = values.get("blade_uid", "")
+    experiment_uid = values.get("experiment_uid") or ""
     verification = read_inject_verification(values)
     diagnostics = extract_ui_diagnostics(values) if values else {}
 
     parts = [
         f"[Task Summary] task_id={task_id}",
         f"Type: {fault_type} | Target: {target_text}",
-        f"Result: {task_state} | blade_uid: {blade_uid}",
+        f"Result: {task_state} | experiment_uid: {experiment_uid}",
     ]
     verification_line = _format_verification_line("Verification", verification)
     if verification_line:
@@ -208,7 +212,9 @@ def build_interrupted_record(
         )
 
     # Advisory, not a command: state what may be live and suggest a check.
-    if values.get("blade_uid") or values.get("execution_artifacts"):
+    # has_active_fault covers every committed injection — blade-backed AND
+    # native handles — where a bare experiment_uid lookup would miss the latter.
+    if has_active_fault(values) or values.get("execution_artifacts"):
         parts.append(
             "Note: this operation already made real changes and was not fully "
             "verified, so the target may still be in a faulted state. Checking "
@@ -282,7 +288,11 @@ def build_recover_summary(
     task_id = data.get("task_id") or ""
     task_state = data.get("task_state") or data.get("result") or "unknown"
     fault_type = data.get("fault_type") or fault_type_from_state(inject_values) or "unknown"
-    blade_uid = data.get("blade_uid") or inject_values.get("blade_uid", "")
+    experiment_uid = (
+        data.get("experiment_uid")
+        or inject_values.get("experiment_uid")
+        or ""
+    )
     target_text = format_summary_target(data.get("target")) or _format_state_target(
         inject_values
     )
@@ -292,7 +302,7 @@ def build_recover_summary(
         f"[Recover Summary] task_id={task_id}",
         f"parent_task_id: {parent_task_id}",
         f"Type: {fault_type} | Target: {target_text}",
-        f"Result: {task_state} | blade_uid: {blade_uid}",
+        f"Result: {task_state} | experiment_uid: {experiment_uid}",
     ]
     verification_line = _format_verification_line(
         "Recovery verification",

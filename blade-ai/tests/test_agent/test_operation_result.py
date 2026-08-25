@@ -7,6 +7,7 @@ from chaos_agent.agent.result.operation_result import (
     build_recover_cli_data_from_state,
     build_recover_cli_failure_data_from_state,
     build_recover_data_from_state,
+    build_recovery_handle,
     build_unknown_inject_data,
     recover_result_label_from_values,
     recover_task_state_from_values,
@@ -22,15 +23,15 @@ def _inject_state() -> dict:
         namespace="arms-prom",
         scope="pod",
         names=("pod-a",),
-        blade_target="cpu",
-        blade_action="fullload",
+        fault_target="cpu",
+        fault_action="fullload",
         params={"cpu-percent": "80"},
     )
     return {
         "confirmed_intent": "inject",
         "fault_spec": spec.to_dict(),
         "skill_name": "stale-active-skill",
-        "blade_uid": "uid-1",
+        "experiment_uid": "uid-1",
         "result": {"success": True},
         "verification": {
             "level": "strong",
@@ -47,7 +48,11 @@ def test_build_inject_data_uses_fault_spec_projection():
     assert data["task_id"] == "task-inject"
     assert data["task_state"] == "injected"
     assert data["fault_type"] == "pod-cpu-fullload"
-    assert data["blade_uid"] == "uid-1"
+    # Output key face is the modern spelling only (no legacy mirror;
+    # phase-14 G4 retired the legacy-input hydration these tests once
+    # exercised — the fixture carries the modern key directly).
+    assert data["experiment_uid"] == "uid-1"
+    assert "blade_uid" not in data
     assert data["duration_ms"] == 123
     assert data["fault_spec"] == _inject_state()["fault_spec"]
     assert data["target"]["namespace"] == "arms-prom"
@@ -81,8 +86,12 @@ def test_build_recover_data_uses_inject_state_for_fault_and_target():
         "operation": "recover",
         "task_state": "partial_recovered",
         "fault_type": "pod-cpu-fullload",
-        "blade_uid": "uid-1",
-        "recovery_handle": {"kind": "blade_uid", "value": "uid-1"},
+        "experiment_uid": "uid-1",
+        "recovery_handle": {
+            "kind": "experiment_uid",
+            "value": "uid-1",
+            "experiment_uid": "uid-1",
+        },
         "duration_ms": 456,
         "fault_spec": _inject_state()["fault_spec"],
         "target": {
@@ -105,13 +114,13 @@ def test_recover_data_does_not_mix_recover_state_inject_facts():
         namespace="wrong-ns",
         scope="node",
         names=("wrong-node",),
-        blade_target="network",
-        blade_action="loss",
+        fault_target="network",
+        fault_action="loss",
     )
     recover_state = {
         "operation": "recover",
         "fault_spec": wrong_recover_spec.to_dict(),
-        "blade_uid": "wrong-uid",
+        "experiment_uid": "wrong-uid",
         "verification": {
             "level": "stale-inject-verification",
             "layer1": {"status": "failed"},
@@ -133,7 +142,7 @@ def test_recover_data_does_not_mix_recover_state_inject_facts():
 
     assert data["task_state"] == "recovered"
     assert data["fault_type"] == "pod-cpu-fullload"
-    assert data["blade_uid"] == "uid-1"
+    assert data["experiment_uid"] == "uid-1"
     assert data["target"]["namespace"] == "arms-prom"
     assert data["target"]["names"] == ["pod-a"]
     assert data["verification"]["level"] == "recovered"
@@ -159,7 +168,7 @@ def test_recover_cli_data_preserves_legacy_shape():
     assert data == {
         "task_id": "task-inject",
         "result": "recovered",
-        "blade_uid": "uid-1",
+        "experiment_uid": "uid-1",
         "targets": [{"name": "pod-a", "namespace": "arms-prom"}],
         "verification": {
             "level": "recovered",
@@ -176,7 +185,7 @@ def test_inject_status_data_projects_pending_targets_from_fault_spec():
         _inject_state(),
         "task-inject",
         result="pending",
-        include_blade_uid=False,
+        include_experiment_uid=False,
     )
 
     assert data == {
@@ -196,8 +205,8 @@ def test_inject_status_data_projects_failed_error_from_fault_spec():
             namespace="arms-prom",
             scope="pod",
             names=("pod-a",),
-            blade_target="network",
-            blade_action="loss",
+            fault_target="network",
+            fault_action="loss",
         ),
         error="internal_error: boom",
     )
@@ -207,17 +216,19 @@ def test_inject_status_data_projects_failed_error_from_fault_spec():
         "result": "failed",
         "fault_type": "pod-network-loss",
         "targets": [{"name": "pod-a", "namespace": "arms-prom"}],
-        "blade_uid": "",
+        "experiment_uid": "",
         "error": "internal_error: boom",
     }
 
 
 def test_unknown_inject_data_uses_complete_result_card_shape():
-    assert build_unknown_inject_data("task-inject", blade_uid="uid-1") == {
+    assert build_unknown_inject_data("task-inject", experiment_uid="uid-1") == {
         "task_id": "task-inject",
         "task_state": "unknown",
         "fault_type": "",
-        "blade_uid": "uid-1",
+        "experiment_uid": "uid-1",
+        "injection_method": None,
+        "fault_handle": None,
         "duration_ms": 0,
         "fault_spec": {},
         "target": {},
@@ -243,7 +254,7 @@ def test_recover_cli_failure_data_projects_inject_target():
     assert data == {
         "task_id": "task-inject",
         "result": "failed",
-        "blade_uid": "uid-1",
+        "experiment_uid": "uid-1",
         "targets": [{"name": "pod-a", "namespace": "arms-prom"}],
         "verification": None,
         "error": "internal_error: boom",
@@ -252,13 +263,21 @@ def test_recover_cli_failure_data_projects_inject_target():
 
 def test_recover_state_helpers_map_failed_and_partial_states():
     assert recover_task_state_from_values({"result": {"recovered": False}}) == "failed"
-    assert recover_task_state_from_values(
-        {"result": {"recovered": True, "recovery_level": "partial"}}
-    ) == "partial_recovered"
-    assert recover_result_label_from_values({"result": {"recovered": False}}) == "failed"
-    assert recover_result_label_from_values(
-        {"result": {"recovered": True, "recovery_level": "partial"}}
-    ) == "partial"
+    assert (
+        recover_task_state_from_values(
+            {"result": {"recovered": True, "recovery_level": "partial"}}
+        )
+        == "partial_recovered"
+    )
+    assert (
+        recover_result_label_from_values({"result": {"recovered": False}}) == "failed"
+    )
+    assert (
+        recover_result_label_from_values(
+            {"result": {"recovered": True, "recovery_level": "partial"}}
+        )
+        == "partial"
+    )
 
 
 def test_target_list_from_state_falls_back_to_fault_spec_projection():
@@ -310,9 +329,9 @@ def test_agent_cli_memory_layers_do_not_depend_on_turn_result_route():
 def test_recover_result_builders_keep_recover_and_inject_lanes_separate():
     """Recover result builders should not project inject facts from recover state."""
 
-    text = (PROJECT_ROOT / "src/chaos_agent/agent/result/operation_result.py").read_text(
-        encoding="utf-8"
-    )
+    text = (
+        PROJECT_ROOT / "src/chaos_agent/agent/result/operation_result.py"
+    ).read_text(encoding="utf-8")
     forbidden_snippets = [
         "fault_type_from_state(recover_state)",
         "legacy_target_dict(recover_state)",
@@ -325,3 +344,37 @@ def test_recover_result_builders_keep_recover_and_inject_lanes_separate():
     violations = [snippet for snippet in forbidden_snippets if snippet in text]
 
     assert violations == []
+
+
+def test_future_experiment_carrier_pins_without_consumer_changes():
+    """Phase-7 T6: a NON-blade_uid experiment handle pins its UID through
+    ``build_recovery_handle`` by registration alone.
+
+    The membership check is the handle-owning provider's
+    ``has_experiment_uid`` declaration (via ``FaultProviderRegistry
+    .is_experiment_handle``), not a ``kind == "blade_uid"`` string branch —
+    so a future experiment carrier's UID enters the pinned
+    ``{"kind", "value", "experiment_uid"}`` contract with zero consumer
+    changes. (The blade-family shape itself — kind="blade_uid" — stays
+    locked by the existing recover-data assertions above.)
+    """
+    from chaos_agent.agent.providers import FaultProviderRegistry
+
+    class _FutureExperimentProvider:
+        # Minimal surface the registry needs to own a handle kind.
+        carrier = "future_exp"
+        injection_methods = ("future_method",)
+        has_experiment_uid = True
+        handle_kind = "my_experiment"
+
+    FaultProviderRegistry.register(_FutureExperimentProvider())
+    try:
+        state = {"fault_handle": {"kind": "my_experiment", "value": "exp-9"}}
+        assert build_recovery_handle(state) == {
+            "kind": "my_experiment",
+            "value": "exp-9",
+            "experiment_uid": "exp-9",
+        }
+    finally:
+        FaultProviderRegistry.clear()
+        FaultProviderRegistry.register_builtins()

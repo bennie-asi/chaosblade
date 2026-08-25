@@ -44,30 +44,22 @@ def get_verifier_core_principles_section() -> str:
 - Evidence MUST come from your own observations in THIS phase — prior phase results (injection action success, planning queries) are NOT evidence
 - Baseline comparison is the primary method to prove causation — compare the SAME metric on the SAME resource. When baseline is unavailable, degrade to healthy-state comparison, then cross-validation with BaselineUsed: false
 - When a tool returns error, the TOOL is right — verify its actual interface before retrying
-- Your product is an evidence chain for ONE claim: did the fault take effect on the approved target — effect present, attributable to the injection, coverage of the target set. When every element has evidence, the burden is discharged and you submit; re-sampling an element that already has evidence adds no proof. Only a MISSING element earns another observation — "another angle exists" is always true and is never a reason to continue, and being unable to observe is itself a conclusion
+- Your product is an evidence chain for ONE claim: did the fault take effect on the approved target — effect present, attributable to the injection, coverage of the target set. When every element has evidence, the burden is discharged and you submit; re-sampling an element that already has evidence adds no proof. Only a MISSING element earns another observation — "another angle exists" is always true and is never a reason to continue, and being unable to observe is itself a conclusion — the conclusion is 'unobserved', never 'absent'
 - {SYSTEM_REMINDER_DECLARATION}"""
-
-
-def get_verifier_tools_section() -> str:
-    """Tool constraint — general statement, no specific tool listing."""
-    return """### Tool Constraint
-Only call tools that are bound to you in this phase. Tools from previous phases are NOT available and will be rejected."""
 
 
 def get_verifier_layer2_section() -> str:
     """Core Layer 2 verification instructions.
 
-    Covers: coverage/anomaly awareness, mandatory skill step execution,
+    Covers: coverage awareness, mandatory skill step execution,
     observe-fault-effect distinction, recovery awareness, supplementary
     checks, and fallback when no skill verification instructions exist.
     """
     return """## Fault-Specific Verification
 
-### Coverage & Anomaly Awareness
+### Coverage Awareness
 Before concluding verification 'passed', verify:
 1. **Coverage**: Were ALL target resources affected?
-2. **Anomalies**: Any unexpected metric changes on non-targeted resources?
-3. **Application Impact**: Has the application-level impact been verified?
 
 ### If Injection Verification Instructions are provided
 
@@ -87,7 +79,7 @@ Evidence must be your own observations of what happened to the target AFTER inje
 If an observation command fails, use the current environment's resource-level
 or alternative observation capability before concluding the evidence is unavailable.
 
-You MAY add supplementary checks after covering required evidence, moving from the mechanism's most direct evidence outward to its downstream impact.
+You MAY add supplementary checks after covering required evidence, starting from the mechanism's most direct evidence.
 Supplementary checks are additions, NOT replacements.
 
 If a step cannot be executed, mark as "skipped" with reason. NEVER silently omit.
@@ -103,7 +95,7 @@ When concluding early, you MUST provide:
 When you use a DIFFERENT method than specified in a skill case step, document: "Step N: passed — <what you did> (deviation: <why>)".
 
 ### If NO Injection Verification Instructions are provided:
-Design your own verification plan: identify the observables the fault mechanism is expected to change, then observe them starting from the most direct evidence of the mechanism and moving outward to its downstream impact. Analyze fault context to determine what effects to check for."""
+Design your own verification plan: identify the observables the fault mechanism is expected to change, then observe them starting from the most direct evidence of the mechanism. Analyze fault context to determine what effects to check for."""
 
 
 def get_verifier_output_format_section() -> str:

@@ -34,9 +34,13 @@ STATE_LEGACY_COMPAT_FIELDS: tuple[str, ...] = (
     "target",
     "params",
     "fault_type",
-    "blade_scope",
-    "blade_target",
-    "blade_action",
+    # Scatter-field keys renamed off the carrier vocabulary in phase-9.
+    # The legacy blade_* spellings were retired in phase-14 G5
+    # (fresh-database ruling): old checkpoints no longer hydrate through
+    # the read-side fallback, so only the modern spellings stay listed.
+    "fault_scope",
+    "fault_target",
+    "fault_action",
     "params_flags",
     "duration",
     "duration_seconds",

@@ -62,9 +62,9 @@ def freeze_approved_target_from_spec(
             "resource_type": spec_obj.scope,
         },
         params=dict(spec_obj.params),
-        blade_scope=spec_obj.scope,
-        blade_target=spec_obj.blade_target,
-        blade_action=spec_obj.blade_action,
+        fault_scope=spec_obj.scope,
+        fault_target=spec_obj.fault_target,
+        fault_action=spec_obj.fault_action,
         lock_fault_type=lock_fault_type,
         owner_names=owner_names,
         resolved_names=resolved_names,
@@ -75,9 +75,9 @@ def freeze_approved_target_from_spec(
 def freeze_approved_target(
     target: Optional[dict],
     params: Optional[dict],
-    blade_scope: Optional[str],
-    blade_target: Optional[str],
-    blade_action: Optional[str],
+    fault_scope: Optional[str],
+    fault_target: Optional[str],
+    fault_action: Optional[str],
     *,
     lock_fault_type: bool = True,
     owner_names: tuple[str, ...] = (),
@@ -92,10 +92,10 @@ def freeze_approved_target(
             old-style state.
         params: ``state.params`` — fallback source of ``scope``,
             ``target`` (blade target), ``action``.
-        blade_scope: ``state.blade_scope`` — explicit scope hint.
-        blade_target: ``state.blade_target`` — preferred over
+        fault_scope: ``state.fault_scope`` — explicit scope hint.
+        fault_target: ``state.fault_target`` — preferred over
             ``params['target']``.
-        blade_action: ``state.blade_action`` — preferred over
+        fault_action: ``state.fault_action`` — preferred over
             ``params['action']``.
         lock_fault_type: Whether to lock the blade target type so
             ``cpu`` → ``mem`` would trigger drift. Defaults True per
@@ -116,7 +116,7 @@ def freeze_approved_target(
     scope_raw = (
         target.get("resource_type")
         or params.get("scope")
-        or blade_scope
+        or fault_scope
         or ""
     )
     scope = str(scope_raw).strip().lower()
@@ -171,8 +171,8 @@ def freeze_approved_target(
     is_namespace_wide = not names and not labels
 
     # ---- Blade fault type / action ---------------------------------------
-    bt = str(blade_target or params.get("target") or "").strip().lower()
-    ba = str(blade_action or params.get("action") or "").strip().lower()
+    bt = str(fault_target or params.get("target") or "").strip().lower()
+    ba = str(fault_action or params.get("action") or "").strip().lower()
 
     # ---- Host identity (bare-metal / VM faults) --------------------------
     # Host scope is anchored by the host name (first name), not by a k8s
@@ -185,8 +185,8 @@ def freeze_approved_target(
         "names": names,
         "labels": labels,
         "is_namespace_wide": is_namespace_wide,
-        "blade_target": bt,
-        "blade_action": ba,
+        "fault_target": bt,
+        "fault_action": ba,
         "lock_fault_type": bool(lock_fault_type),
         "owner_names": list(owner_names),
         "resolved_names": list(resolved_names),
@@ -216,8 +216,8 @@ def approved_from_dict(d: Optional[dict]) -> Optional[ApprovedTarget]:
         names=tuple(str(n) for n in (d.get("names") or [])),
         labels={str(k): str(v) for k, v in (d.get("labels") or {}).items()},
         is_namespace_wide=bool(d.get("is_namespace_wide") or False),
-        blade_target=str(d.get("blade_target") or ""),
-        blade_action=str(d.get("blade_action") or ""),
+        fault_target=str(d.get("fault_target") or ""),
+        fault_action=str(d.get("fault_action") or ""),
         lock_fault_type=bool(d.get("lock_fault_type", True)),
         owner_names=tuple(str(n) for n in (d.get("owner_names") or [])),
         resolved_names=tuple(str(n) for n in (d.get("resolved_names") or [])),

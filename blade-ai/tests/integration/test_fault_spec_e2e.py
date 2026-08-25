@@ -119,8 +119,8 @@ class TestNlPathFaultSpecFlow:
         assert frozen is not None
         assert frozen["scope"] == "node"
         assert frozen["names"] == ["cn-hongkong.10.0.1.120"]
-        assert frozen["blade_target"] == "cpu"
-        assert frozen["blade_action"] == "fullload"
+        assert frozen["fault_target"] == "cpu"
+        assert frozen["fault_action"] == "fullload"
 
         # Stage 6 — THE KEY ASSERTION: baseline_capture's template
         # resolution sees the right node name.
@@ -263,7 +263,7 @@ class TestApprovalCycleFromSpec:
         spec = FaultSpec(
             scope="pod", namespace="ns", names=("pod-a", "pod-b"),
             labels={"app": "demo"},
-            blade_target="mem", blade_action="ram",
+            fault_target="mem", fault_action="ram",
             params={"size": "100"},
         )
         state = {"fault_spec": spec.to_dict()}
@@ -274,8 +274,8 @@ class TestApprovalCycleFromSpec:
         assert approved["namespace"] == spec.namespace
         assert approved["names"] == list(spec.names)
         assert approved["labels"] == dict(spec.labels)
-        assert approved["blade_target"] == spec.blade_target
-        assert approved["blade_action"] == spec.blade_action
+        assert approved["fault_target"] == spec.fault_target
+        assert approved["fault_action"] == spec.fault_action
         assert approved["lock_fault_type"] is True  # default
 
     async def test_freeze_returns_none_when_no_spec(self):
@@ -372,8 +372,8 @@ class TestCliNlPathSpecDerivation:
         assert spec_after_ep.scope == "node", (
             "extract_planning_metadata should derive scope from blade command pattern"
         )
-        assert spec_after_ep.blade_target == "cpu"
-        assert spec_after_ep.blade_action == "fullload"
+        assert spec_after_ep.fault_target == "cpu"
+        assert spec_after_ep.fault_action == "fullload"
 
         # Stage 2: simulate agent_loop deriving namespace/names from a
         # ``kubectl get`` probe LLM issued.
@@ -418,9 +418,9 @@ class TestLegacyFallbackWarning:
 
         state = {
             "target": {"namespace": "ns", "names": ["legacy-pod"]},
-            "blade_scope": "pod",
-            "blade_target": "cpu",
-            "blade_action": "fullload",
+            "fault_scope": "pod",
+            "fault_target": "cpu",
+            "fault_action": "fullload",
         }
         spec = read_fault_spec(state)
         assert spec is not None
@@ -439,7 +439,7 @@ class TestLegacyFallbackWarning:
         caplog.set_level(logging.WARNING)
 
         spec = FaultSpec(scope="pod", namespace="ns", names=("p1",),
-                         blade_target="cpu", blade_action="fullload")
+                         fault_target="cpu", fault_action="fullload")
         state = {"fault_spec": spec.to_dict()}
         retrieved = read_fault_spec(state)
         assert retrieved == spec

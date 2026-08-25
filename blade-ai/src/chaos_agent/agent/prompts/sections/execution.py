@@ -4,6 +4,12 @@
 def get_tools_section(phase: int = 1) -> str:
     """Tool usage guidelines section.
 
+    Carries ONLY what tool schemas cannot express: cross-tool selection
+    priority, where the skill case lives (conversation history), and phase
+    discipline. Per-tool syntax/parameters/defaults live in the tool
+    docstrings; bound-tool availability is carried by the binding list and
+    the unknown-tool error feedback.
+
     Args:
         phase: 1 = planning (agent_loop), 2 = execution (execute_loop).
             Phase 2 omits skill-resource-reading guidance because the
@@ -24,7 +30,7 @@ def get_tools_section(phase: int = 1) -> str:
    verification and recovery lifecycle.
 4. **Injection tools**: Use the injection tool specified by the skill case. Before invoking
    any tool, inspect its own help/usage output to confirm the flags and parameters it
-   actually supports (runtime interface wins — see Runtime Feedback Priority). If an
+   actually supports (runtime interface wins — see Core Principles). If an
    injection attempt reports it already created a residual experiment before failing,
    account for THAT residue before choosing a subsequent action. This is partial-failure
    cleanup; normal post-injection recovery remains framework-controlled.
@@ -46,13 +52,7 @@ def get_tools_section(phase: int = 1) -> str:
 ### Tool Selection Priority
 1. **Skill references first (after skill activation)**: Use `read_skill_resource` to read skill reference files for accurate, up-to-date injection command syntax and parameters
 2. **Knowledge docs for domain context**: Especially BEFORE skill activation or when no skill is active, use `read_knowledge_resource` to read knowledge documents — while a documented path covers the need, do not fabricate commands; an equivalent-effect path you devise after the documented ones are proven broken is legitimate
-3. **Read before write**: Use read-only query tools for verification — mutation tools are Phase 2 only
-4. **Plan, don't execute**: Your output is the input to `confirmation_gate`. Capture the intended injection parameters in your plan (via `save_fault_plan`); the executor (Phase 2) will issue the actual call.
-
-### Timeout Protection
-Every fault injection experiment MUST have timeout protection to prevent
-indefinite residue. The default timeout is applied automatically by the
-injection tool. Pass a custom value only if the user specifies one.
+3. **Plan, don't execute**: Your output is the input to `confirmation_gate`. Capture the intended injection parameters in your plan (via `save_fault_plan`); the executor (Phase 2) will issue the actual call
 
 ### Parallel Calls
 - You MAY make multiple independent read-only query calls in a single turn (e.g., inspect two independent targets simultaneously)
@@ -75,33 +75,29 @@ def get_guidelines_section(
             execute and the rules are not yet relevant. Phase 2 (execute_loop)
             keeps the default ``True`` so the executor sees conflict-check
             constraints.
-        phase: 1 = planning (omit Runtime Feedback Priority — already covered
-            by Workflow's Ground Truth section). 2 = execution (full version
-            with Runtime Feedback Priority, since the executor deals with tool
-            errors directly).
+        phase: 1 = planning, 2 = execution. Differentiates the deviation
+            criterion: Phase 1 is read-only, so a documented path is ruled
+            out by probed evidence, never by empirical failure; Phase 2
+            keeps the empirical-failure wording.
     """
-    runtime_feedback = """### Runtime Feedback Priority
-Tool-interface knowledge from documentation may be outdated; the tool's actual
-runtime behavior is the ground truth. Treat an error, unexpected result, or an
-explicit rejection of a parameter/flag/subcommand as evidence that the invocation
-is not accepted here — ground any later action in a changed hypothesis or a
-different supported capability, and give runtime behavior precedence over
-documentation."""
-
     lines = [
         "## Important Guidelines",
         "",
     ]
-    # Phase 1: Ground Truth in Workflow already covers this principle.
-    # Phase 2: still needs it because executor deals with tool errors directly.
-    if phase == 2:
-        lines.append(runtime_feedback)
-        lines.append("")
+    # The runtime-feedback principle intentionally has NO copy here: the
+    # executor Core Principles bullets and REMEMBER carry it in the
+    # primacy/recency zones (the middle of a prompt is the lowest-attention
+    # region, so a third copy added nothing).
 
     # Shared rule: skill-case methods come first; deviation is licensed by
-    # empirical failure of documented paths, arbitrated by the safety guard.
+    # proof that documented paths do not work (probed evidence in read-only
+    # Phase 1, empirical failure in Phase 2), arbitrated by the safety guard.
+    deviation = (
+        "is disproved by probed evidence" if phase == 1
+        else "has empirically failed"
+    )
     lines.append(
-        "- Skill-case methods come first; deviate only once a documented path has empirically failed — an equivalent-effect method (same target, same fault effect) is then legitimate, and the safety guard arbitrates what is dangerous"
+        f"- Skill-case methods come first; deviate only once a documented path {deviation} — an equivalent-effect method (same target, same fault effect) is then legitimate, and the safety guard arbitrates what is dangerous"
     )
     base = "\n".join(lines)
 
@@ -155,11 +151,13 @@ def get_execution_directives_section(
         "### Multi-Step Execution",
         "The approved mutation steps live in the plan's '## Execution Steps' section.",
         "Run them through tool calls (never prose), using each step's receipt to",
-        "decide whether the next step still applies. Do not add effect observations",
-        "after an issued step — a later phase verifies the effect, and watching for",
-        "it here only consumes the fault's active window. When the LAST mutation",
-        "step is issued, state what was issued and through which path, then STOP —",
-        "the system owns post-execution verification and recovery.",
+        "decide whether the next step still applies. A step that observes or",
+        "verifies the effect is verification work — skip it. Do not add effect",
+        "observations after an issued step either; a later phase verifies the",
+        "effect, and watching for it here only consumes the fault's active",
+        "window. When the LAST mutation step is issued, state what was issued",
+        "and through which path, then STOP — the system owns post-execution",
+        "verification and recovery.",
         "",
         "### Parameter Priority",
         "When conflicting sources specify a parameter value, follow this hierarchy",

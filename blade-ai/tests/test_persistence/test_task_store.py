@@ -85,6 +85,47 @@ class TestSchema:
         # from task_details; without the column the drill's model is
         # invisible in every review surface.
         assert "model_name" in col_names
+        # phase-14 G6：六列先前只存在于启动迁移段，现已并入 DDL ——
+        # fresh 库建表即含终态列集，不再依赖 ALTER 补列。
+        for migrated in ("baseline_data", "inject_context", "skill_use_case",
+                         "injection_method", "kubectl_exec_pod_name",
+                         "injection_start_time"):
+            assert migrated in col_names, migrated
+
+    def test_schema_is_pure_ddl_no_alter_segments(self):
+        """phase-14 G6 7.3：启动迁移段整体退役——建表路径只允许
+        executescript(纯 DDL)，不允许任何 conn.execute 调用（迁移
+         ALTER/回填只能由它发出）。DDL 本体零 ALTER 字面。"""
+        import inspect
+
+        from chaos_agent.persistence import task_store_sqlite as mod
+        assert "ALTER TABLE" not in mod._SCHEMA_DDL
+        src = inspect.getsource(mod.SQLiteBackend._ensure_schema_on_conn)
+        # 带左括号以避开 conn.executescript 的前缀子串：本方法只许
+        # executescript(纯 DDL)，任何 conn.execute( 单语句调用都是迁移残留。
+        assert "conn.execute(" not in src
+
+    @pytest.mark.asyncio
+    async def test_fresh_start_emits_zero_alter_statements(self, tmp_path):
+        """phase-14 G6 7.3：运行时捕获——``_ensure_schema_on_conn`` 执行期间
+        发出的 SQL 语句流零 ALTER / 零回填 UPDATE（sqlite3 trace callback
+        钉扎，与源码级断言互为印证；幂等重跑走同一语句流，DDL 语句照发
+        仅被 IF NOT EXISTS 短路，迁移残留若有必同样发出）。"""
+        backend = await SQLiteBackend.create(db_path=tmp_path / "fresh.db")
+        try:
+            executed: list[str] = []
+            await backend._conn.set_trace_callback(executed.append)
+            try:
+                await backend._ensure_schema_on_conn(backend._conn)
+            finally:
+                await backend._conn.set_trace_callback(None)
+            joined = "\n".join(executed)
+            assert "ALTER TABLE" not in joined
+            assert "UPDATE task_details" not in joined
+            # 语句流确实是建表 DDL（非空转）
+            assert "CREATE TABLE IF NOT EXISTS task_details" in joined
+        finally:
+            await backend.close()
 
 
 # ---------------------------------------------------------------------------
@@ -104,18 +145,18 @@ class TestUpsert:
     @pytest.mark.asyncio
     async def test_update_existing_task(self, store):
         await store.upsert("task-t1", skill_name="pod-kill")
-        await store.upsert("task-t1", blade_uid="abc123")
+        await store.upsert("task-t1", experiment_uid="abc123")
         data = await store.get("task-t1")
         assert data["skill_name"] == "pod-kill"
-        assert data["blade_uid"] == "abc123"
+        assert data["experiment_uid"] == "abc123"
 
     @pytest.mark.asyncio
     async def test_partial_update_preserves_other_fields(self, store):
-        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc")
+        await store.upsert("task-t1", skill_name="pod-kill", experiment_uid="abc")
         await store.upsert("task-t1", safety_status="safe")
         data = await store.get("task-t1")
         assert data["skill_name"] == "pod-kill"
-        assert data["blade_uid"] == "abc"
+        assert data["experiment_uid"] == "abc"
         assert data["safety_status"] == "safe"
 
     @pytest.mark.asyncio
@@ -130,7 +171,7 @@ class TestUpsert:
         await store.upsert("task-t1", skill_name="pod-kill")
         data1 = await store.get("task-t1")
         gmt_create_1 = data1["gmt_create"]
-        await store.upsert("task-t1", blade_uid="abc")
+        await store.upsert("task-t1", experiment_uid="abc")
         data2 = await store.get("task-t1")
         assert data2["gmt_create"] == gmt_create_1
 
@@ -153,7 +194,7 @@ class TestUpsert:
             "layer1": {"status": "passed"},
             "layer2": {"status": "passed"},
         }
-        await store.upsert("task-t1", verification=verification, blade_uid="abc")
+        await store.upsert("task-t1", verification=verification, experiment_uid="abc")
         data = await store.get("task-t1")
         assert data["verification"] == verification
         assert data["task_state"] == "injected"
@@ -197,7 +238,7 @@ class TestInferFields:
     @pytest.mark.asyncio
     async def test_injected_state_inferred(self, store):
         verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
-        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc", verification=verification)
+        await store.upsert("task-t1", skill_name="pod-kill", experiment_uid="abc", verification=verification)
         data = await store.get("task-t1")
         assert data["task_state"] == "injected"
         assert data["phase"] == "verification_passed"
@@ -230,7 +271,7 @@ class TestInferenceRegressionGuard:
     ``injecting`` by the final tracer flush. The flush carries no lifecycle
     fields, and inference used to merge only the ``tasks`` row — which has
     no ``verification`` column (it lives in ``task_details``) — so it saw
-    "blade_uid without verification" and returned the ``injecting``
+    "experiment_uid without verification" and returned the ``injecting``
     fallback over the stored ``injected`` verdict. Two defenses:
     (1) inference merges the FULL logical record (tasks + details);
     (2) a terminal verdict never regresses to the ``injecting`` fallback.
@@ -240,7 +281,7 @@ class TestInferenceRegressionGuard:
     async def test_fieldless_upsert_keeps_injected(self, store):
         """tracer._persist_span style: upsert(task_id) with no fields."""
         verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
-        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc",
+        await store.upsert("task-t1", skill_name="pod-kill", experiment_uid="abc",
                            verification=verification)
         assert (await store.get("task-t1"))["task_state"] == "injected"
         await store.upsert("task-t1")  # field-less flush
@@ -252,7 +293,7 @@ class TestInferenceRegressionGuard:
     async def test_summary_only_upsert_keeps_injected(self, store):
         """tracer._persist_summary style: metrics fields, no lifecycle."""
         verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
-        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc",
+        await store.upsert("task-t1", skill_name="pod-kill", experiment_uid="abc",
                            verification=verification)
         await store.upsert("task-t1", total_token_input=100, total_llm_calls=3)
         data = await store.get("task-t1")
@@ -263,7 +304,7 @@ class TestInferenceRegressionGuard:
     async def test_terminal_state_never_regresses_to_injecting(self, store):
         """Monotonicity guard alone: verdict on record, no lifecycle fields
         anywhere in the merged record (legacy/corrupted shape)."""
-        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc")
+        await store.upsert("task-t1", skill_name="pod-kill", experiment_uid="abc")
         await store.update_task_state("task-t1", "injected")  # verdict, as-is
         await store.upsert("task-t1", total_llm_calls=1)  # re-projection
         assert (await store.get("task-t1"))["task_state"] == "injected"
@@ -273,7 +314,7 @@ class TestInferenceRegressionGuard:
         """The guard blocks regressions to the fallback only — a genuine
         injected -> recovered transition must still go through."""
         verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
-        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc",
+        await store.upsert("task-t1", skill_name="pod-kill", experiment_uid="abc",
                            verification=verification)
         recover_verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
         await store.upsert("task-t1", operation="recover",
@@ -301,7 +342,7 @@ class TestGetListCount:
 
     @pytest.mark.asyncio
     async def test_list_with_state_filter(self, store):
-        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="a",
+        await store.upsert("task-t1", skill_name="pod-kill", experiment_uid="a",
                            verification={"layer1": {"status": "passed"}, "layer2": {"status": "passed"}})
         await store.upsert("task-t2", skill_name="pod-kill")
         injected = await store.list_tasks(task_state="injected")
@@ -343,7 +384,7 @@ class TestQueryActive:
     ``_ISSUED`` 代表"注入命令已发出"这个事实，集中一处以免逐个用例遗漏。
     """
 
-    # 「注入命令已发出」的时刻。真实流程由 execute_loop / direct_execute 在
+    # 「注入命令已发出」的时刻。真实流程由 execute_loop 在
     # 命令发出瞬间写入（写一次、永不清零）。
     _ISSUED = "2026-07-27T10:00:00+08:00"
 
@@ -353,7 +394,7 @@ class TestQueryActive:
         await store.upsert("task-t1", skill_name="pod-kill",
                            target={"namespace": "default", "names": ["pod1"]},
                            injection_start_time=self._ISSUED)
-        await store.upsert("task-t2", skill_name="pod-kill", blade_uid="a",
+        await store.upsert("task-t2", skill_name="pod-kill", experiment_uid="a",
                            target={"namespace": "default", "names": ["pod2"]},
                            injection_start_time=self._ISSUED,
                            verification={"layer1": {"status": "passed"}, "layer2": {"status": "passed"}})
@@ -392,7 +433,7 @@ class TestQueryActive:
             "task-not-issued", skill_name="pod-kill",
             target={"namespace": "default", "names": ["pod1"]},
             fault_spec={"namespace": "default", "scope": "pod", "names": ["pod1"],
-                        "blade_target": "network", "blade_action": "loss"},
+                        "fault_target": "network", "fault_action": "loss"},
         )
         assert await store.query_active() == []
 
@@ -423,7 +464,7 @@ class TestQueryActive:
         await store.upsert(
             "task-canonical",
             fault_spec={"namespace": "prod", "scope": "pod", "names": ["pod1"],
-                        "blade_target": "network", "blade_action": "loss"},
+                        "fault_target": "network", "fault_action": "loss"},
             skill_name="pod-network-loss",
             injection_start_time=self._ISSUED,
         )
@@ -458,8 +499,8 @@ class TestQueryActive:
             "scope": "pod",
             "names": ["pod1"],
             "labels": {},
-            "blade_target": "network",
-            "blade_action": "loss",
+            "fault_target": "network",
+            "fault_action": "loss",
             "params": {"percent": "100"},
         }
         await store.upsert("task-t1", fault_spec=fault_spec, skill_name="stale-active-skill",
@@ -475,7 +516,7 @@ class TestQueryActive:
     @pytest.mark.asyncio
     async def test_compatible_format(self, store):
         await store.upsert("task-t1", skill_name="pod-kill", target={"namespace": "default"},
-                           blade_uid="abc", injection_start_time=self._ISSUED)
+                           experiment_uid="abc", injection_start_time=self._ISSUED)
         active = await store.query_active()
         record = active[0]
         assert "task_id" in record
@@ -484,7 +525,7 @@ class TestQueryActive:
         assert "fault_type" in record
         assert "target" in record
         assert "params" in record
-        assert "blade_uid" in record
+        assert "experiment_uid" in record
         assert "status" in record
 
     @pytest.mark.asyncio
@@ -530,7 +571,7 @@ class TestDelete:
 
     @pytest.mark.asyncio
     async def test_delete_removes_details(self, store):
-        await store.upsert("task-t1", target={"namespace": "default"}, blade_uid="abc")
+        await store.upsert("task-t1", target={"namespace": "default"}, experiment_uid="abc")
         await store.delete("task-t1")
         assert await store.get("task-t1") is None
 
@@ -598,7 +639,7 @@ class TestSpans:
 class TestMetricMethods:
     @pytest.mark.asyncio
     async def test_get_metric_single_task(self, store):
-        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc",
+        await store.upsert("task-t1", skill_name="pod-kill", experiment_uid="abc",
                            verification={"layer1": {"status": "passed"}, "layer2": {"status": "passed"}})
         await store.append_span("task-t1", "agent_loop", 0.0, 1.0, 1000.0, token_input=100)
         metric = await store.get_metric("task-t1")
@@ -657,8 +698,8 @@ class TestMetricMethods:
             "scope": "pod",
             "names": ["pod-a"],
             "labels": {},
-            "blade_target": "network",
-            "blade_action": "loss",
+            "fault_target": "network",
+            "fault_action": "loss",
             "params": {"percent": "100"},
             "source": "test",
         }
@@ -683,7 +724,7 @@ class TestMetricMethods:
     @pytest.mark.asyncio
     async def test_get_all_metrics(self, store):
         await store.upsert("task-t1", skill_name="pod-kill")
-        await store.upsert("task-t2", skill_name="pod-kill", blade_uid="a",
+        await store.upsert("task-t2", skill_name="pod-kill", experiment_uid="a",
                            verification={"layer1": {"status": "passed"}, "layer2": {"status": "passed"}})
         result = await store.get_all_metrics()
         assert result["total"] == 2
@@ -703,8 +744,8 @@ class TestMetricMethods:
             "scope": "pod",
             "names": ["pod-a"],
             "labels": {},
-            "blade_target": "network",
-            "blade_action": "loss",
+            "fault_target": "network",
+            "fault_action": "loss",
             "params": {"percent": "100"},
         }
         await store.upsert(
@@ -787,7 +828,7 @@ class TestMetricMethods:
         status="in_progress" because task_state was stale.
         """
         # Step 1: initial inject → DB stores task_state="injecting"
-        await store.upsert("task-t1", skill_name="pod-kill", blade_uid="abc123",
+        await store.upsert("task-t1", skill_name="pod-kill", experiment_uid="abc123",
                            operation="inject")
         metric = await store.get_metric("task-t1")
         assert metric["stage"] == "injection"
@@ -884,3 +925,197 @@ class TestGetTaskStore:
         await mod.get_task_store()
         await reset_task_store()
         assert mod._store is None
+
+
+# ---------------------------------------------------------------------------
+# Newborn / cancelled lifecycle (ghost-row fix)
+# ---------------------------------------------------------------------------
+
+class TestNewbornPendingLifecycle:
+    """A row with zero lifecycle evidence is a newborn anchor (the bare
+    ``upsert(task_id)`` the tracer does before persisting spans). It must
+    surface as "pending" — reporting it as "injecting" made rejected /
+    abandoned intents masquerade as unfinished work on the boot card.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bare_upsert_is_pending(self, store):
+        """tracer._persist_span style: upsert(task_id) with no fields."""
+        await store.upsert("inject-ghost1")
+        data = await store.get("inject-ghost1")
+        assert data["task_state"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_metrics_only_upsert_is_pending(self, store):
+        """tracer._persist_summary style: usage counters are not evidence."""
+        await store.upsert("inject-ghost1", total_token_input=100, total_llm_calls=3)
+        data = await store.get("inject-ghost1")
+        assert data["task_state"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_pending_upgrades_to_injecting_with_evidence(self, store):
+        """The moment the pipeline takes ownership (fault_spec arrives),
+        inference promotes the row — pending is a starting state, not a trap."""
+        await store.upsert("inject-ghost1")
+        assert (await store.get("inject-ghost1"))["task_state"] == "pending"
+        await store.upsert("inject-ghost1", fault_spec={"target": "pod"}, needs_confirm=1)
+        data = await store.get("inject-ghost1")
+        assert data["task_state"] == "waiting_input"
+
+    @pytest.mark.asyncio
+    async def test_waiting_input_semantics_preserved(self, store):
+        """interaction_mode is session context, NOT lifecycle evidence: the
+        TUI crash-recovery detector keys on it, so such rows must keep
+        reporting waiting_input (not be demoted to pending)."""
+        await store.upsert("inject-ghost1", interaction_mode="tui")
+        data = await store.get("inject-ghost1")
+        assert data["task_state"] == "waiting_input"
+
+
+class TestCancelledTerminalGuard:
+    """cancelled is a terminal verdict: direct column write (intent
+    rejection / turn abort), then the monotonicity guard keeps field-less
+    re-projections from resurrecting the row."""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_never_regresses_on_fieldless_flush(self, store):
+        await store.upsert("inject-ghost1", fault_spec={"target": "pod"})
+        await store.update_task_state("inject-ghost1", "cancelled")
+        await store.upsert("inject-ghost1")  # tracer field-less flush
+        await store.upsert("inject-ghost1", total_token_input=42)  # summary flush
+        assert (await store.get("inject-ghost1"))["task_state"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_row_still_accepts_verdict(self, store):
+        """The guard only blocks the *fallback*, not genuine evidence: a
+        verification verdict outranks a stale cancelled stamp."""
+        await store.upsert("inject-ghost1", skill_name="pod-kill", experiment_uid="abc")
+        await store.update_task_state("inject-ghost1", "cancelled")
+        verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
+        await store.upsert("inject-ghost1", verification=verification)
+        assert (await store.get("inject-ghost1"))["task_state"] == "injected"
+
+
+class TestMetricsCommittedFlag:
+    """L1 read-path defence: ``committed`` is the evidence flag (same source
+    of truth as select_active_tasks) so consumers can tell "running" from
+    "died mid-flight" — task_state alone cannot."""
+
+    @pytest.mark.asyncio
+    async def test_committed_false_for_newborn_row(self, store):
+        await store.upsert("inject-ghost1", fault_spec={"target": "pod"})
+        metrics = await store.get_all_metrics()
+        row = next(t for t in metrics["tasks"] if t["task_id"] == "inject-ghost1")
+        assert row["committed"] is False
+
+    @pytest.mark.asyncio
+    async def test_committed_true_once_command_issued(self, store):
+        await store.upsert(
+            "inject-live1",
+            fault_spec={"target": "pod"},
+            injection_start_time="2026-08-19T12:00:00+00:00",
+        )
+        metrics = await store.get_all_metrics()
+        row = next(t for t in metrics["tasks"] if t["task_id"] == "inject-live1")
+        assert row["committed"] is True
+
+
+class TestCancelledReuseLifecycle:
+    """ID-reuse round trip: reject (cancel + flag clear) → re-converge
+    (waiting_input must come back for crash recovery) → revive on approval.
+    Pins the regressions found in the fix's own review:
+
+    * a cancelled row carrying needs_confirm=1 used to be re-derived as
+      waiting_input by any later flush — right after the user said no;
+    * conversely, once cancelled pinned the row, the SECOND round's
+      waiting_input was suppressed — blinding TUI crash recovery.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reject_clears_confirm_flag_and_stays_cancelled(self, store):
+        """_cancel_task_row contract: cancel stamp + needs_confirm=0.
+        Later field-less flushes must not resurrect waiting_input."""
+        await store.upsert("inject-reuse1", fault_spec={"target": "pod"}, needs_confirm=1)
+        assert (await store.get("inject-reuse1"))["task_state"] == "waiting_input"
+        # The reject-path writes (intent_confirm._cancel_task_row):
+        await store.update_task_state("inject-reuse1", "cancelled")
+        await store.upsert("inject-reuse1", needs_confirm=0)
+        # tracer field-less flush afterwards:
+        await store.upsert("inject-reuse1")
+        data = await store.get("inject-reuse1")
+        assert data["task_state"] == "cancelled"
+        assert data["needs_confirm"] == 0
+
+    @pytest.mark.asyncio
+    async def test_second_round_converge_reactivates_waiting_input(self, store):
+        """After a rejection, the NEXT clarification round writes
+        needs_confirm=1 again — the row must surface as waiting_input so
+        crash recovery can find the fresh confirmation card."""
+        await store.upsert("inject-reuse1", fault_spec={"target": "pod"}, needs_confirm=1)
+        await store.update_task_state("inject-reuse1", "cancelled")
+        await store.upsert("inject-reuse1", needs_confirm=0)
+        # second round convergence sync:
+        await store.upsert("inject-reuse1", needs_confirm=1, fault_spec={"target": "pod"})
+        assert (await store.get("inject-reuse1"))["task_state"] == "waiting_input"
+
+    @pytest.mark.asyncio
+    async def test_result_alone_is_evidence(self, store):
+        """Fields added late to the evidence set: result / artifacts /
+        plan_summary / safety_reason alone must not leave a bare row at
+        "pending" (the pipeline demonstrably owns it)."""
+        await store.upsert("inject-ev1", result={"executed": True})
+        assert (await store.get("inject-ev1"))["task_state"] != "pending"
+
+    @pytest.mark.asyncio
+    async def test_committed_is_verbatim_start_time_check(self, store):
+        """committed mirrors select_active_tasks verbatim: no
+        task_state OR-clause — a corrupted injected-without-evidence row
+        must NOT be claimed as committed (display and recovery would
+        split again)."""
+        verification = {"layer1": {"status": "passed"}, "layer2": {"status": "passed"}}
+        await store.upsert("inject-bad1", skill_name="pod-kill", verification=verification)
+        # injected verdict but injection_start_time never landed (corruption)
+        metrics = await store.get_all_metrics()
+        row = next(t for t in metrics["tasks"] if t["task_id"] == "inject-bad1")
+        assert row["task_state"] == "injected"
+        assert row["committed"] is False
+
+
+class TestExecutionGateRejection:
+    """confirmation_gate (Layer-2 plan-execution card) rejection is
+    covered by an EXISTING chain, not by the intent-card terminal write:
+    the gate stamps ``safety_status='rejected'`` in state and immediately
+    syncs it to the store, so inference derives the terminal "rejected"
+    on its own. This test pins that chain — if someone reorders the
+    safety/error branches in infer_task_state or drops the gate's
+    sync_to_store call, gate rejections would regress into ghosts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_gate_rejection_infers_terminal_rejected(self, store):
+        # Walked to the execution gate: spec planned, safety passed,
+        # parked on the confirmation card.
+        await store.upsert(
+            "inject-gate1",
+            fault_spec={"target": "pod"},
+            plan_summary="fullload pods",
+            safety_status="approved",
+            needs_confirm=1,
+        )
+        assert (await store.get("inject-gate1"))["task_state"] == "waiting_input"
+
+        # The gate's reject-path sync (confirmation_gate.py): safety
+        # rejected + flag cleared + failure recorded.
+        await store.upsert(
+            "inject-gate1",
+            safety_status="rejected",
+            safety_reason="User rejected the execution",
+            needs_confirm=0,
+            error="USER_REJECTED: User rejected the execution at confirmation gate",
+        )
+        data = await store.get("inject-gate1")
+        assert data["task_state"] == "rejected"
+
+        # Terminal: field-less flushes must not resurrect it.
+        await store.upsert("inject-gate1")
+        assert (await store.get("inject-gate1"))["task_state"] == "rejected"

@@ -24,8 +24,8 @@ def _spec(**kw) -> FaultSpec:
         namespace="default",
         scope="pod",
         names=("my-pod",),
-        blade_target="cpu",
-        blade_action="fullload",
+        fault_target="cpu",
+        fault_action="fullload",
         duration_seconds=60,
     )
     defaults.update(kw)

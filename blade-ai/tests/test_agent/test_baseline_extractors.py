@@ -87,7 +87,7 @@ class TestExtractPodTopMetrics:
         }
 
     def test_no_header_form(self):
-        # --no-headers output (the form direct_execute used to issue)
+        # --no-headers output
         stdout = "my-pod-abc   100m   256Mi\n"
         result = extract_pod_top_metrics(stdout, self._state("my-pod-abc"))
         assert result == {

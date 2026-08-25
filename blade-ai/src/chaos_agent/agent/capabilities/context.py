@@ -82,9 +82,9 @@ def provider_tool_owners() -> dict[str, tuple]:
 #: host tool surface — including ``blade_query_k8s``, which queries a cluster CRD
 #: that host scope does not have. The tool itself already refuses there
 #: (``tools/blade.py``: "does not apply to host-scope experiments") and host
-#: Layer 1 deliberately skips it (``verify/_verifier_layer1.py``: "blade_query_k8s
-#: is k8s-only"), so binding it to a host turn only spends context and invites a
-#: round wasted on a refusal.
+#: Layer 1 deliberately skips it (``providers/chaosblade/verify.py``:
+#: "blade_query_k8s is k8s-only"), so binding it to a host turn only spends
+#: context and invites a round wasted on a refusal.
 #:
 #: This gate is about VISIBILITY (what enters the LLM's context), which is
 #: separate from ``tools/_tool_profiles.TOOL_PROFILE`` — that table asserts a

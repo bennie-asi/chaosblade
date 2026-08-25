@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -50,7 +49,7 @@ from chaos_agent.agent.replan import (
 )
 from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.spec.skill_identity import read_active_skill_name
-from chaos_agent.agent.state import AgentState
+from chaos_agent.agent.state import AgentState, has_active_fault
 from chaos_agent.agent.state_mgmt.state_helpers import fail_state
 from chaos_agent.agent.result.verdict import FailureCategory
 from chaos_agent.config.settings import settings
@@ -59,7 +58,6 @@ from chaos_agent.observability.status_tracker import (
     get_tracker,
     StatusCategory,
 )
-from chaos_agent.utils.blade_uid import extract_blade_uid
 from chaos_agent.utils.time import now_iso
 
 logger = logging.getLogger(__name__)
@@ -101,203 +99,6 @@ def _extract_original_replicas_from_messages(messages: list, resource_name: str)
     return None
 
 
-def _parse_blade_uid_from_content(content) -> str | None:
-    """Extract a ChaosBlade UID from ToolMessage content.
-
-    Thin wrapper around `chaos_agent.utils.blade_uid.extract_blade_uid` —
-    accepts the raw `content` field of a ToolMessage (string or other) and
-    delegates multi-strategy parsing to the shared util.
-    """
-    if not isinstance(content, str):
-        return None
-    return extract_blade_uid(content)
-
-
-def _parse_uid_from_status_content(content) -> str | None:
-    """Extract experiment UID from blade_status or blade_query_k8s output.
-
-    blade_status / blade_query_k8s return:
-        {"code":200,"success":true,"result":{"uid":"<hex>","phase":"Running",...}}
-
-    Unlike blade_create (where ``result`` is a string UID), these tools
-    return ``result`` as a **dict** containing a ``uid`` field. The
-    standard ``extract_blade_uid`` does not handle this case because its
-    strategy 1 only accepts string results, and its regex strategy expects
-    UUID format (8-4-4-4-12) while ChaosBlade UIDs are short hex strings.
-    """
-    if not isinstance(content, str) or not content:
-        return None
-
-    # First try the standard extractor (handles blade_create format
-    # where result is a string, and chaosblade-<hex> resource names)
-    uid = extract_blade_uid(content)
-    if uid:
-        return uid
-
-    # Handle blade_status/blade_query_k8s format where result is a dict
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-    if not isinstance(data, dict):
-        return None
-
-    # ChaosBlade success response with dict result
-    if data.get("success") is True and data.get("code") == 200:
-        result = data.get("result")
-        if isinstance(result, dict):
-            uid = result.get("uid")
-            if isinstance(uid, str) and uid:
-                return uid
-
-    return None
-
-
-def _collect_destroyed_uids(messages: list) -> set[str]:
-    """UIDs the LLM has issued ``blade_destroy`` for.
-
-    A UID sent to ``blade_destroy`` is no longer an active injection: whether
-    the destroy succeeded (experiment gone) or failed (residual/errored
-    experiment), it must NOT be picked up as the current fault's blade_uid.
-    Without this guard, a failed-then-cleaned-up experiment's residual UID
-    (echoed back by a post-cleanup ``blade_status`` check) pollutes
-    ``state.blade_uid`` and misroutes the verifier onto the ChaosBlade Layer-1
-    path for an experiment that no longer exists.
-    """
-    destroyed: set[str] = set()
-    for msg in messages:
-        for tc in (getattr(msg, "tool_calls", None) or []):
-            name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-            if name != "blade_destroy":
-                continue
-            args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-            uid = args.get("uid", "") if isinstance(args, dict) else ""
-            if uid:
-                destroyed.add(uid)
-    return destroyed
-
-
-def _extract_blade_uid_from_messages(
-    messages: list,
-    retired: "list[str] | set[str] | None" = None,
-) -> str | None:
-    """Scan messages for an experiment uid from a blade-family tool's output.
-
-    ChaosBlade `blade create` returns JSON like:
-        {"code": 200, "success": true, "result": "<uid>"}
-
-    Sources scanned, in priority order:
-      1. an experiment-creating tool (``blade_create`` for OS / K8s faults,
-         ``blade_python_create`` for in-process application faults),
-      2. ``kubectl exec ... blade create`` — the bypass the LLM may use when the
-         blade tool fails on the host, where the success JSON lands in a kubectl
-         ToolMessage,
-      3. ``blade_status`` / ``blade_query_k8s`` — relevant when the create call
-         timed out but the experiment was in fact created, so the LLM discovered
-         the uid via a status query (uid nested in a dict ``result`` field).
-
-    Only kubectl exec calls whose v_args contain "blade create" are considered —
-    other kubectl outputs (get -o json, describe, ...) are NOT scanned, to
-    prevent false-positive extraction from K8s resource ``metadata.uid`` fields.
-
-    ``retired``: UIDs destroyed by FRAMEWORK-side cleanup (verify-replan
-    residual destroy). They leave no ``blade_destroy`` ToolMessage, so the
-    message scan alone would resurrect them; callers holding
-    ``state.retired_blade_uids`` must pass it here (task-29848471).
-    """
-    kubectl_uid = None  # fallback uid from kubectl exec
-    status_uid = None   # fallback uid from blade_status / blade_query_k8s
-
-    # UIDs already sent to blade_destroy are cleaned-up / residual — never
-    # treat them as the current active injection (root-cause guard).
-    destroyed = _collect_destroyed_uids(messages)
-    if retired:
-        destroyed |= set(retired)
-
-    # Build a set of tool_call_ids that correspond to "kubectl exec ... blade create"
-    blade_exec_call_ids: set[str] = set()
-    for msg in messages:
-        if not hasattr(msg, "tool_calls"):
-            continue
-        for tc in (msg.tool_calls or []):
-            name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-            args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-            tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-            if name == "kubectl" and isinstance(args, dict):
-                v_args = args.get("v_args", "")
-                if "blade" in v_args and "create" in v_args:
-                    blade_exec_call_ids.add(tc_id)
-
-    # Check if an experiment-creating tool was attempted (even if it failed /
-    # timed out). blade_status UID extraction is only relevant then — otherwise
-    # the status check might pick up unrelated experiments.
-    _EXPERIMENT_CREATE_TOOLS = ("blade_create", "blade_python_create")
-    _has_blade_create = any(
-        isinstance(msg, ToolMessage)
-        and getattr(msg, "name", "") in _EXPERIMENT_CREATE_TOOLS
-        for msg in messages
-    )
-
-    for msg in reversed(messages):
-        if not isinstance(msg, ToolMessage):
-            continue
-        msg_name = getattr(msg, "name", "") or ""
-        content = msg.content
-
-        # Priority 1: a ToolMessage from an experiment-creating tool. Both
-        # ``blade_create`` (OS / K8s carrier) and ``blade_python_create``
-        # (in-process application carrier) return the same ChaosBlade CLI JSON
-        # with the experiment uid, and both recover via ``blade destroy <uid>``.
-        # Missing the python tool here would leave ``blade_uid`` unset on the
-        # ReAct path, so verification and recovery would have no uid to act on.
-        if msg_name in _EXPERIMENT_CREATE_TOOLS:
-            uid = _parse_blade_uid_from_content(content)
-            if uid and uid not in destroyed:
-                return uid
-
-        # Priority 2: kubectl exec blade ToolMessage ONLY
-        if msg_name == "kubectl" and not kubectl_uid:
-            tool_call_id = getattr(msg, "tool_call_id", "") or ""
-            if tool_call_id in blade_exec_call_ids:
-                _uid = _parse_blade_uid_from_content(content)
-                if _uid and _uid not in destroyed:
-                    kubectl_uid = _uid
-
-        # Priority 3: blade_status / blade_query_k8s ToolMessage
-        # Relevant when blade_create timed out but experiment was created.
-        if msg_name in ("blade_status", "blade_query_k8s") and not status_uid:
-            if _has_blade_create:
-                _uid = _parse_uid_from_status_content(content)
-                if _uid and _uid not in destroyed:
-                    status_uid = _uid
-
-    # Return by priority: blade_create > kubectl exec > blade_status
-    return kubectl_uid or status_uid
-
-
-# Regex for: blade create k8s <scope>-<target> <action>
-# e.g. "blade create k8s pod-network drop --percent 100 ..."
-_BLADE_CREATE_K8S_RE = re.compile(
-    r"blade\s+create\s+k8s\s+(\w+)-(\w+)\s+(\w+)"
-)
-
-def _parse_blade_create_from_v_args(v_args: str) -> dict | None:
-    """Parse scope/target/action/flags from kubectl exec blade create v_args.
-
-    Returns dict with scope/target/action, plus ``flags`` if present, or None
-    if v_args does not contain a ``blade create k8s`` command.
-    """
-    match = _BLADE_CREATE_K8S_RE.search(v_args)
-    if not match:
-        return None
-    result = {"scope": match.group(1), "target": match.group(2), "action": match.group(3)}
-    flags_str = v_args[match.end():].strip()
-    if flags_str:
-        result["flags"] = flags_str
-    return result
-
-
 def _build_replan_context(state: AgentState, request: ReplanRequest) -> dict:
     """Extract structured error context from conversation history for Phase 1 replan.
 
@@ -305,7 +106,7 @@ def _build_replan_context(state: AgentState, request: ReplanRequest) -> dict:
     scan stops after 5 failed messages, so a successful ``blade_create``
     buried deeper in history goes unseen (task-349ccf5d lost uid
     ``5aaa51dbcb78a25d`` exactly this way). ``_fire_replan_seam`` fills
-    ``existing_blade_uids`` from the canonical extractor instead.
+    ``existing_experiment_uids`` from the canonical extractor instead.
     """
     messages = state.get("messages", [])
     failed_calls = []
@@ -370,7 +171,7 @@ def _build_replan_context(state: AgentState, request: ReplanRequest) -> dict:
         "evidence_refs": runtime_evidence_refs,
         "failed_tool_calls": failed_calls,
         # Filled canonically by _fire_replan_seam (see module note above).
-        "existing_blade_uids": [],
+        "existing_experiment_uids": [],
         "iteration_at_failure": state.get("execute_loop_count", 0),
         "rejected_params": list(dict.fromkeys(all_rejected)),
         "failed_tool_names": sorted(failed_tool_names),
@@ -456,7 +257,7 @@ def _detect_consecutive_idle_turns(
 
 
 def _detect_injection_method(
-    messages: list, blade_uid: str | None, *, is_host: bool = False
+    messages: list, *, is_host: bool = False
 ) -> str | None:
     """Detect the injection method used based on conversation history.
 
@@ -465,7 +266,6 @@ def _detect_injection_method(
 
     Args:
         messages: The conversation history to scan.
-        blade_uid: The extracted ChaosBlade UID, if any.
         is_host: Whether the resolved transport channel targets a host
             (ssh / kubewiz_host). Enables the ``host_native`` branch.
 
@@ -475,21 +275,19 @@ def _detect_injection_method(
     # Delegated to the FaultProvider registry, the single dispatch point that
     # replaced the former inline fall-through. The registry first scopes
     # candidates by CHANNEL (``is_host`` → profile; a k8s channel never probes
-    # the host backend, and vice versa), then probes the survivors in
-    # precedence order (ChaosBlade UID scan → kubectl-native → host-native).
-    # Attribution keys on the injection ATTEMPT (AIMessage tool_calls), not on
-    # command text or tool result: ChaosbladeProvider owns the reverse UID scan;
-    # K8sNativeProvider / HostShellProvider gate on ``not blade_uid`` (host also
-    # on ``is_host``) and treat an attempted mutating call as the carrier.
+    # the host backend, and vice versa), then arbitrates the survivors by
+    # RECENCY of each provider's injection evidence. Attribution keys on the
+    # injection ATTEMPT (AIMessage tool_calls), not on command text or tool
+    # result; every carrier scans for its own evidence inside its provider.
     from chaos_agent.agent.providers import FaultProviderRegistry
 
-    return FaultProviderRegistry.detect_method(messages, blade_uid, is_host=is_host)
+    return FaultProviderRegistry.detect_method(messages, is_host=is_host)
 
 
 def _should_redetect_injection_method(
-    current_injection_method: str | None, blade_uid: str | None
+    current_injection_method: str | None, experiment_uid: str | None
 ) -> bool:
-    """Gate the per-iteration history re-scan (channel B) to its two real jobs.
+    """Gate the per-iteration history re-scan (channel B) to its real jobs.
 
     Direction B records ``injection_method`` at ISSUE time (channel A), so the
     reverse history scan is only needed to:
@@ -500,21 +298,118 @@ def _should_redetect_injection_method(
       this scan to the CURRENT attribution epoch
       (:func:`_epoch_bounded_messages`), so after a replan seam the scan cannot
       resurrect PRE-seam attempts (task-5193538b).
-    - UPGRADE: promote the provisional multi-step ``kubectl_native`` to the
-      experiment backend once a ``blade_uid`` appears (the UID lives in the tool
-      RESULT, which channel A cannot see).
+    - UPGRADE: promote the provisional multi-step native attribution to the
+      experiment backend once a live experiment UID appears (the UID lives in
+      the tool RESULT, which channel A cannot see). The trigger is the
+      registry-extracted experiment id — carrier-neutral, so any UID-bearing
+      backend arms the upgrade, not just ChaosBlade.
+    - DOWNGRADE (task-51193464): an experiment-method attribution whose UID
+      never materialised is UNFULFILLED — the method promises a live
+      experiment, and ``experiment_uid`` is that promise's proof. While the
+      promise is outstanding the scan stays armed so the registry's RECENCY
+      arbitration can correct a mis-attribution (a k8s OBJECT uid once
+      mis-read as blade evidence) to the native backend whose evidence is
+      more recent. The arbitration is idempotent — a genuine experiment
+      still bootstrapping keeps winning on its own recency — and the moment
+      its UID appears the attribution is fulfilled and this arm closes.
 
-    In steady state (a non-multi-step method already set, or no new UID) the
-    scan would only re-derive the same answer, so we skip it.
+    In steady state (a non-multi-step method already set with no outstanding
+    experiment promise, or no new UID) the scan would only re-derive the same
+    answer, so we skip it.
     """
     if not current_injection_method:
         return True
-    if not blade_uid:
-        return False
     from chaos_agent.agent.providers import FaultProviderRegistry
 
     provider = FaultProviderRegistry.resolve_by_method(current_injection_method)
+    if not experiment_uid:
+        # An experiment-method attribution without its UID proof is
+        # outstanding: arm the scan for the DOWNGRADE correction above. A
+        # UID-less native method is its own proof (the attempt IS the
+        # injection) — only the multi-step UPGRADE probe re-scans it, below.
+        return provider is not None and provider.has_experiment_uid
     return provider is not None and provider.is_multi_step
+
+
+def _issue_disproven_in_epoch(state: AgentState, messages: list, provider) -> bool:
+    """True when ``provider``'s ``issue_disproven`` finds EXPLICIT
+    counter-evidence inside the CURRENT attribution epoch.
+
+    The provider hook reports a TRUSTWORTHY result proving an issue-time
+    attempt never committed (a failed object-write); carriers whose results
+    are untrustworthy by nature — the forensic paradox, where the fault
+    severs its own feedback channel — return False, as do experiment
+    carriers whose attribution is result-born in the first place. Shared by
+    the three result-awareness seams below (revocation, RESUME veto,
+    upgrade-without-combo) so they can never drift apart.
+    """
+    if provider is None or getattr(provider, "has_experiment_uid", False):
+        return False
+    disprove = getattr(provider, "issue_disproven", None)
+    if disprove is None:
+        return False
+    return bool(disprove(_epoch_bounded_messages(messages, state)))
+
+
+def _maybe_revoke_issue_time_attribution(
+    state: AgentState,
+    result: dict,
+    messages: list,
+    current_method: str | None,
+) -> bool:
+    """Revoke an issue-time (channel A) attribution its result disproves.
+
+    Issue-time attribution records the injection the moment the tool call is
+    issued — before the result exists — so a UID-less native method can be
+    committed for an attempt that provably failed. When the carrier's result
+    channel carries explicit counter-evidence (see
+    :func:`_issue_disproven_in_epoch`), the attribution facts are cleared so
+    downstream gates — REPLAN_EXHAUSTED context, verifier routing, the
+    tail projection — never treat a FAILED attempt as a live fault. The
+    attempt itself remains replan evidence via the epoch scan in
+    ``_injection_attempted_this_contract``; only the "committed fault"
+    reading is withdrawn. Returns True when the attribution was revoked.
+    """
+    from chaos_agent.agent.providers import FaultProviderRegistry
+
+    provider = FaultProviderRegistry.resolve_by_method(current_method)
+    if not _issue_disproven_in_epoch(state, messages, provider):
+        return False
+    result["injection_method"] = None
+    result["fault_handle"] = None
+    result["injection_start_time"] = None
+    logger.info(
+        "Revoked issue-time attribution %s: the result disproves the commit "
+        "(failed attempt stays replan evidence)",
+        current_method,
+    )
+    return True
+
+
+def _project_fault_handle(state: AgentState, result: dict) -> None:
+    """Fault-handle sync — the single projection point.
+
+    Runs AFTER every attribution write of a turn (UID extraction block,
+    ISSUE-time native commit inside ``_process_response_tool_calls``,
+    replan-seam clears, issue-time revocation) and projects the final
+    attribution facts into the carrier-agnostic handle. Projection, not a
+    message re-scan: an attribution cleared at a seam stays cleared —
+    re-scanning history would resurrect exactly what the seam invalidated.
+    Writes ``result["fault_handle"]`` only on change so untouched turns add
+    no redundant state update. Extracted as a pure helper so the projection
+    contract is unit-testable without a full execute-loop fixture.
+    """
+    from chaos_agent.agent.providers import FaultProviderRegistry
+
+    next_handle = FaultProviderRegistry.derive_handle_from_legacy(
+        {**state, **result}
+    )
+    prev_handle = (
+        result["fault_handle"] if "fault_handle" in result
+        else state.get("fault_handle")
+    )
+    if next_handle != prev_handle:
+        result["fault_handle"] = next_handle
 
 
 def _epoch_bounded_messages(messages: list, state: AgentState) -> list:
@@ -549,7 +444,7 @@ def _epoch_bounded_messages(messages: list, state: AgentState) -> list:
 def reset_attribution_state(
     result: dict,
     *,
-    keep_blade_uid: bool = False,
+    keep_experiment_uid: bool = False,
     message_count: int | None = None,
 ) -> None:
     """Reset injection-attribution fields at a replan seam.
@@ -563,11 +458,11 @@ def reset_attribution_state(
     reset the narrow gate never re-opens and a stale attribution survives
     the method switch (task-29848471).
 
-    ``keep_blade_uid``: an execute-time replan may fire while an experiment
-    is STILL ACTIVE (``existing_blade_uids`` non-empty) — dropping that UID
+    ``keep_experiment_uid``: an execute-time replan may fire while an experiment
+    is STILL ACTIVE (``existing_experiment_uids`` non-empty) — dropping that UID
     would orphan a live experiment for recovery. Verify-replan destroys its
     residue first (and retires the UID separately), so it always passes the
-    default ``keep_blade_uid=False``.
+    default ``keep_experiment_uid=False``.
 
     ``message_count``: total messages once this node's result lands in state
     (``len(state messages) + len(result messages)``). Recorded as the
@@ -578,10 +473,14 @@ def reset_attribution_state(
     executor conclude "already injected" without issuing anything
     (task-5193538b).
     """
-    if not keep_blade_uid:
-        result["blade_uid"] = None
+    if not keep_experiment_uid:
+        result["experiment_uid"] = None
+        # The fault handle mirrors the UID's fate: the committed fault it
+        # describes was invalidated with it (keep_experiment_uid keeps both — a
+        # live experiment keeps its handle for the recover graph).
+        result["fault_handle"] = None
         # The combo marker belongs to the same attribution: the UID's
-        # native companion is invalidated together with it (keep_blade_uid
+        # native companion is invalidated together with it (keep_experiment_uid
         # keeps both — a live experiment keeps its native component).
         result["combo_native_issued"] = None
     result["injection_method"] = None
@@ -700,13 +599,19 @@ def _process_response_tool_calls(
     for tc in tool_calls:
         tc_name, tc_args = extract_tool_call_fields(tc)
 
+        # Phase-7 T3: issue-time structured-parameter extraction dispatched
+        # through the registry — each backend recognises its own tool-call
+        # forms (the blade_create flags and the kubectl-exec embedded blade
+        # create both live in the ChaosBlade provider now).
+        from chaos_agent.agent.providers import FaultProviderRegistry
+
+        parsed_params = FaultProviderRegistry.parse_injection_params(
+            tc_name, tc_args
+        )
+        if parsed_params:
+            result["injection_parsed_params"] = parsed_params
+
         if tc_name == "blade_create":
-            flags_str = tc_args.get("flags", "")
-            if flags_str:
-                from chaos_agent.utils.fault_type import parse_blade_flags
-                parsed = parse_blade_flags(flags_str)
-                if parsed:
-                    result["blade_parsed_flags"] = parsed
             logger.info(f"Blade create params: {tc_args}")
 
             target_metadata = state.get("target_metadata") or {}
@@ -716,8 +621,8 @@ def _process_response_tool_calls(
             from chaos_agent.agent.spec.fault_spec import read_fault_spec as _rfs
             _spec_for_fcat = _rfs(state)
             _scope = (_spec_for_fcat.scope if _spec_for_fcat else "") or tc_args.get("scope", "")
-            _target = (_spec_for_fcat.blade_target if _spec_for_fcat else "") or tc_args.get("target", "")
-            _action = (_spec_for_fcat.blade_action if _spec_for_fcat else "") or tc_args.get("action", "")
+            _target = (_spec_for_fcat.fault_target if _spec_for_fcat else "") or tc_args.get("target", "")
+            _action = (_spec_for_fcat.fault_action if _spec_for_fcat else "") or tc_args.get("action", "")
             adaptations = lookup_adaptations(
                 _scope, _target, _action, target_metadata,
                 rule_type="param_override",
@@ -756,22 +661,6 @@ def _process_response_tool_calls(
                             {"debug": True, "fcat": True},
                         )
 
-        if tc_name == "kubectl" and tc_args.get("subcommand") == "exec":
-            v_args = tc_args.get("v_args", "") or ""
-            if "blade" in v_args and "create" in v_args:
-                parsed = _parse_blade_create_from_v_args(v_args)
-                if parsed:
-                    flags_str = parsed.get("flags", "")
-                    if flags_str:
-                        from chaos_agent.utils.fault_type import parse_blade_flags
-                        parsed_flags = parse_blade_flags(flags_str)
-                        if parsed_flags:
-                            result["blade_parsed_flags"] = parsed_flags
-                    logger.info(
-                        f"Kubectl exec blade params: scope={parsed['scope']}, "
-                        f"target={parsed['target']}, action={parsed['action']}"
-                    )
-
         if tc_name == "kubectl" and tc_args.get("subcommand") == "scale":
             v_args = tc_args.get("v_args", "")
             import re as _re
@@ -796,16 +685,17 @@ def _process_response_tool_calls(
 
     # Direction B: record injection_method at ISSUE time from the freshly
     # issued tool_calls, rather than reverse-scanning history later. Only the
-    # UID-less native methods (kubectl_native / host_native) are committed here
-    # — the attempt IS the injection, so a severed exec result cannot hide it.
-    # The experiment methods (host_blade / kubectl_exec) are deferred to the
-    # blade_uid path (proof the ChaosBlade experiment actually succeeded), so a
-    # failed blade attempt that falls back to kubectl-native is not
+    # UID-less providers (has_experiment_uid=False — the native backends) are
+    # committed here — the attempt IS the injection, so a severed exec result
+    # cannot hide it. The experiment-UID providers are deferred to the
+    # experiment_uid path (proof the experiment actually succeeded), so a
+    # failed carrier attempt that falls back to a native method is not
     # mis-recorded. Never overrides an already-set method (monotonic); the
-    # blade_uid upgrade stays in the caller's re-detect block.
+    # experiment_uid upgrade stays in the caller's re-detect block.
     from chaos_agent.agent.nodes.execute._injection_detection import (
         classify_issue_time_method,
     )
+    from chaos_agent.agent.providers.registry import FaultProviderRegistry
     from chaos_agent.transports.registry import is_host_scope_channel
 
     _is_host = is_host_scope_channel(state)
@@ -813,7 +703,13 @@ def _process_response_tool_calls(
     for tc in tool_calls:
         tc_name, tc_args = extract_tool_call_fields(tc)
         _issued = classify_issue_time_method(tc_name, tc_args, is_host=_is_host)
-        if _issued not in ("kubectl_native", "host_native"):
+        # Registry dispatch (phase-9 T4): skip everything that is not a live
+        # UID-less backend — unknown/None methods (``_issuer is None``) and
+        # experiment-UID backends both defer to the experiment_uid path.
+        # Six-value equivalence vs the retired hard-coded set is pinned by
+        # ``TestPhase9IssueTimeSixValues`` (test_phase9_rename_guards.py).
+        _issuer = FaultProviderRegistry.resolve_by_method(_issued)
+        if _issuer is None or _issuer.has_experiment_uid:
             continue
         if not _current_method:
             result["injection_method"] = _issued
@@ -824,16 +720,20 @@ def _process_response_tool_calls(
             ):
                 result["injection_start_time"] = now_iso()
                 logger.info("Set injection_start_time (%s issued)", _issued)
-            # A carried-over blade_uid with no attributed method means a LIVE
-            # experiment survived an execute-time replan seam (keep_blade_uid
+            # A carried-over live fault with no attributed method means a LIVE
+            # experiment survived an execute-time replan seam (keep_experiment_uid
             # keeps the UID but clears the method for re-detection). Native
             # work issued in that epoch is still a combo — the experiment is
             # alive even though nothing is attributed yet. The epoch-bounded
             # re-detect scan cannot see the pre-seam blade_create, so this
             # issue-time check is the only coverage for that ordering.
-            _experiment_live = bool(
-                state.get("blade_uid") or result.get("blade_uid")
-            )
+            #
+            # Judge on the carried-over STATE only (never ``{**state, **result}``):
+            # ``result`` may already hold the native method recorded a few lines
+            # above for THIS very tool call, and a native provider would claim
+            # it to build a handle — mis-marking a plain native fallback
+            # (blade failed with no UID) as a combo.
+            _experiment_live = has_active_fault(state)
         else:
             # COMBO (blade-first order): a native mutating injection was
             # issued while an experiment method is already attributed — both
@@ -849,6 +749,16 @@ def _process_response_tool_calls(
             _experiment_live = (
                 _cur_combo_provider is not None
                 and _cur_combo_provider.has_experiment_uid
+                # The experiment must actually be attested live — its UID is
+                # the proof. A UID-less experiment-method attribution is
+                # UNFULFILLED (task-51193464: one was a k8s object uid
+                # mis-read as blade evidence), and marking a combo on top
+                # of it would durably route recovery down the LLM path for
+                # a task whose only real mutation was the native one.
+                and bool(
+                    state.get("experiment_uid")
+                    or result.get("experiment_uid")
+                )
             )
         if _experiment_live and not (
             state.get("combo_native_issued")
@@ -857,9 +767,10 @@ def _process_response_tool_calls(
             result["combo_native_issued"] = True
             logger.info(
                 "Combo injection: native issued alongside a live experiment "
-                "(method=%s, blade_uid=%s) — recovery will use the LLM route",
+                "(method=%s, experiment_uid=%s) — recovery will use the LLM route",
                 _current_method,
-                state.get("blade_uid") or result.get("blade_uid"),
+                state.get("experiment_uid")
+                or result.get("experiment_uid"),
             )
         break
 
@@ -933,9 +844,9 @@ def _detect_terminal_conclusion(
     The executor's job is ONLY injection. When the LLM outputs text (no
     tool_calls), the exit is permitted ONLY on an attributed
     ``injection_method`` — the system's record of who injected the CURRENT
-    fault. ``blade_uid`` alone is deliberately NOT an exit ticket: after an
+    fault. ``experiment_uid`` alone is deliberately NOT an exit ticket: after an
     execute-time replan the UID may survive the seam
-    (``keep_blade_uid=True``, kept so recovery still reaches the live
+    (``keep_experiment_uid=True``, kept so recovery still reaches the live
     experiment), and letting it license a text-only exit re-opens the
     task-5193538b empty spin under the NEW contract — the executor would
     conclude "already injected" having issued nothing. The UID is not lost:
@@ -998,8 +909,29 @@ def _detect_terminal_conclusion(
             return  # Don't fall through to generic nudge below
 
     # Non-kubectl_native injection method (host_blade, kubectl_exec)
-    # or kubectl_native with all steps complete → exit is correct.
+    # or kubectl_native with all steps complete → exit is correct — EXCEPT
+    # an experiment-method attribution that has gone unfulfilled (its UID
+    # never materialised). The method promises a live experiment whose proof
+    # is the UID; without it no fault handle can be built, so the router's
+    # exit gate (has_active_fault) can never open and a text-only conclusion
+    # would spin the loop until the budget dies (task-51193464: the model
+    # concluded "execution complete" for six minutes while the router kept
+    # returning "continue"). Error is a signal, not a verdict — fail into
+    # the verifier, which checks whether the fault actually took effect.
     if _injection_method:
+        if (
+            not _has_tool_calls
+            and _method_provider is not None
+            and _method_provider.has_experiment_uid
+            and not state.get("experiment_uid")
+            and not result.get("experiment_uid")
+        ):
+            result.update(fail_state(
+                FailureCategory.EXECUTION_FAILED,
+                "text conclusion with unfulfilled experiment attribution "
+                f"({_injection_method} recorded but no experiment UID)",
+                state.get("messages", []) + result.get("messages", []),
+            ))
         return
 
     # No injection method at all — text-only without any injection action.
@@ -1156,37 +1088,49 @@ def _fire_replan_seam(
         result["needs_confirmation"] = True
     # Attribution reset at the replan seam: the next attempt may switch
     # carriers, so method/carrier-pod/cache must not leak across.
-    # blade_uid survives ONLY while an experiment is still active.
+    # experiment_uid survives ONLY while an experiment is still active.
     # task-349ccf5d: the keep decision used to trust the truncated raw
     # scan in replan_context, which cannot see a successful create once
     # 5 failed messages sit closer to the seam — the live experiment was
     # orphaned. Use the canonical extractor instead (full history,
     # destroyed/retired uids filtered out — same contract as the
     # verifier and the per-iteration re-extraction), and fall back to
-    # the persisted ``state.blade_uid`` for the memory-compression
+    # the persisted ``state.experiment_uid`` for the memory-compression
     # boundary where the create ToolMessage may have been summarized
     # away. Worst case of the fallback (uid already dead) is bounded:
     # recover hits the designed "experiment lost -> alert" branch.
     all_messages = list(state.get("messages") or []) + list(result.get("messages") or [])
-    retired_uids = state.get("retired_blade_uids")
-    live_uid = _extract_blade_uid_from_messages(all_messages, retired=retired_uids)
+    retired_uids = state.get("retired_experiment_uids")
+    from chaos_agent.agent.providers import FaultProviderRegistry
+    from chaos_agent.transports.registry import is_host_scope_channel
+
+    live_uid = FaultProviderRegistry.extract_experiment_uid(
+        all_messages,
+        retired=retired_uids,
+        is_host=is_host_scope_channel(state),
+    )
     # Compression-boundary fallback: the persisted uid may be the only
     # evidence left once the create ToolMessage is summarized away. It
     # must still pass the SAME death filters as the extractor — nothing
-    # clears ``state.blade_uid`` when the LLM issues ``blade_destroy``,
+    # clears ``state.experiment_uid`` when the LLM issues ``blade_destroy``,
     # so an unfiltered fallback would resurrect a destroyed experiment
-    # into ``existing_blade_uids`` (the Phase-1 replan prompt) and the
+    # into ``existing_experiment_uids`` (the Phase-1 replan prompt) and the
     # keep decision.
-    fallback_uid = state.get("blade_uid") or None
+    fallback_uid = state.get("experiment_uid") or None
     if fallback_uid:
-        dead_uids = _collect_destroyed_uids(all_messages) | set(retired_uids or [])
+        # Registry seam (union over every UID-bearing provider's destroy
+        # scan, channel-unfiltered), same contract the canonical extractor
+        # applies internally.
+        dead_uids = FaultProviderRegistry.destroyed_experiment_ids(
+            all_messages
+        ) | set(retired_uids or [])
         if fallback_uid in dead_uids:
             fallback_uid = None
-    blade_uid_at_seam = live_uid or fallback_uid or None
-    replan_context["existing_blade_uids"] = [blade_uid_at_seam] if blade_uid_at_seam else []
+    experiment_uid_at_seam = live_uid or fallback_uid or None
+    replan_context["existing_experiment_uids"] = [experiment_uid_at_seam] if experiment_uid_at_seam else []
     reset_attribution_state(
         result,
-        keep_blade_uid=bool(blade_uid_at_seam),
+        keep_experiment_uid=bool(experiment_uid_at_seam),
         message_count=len(all_messages),
     )
     history = list(state.get("replan_history") or [])
@@ -1196,7 +1140,7 @@ def _fire_replan_seam(
         "action_taken": "(pending Phase 1 analysis)",
         # Audit trail: record the experiment handle observed at the seam
         # regardless of the keep decision, so a lost uid stays traceable.
-        "blade_uid_at_seam": blade_uid_at_seam,
+        "experiment_uid_at_seam": experiment_uid_at_seam,
     })
     result["replan_history"] = history
     from chaos_agent.agent.attempt_tracker import (
@@ -1319,7 +1263,7 @@ def _injection_attempted_this_contract(state: AgentState) -> bool:
     never on the free text of a replan request (task-71fa78b6 hallucinated
     its evidence wholesale). Two proofs, strongest first:
 
-    1. Attribution present (``injection_method`` / ``blade_uid``) — an
+    1. Attribution present (``injection_method`` / ``experiment_uid``) — an
        injection was recorded under this contract.
     2. An injection tool call was ISSUED in the current attribution epoch —
        attempts count even when they failed; a failed attempt is exactly the
@@ -1330,7 +1274,11 @@ def _injection_attempted_this_contract(state: AgentState) -> bool:
        mutation, host-native shell) is covered by one vocabulary and this rule
        can never drift away from attribution.
     """
-    if state.get("injection_method") or state.get("blade_uid"):
+    # NOTE: this is an ATTRIBUTION-presence check, deliberately NOT
+    # ``has_active_fault``: a blade attribution without a UID means the
+    # create FAILED — still an attempt (the very evidence a legitimate
+    # replan is built on), but not a committed fault.
+    if state.get("injection_method") or state.get("experiment_uid"):
         return True
     epoch_msgs = _epoch_bounded_messages(state.get("messages") or [], state)
     if not epoch_msgs:
@@ -1443,7 +1391,7 @@ async def _check_execute_loop_limits(
     #     hint, a well-behaved LLM stops emitting it)
     #   * ``state.error`` was cleared by the prior fire so the
     #     router's error branch can't end the turn
-    #   * blade_uid is empty so verifier branch can't end either
+    #   * no active fault so the router's verifier branch can't end either
     #
     # The router falls through to "continue" and execute_loop
     # spins until ``max_execute_loop`` is hit (default 50) — up
@@ -1458,7 +1406,7 @@ async def _check_execute_loop_limits(
     zombie_replan = (
         state.get("replan_requested")
         and state.get("replan_count", 0) >= _max_replan_zombie
-        and not state.get("blade_uid")
+        and not has_active_fault(state)
     )
     if zombie_replan:
         stuck_error = (
@@ -1639,8 +1587,8 @@ async def _build_execute_system_prompt(
     if _spec_for_hint and _spec_for_hint.is_complete:
         structured_params_hint = (
             f"scope={_spec_for_hint.scope}, "
-            f"target={_spec_for_hint.blade_target}, "
-            f"action={_spec_for_hint.blade_action}"
+            f"target={_spec_for_hint.fault_target}, "
+            f"action={_spec_for_hint.fault_action}"
         )
     # Build user_params_hint from FaultSpec.params so user-specified
     # values (e.g. finalizer=...) take priority over skill template
@@ -1836,27 +1784,35 @@ def make_execute_loop(hook=None, llm=None, tools=None, skill_catalog="", env_inf
         if _ledger_seeded:
             result["progress_ledger"] = _ledger
 
-        # Extract blade_uid from ToolMessages (blade_create results)
+        # Extract experiment_uid from ToolMessages (blade_create results)
         messages = state.get("messages", [])
         fault_spec = read_fault_spec(state)
         artifacts = collect_execution_artifacts(
             messages,
             state.get("execution_artifacts"),
             task_id=task_id,
-            operation_family=(fault_spec.blade_target if fault_spec else ""),
+            operation_family=(fault_spec.fault_target if fault_spec else ""),
         )
         if artifacts != (state.get("execution_artifacts") or []):
             result["execution_artifacts"] = artifacts
 
-        blade_uid = _extract_blade_uid_from_messages(
-            messages, retired=state.get("retired_blade_uids"),
+        # Extract the live experiment UID through the registry: each
+        # UID-bearing provider scans for its own experiment id, so this loop
+        # never names a carrier-specific extractor.
+        from chaos_agent.agent.providers import FaultProviderRegistry
+        from chaos_agent.transports.registry import is_host_scope_channel
+
+        experiment_uid = FaultProviderRegistry.extract_experiment_uid(
+            messages,
+            retired=state.get("retired_experiment_uids"),
+            is_host=is_host_scope_channel(state),
         )
-        if blade_uid and blade_uid != state.get("blade_uid"):
-            result["blade_uid"] = blade_uid
-            logger.info(f"Extracted blade_uid from ToolMessage: {blade_uid}")
+        if experiment_uid and experiment_uid != state.get("experiment_uid"):
+            result["experiment_uid"] = experiment_uid
+            logger.info(f"Extracted experiment UID from ToolMessage: {experiment_uid}")
             if not state.get("injection_start_time"):
                 result["injection_start_time"] = now_iso()
-                logger.info("Set injection_start_time (blade_uid first seen)")
+                logger.info("Set injection_start_time (experiment UID first seen)")
 
         # Detect injection method for verifier Layer 1 strategy selection.
         # Direction B: injection_method is recorded at ISSUE time (channel A) by
@@ -1867,25 +1823,35 @@ def make_execute_loop(hook=None, llm=None, tools=None, skill_catalog="", env_inf
         #     a restart, where the injection lives in history (not this turn's
         #     response, which channel A can no longer see); also covers the
         #     first injection turn until channel A sets it below.
-        #   - blade_uid appeared AND current method is the provisional multi-step
+        #   - experiment_uid appeared AND current method is the provisional multi-step
         #     kubectl_native → UPGRADE it to the experiment backend (host_blade /
         #     kubectl_exec). This is the one thing channel A structurally cannot
         #     do: the UID only exists in the tool RESULT, not the issue-time call.
         # Steady state (method already set, no upgrade trigger) skips the scan.
-        from chaos_agent.agent.providers import FaultProviderRegistry
-        from chaos_agent.transports.registry import is_host_scope_channel
         current_injection_method = state.get("injection_method") or result.get("injection_method")
         _cur_provider = FaultProviderRegistry.resolve_by_method(current_injection_method)
-        if _should_redetect_injection_method(current_injection_method, blade_uid):
+
+        # REVOCATION (channel B result-awareness): issue-time attribution was
+        # recorded BEFORE the tool result existed, so a UID-less native method
+        # can be committed for an attempt that provably failed. A proven-failed
+        # attribution is cleared so downstream gates (REPLAN_EXHAUSTED context,
+        # verifier routing, the tail projection) never treat a failed attempt
+        # as a live fault. The attempt itself remains replan evidence via the
+        # epoch scan in ``_injection_attempted_this_contract``.
+        _revoked = _maybe_revoke_issue_time_attribution(
+            state, result, messages, current_injection_method
+        )
+
+        if not _revoked and _should_redetect_injection_method(current_injection_method, experiment_uid):
             detected_method = _detect_injection_method(
                 _epoch_bounded_messages(messages, state),
-                blade_uid,
                 is_host=is_host_scope_channel(state),
             )
             if detected_method and detected_method != current_injection_method:
                 _new_provider = FaultProviderRegistry.resolve_by_method(detected_method)
+                _committed_this_scan = False
                 # Experiment-carrying method wins over a provisional multi-step one:
-                # if a blade_uid appeared, upgrade the multi-step backend (kubectl_native)
+                # if a experiment_uid appeared, upgrade the multi-step backend (kubectl_native)
                 # to the experiment backend (host_blade / kubectl_exec).
                 if (
                     _cur_provider is not None
@@ -1894,30 +1860,83 @@ def make_execute_loop(hook=None, llm=None, tools=None, skill_catalog="", env_inf
                     and _new_provider.has_experiment_uid
                 ):
                     result["injection_method"] = detected_method
+                    _committed_this_scan = True
                     # COMBO (native-first order): the provisional native
                     # injection committed at issue time DID mutate the target,
                     # and the blade experiment succeeded too — both vehicles
                     # acted. Mark the combo durably so recovery routes to the
                     # LLM-driven Layer-1 flow (deterministic destroy would
                     # leak the native mutation — see combo_native_issued).
-                    result["combo_native_issued"] = True
-                    logger.info(
-                        f"Upgraded injection_method: {current_injection_method} → {detected_method} "
-                        f"(combo marked — native component needs LLM undo)"
+                    # EXCEPT when the native component is PROVEN failed: then
+                    # only the experiment acted — upgrade WITHOUT the combo
+                    # mark so recovery stays deterministic.
+                    _native_disproven = _issue_disproven_in_epoch(
+                        state, messages, _cur_provider
                     )
+                    if _native_disproven:
+                        logger.info(
+                            f"Upgraded injection_method: {current_injection_method} → {detected_method} "
+                            f"(native component proven failed — no combo mark)"
+                        )
+                    else:
+                        result["combo_native_issued"] = True
+                        logger.info(
+                            f"Upgraded injection_method: {current_injection_method} → {detected_method} "
+                            f"(combo marked — native component needs LLM undo)"
+                        )
                 elif not current_injection_method:
+                    # RESUME re-attribution must not resurrect a PROVEN-FAILED
+                    # attempt: the same counter-evidence that revokes it vetoes
+                    # the restore — otherwise revocation and RESUME would
+                    # oscillate every iteration (RESUME's detect keys on the
+                    # attempt, which a failed attempt still satisfies).
+                    _resume_ok = not _issue_disproven_in_epoch(
+                        state, messages, _new_provider
+                    )
+                    if _resume_ok:
+                        result["injection_method"] = detected_method
+                        _committed_this_scan = True
+                        logger.info(f"Detected injection_method: {detected_method}")
+                elif (
+                    _cur_provider is not None
+                    and _cur_provider.has_experiment_uid
+                    and not experiment_uid
+                    and not state.get("experiment_uid")
+                    and _new_provider is not None
+                    and not _new_provider.has_experiment_uid
+                ):
+                    # DOWNGRADE (task-51193464): the current experiment-method
+                    # attribution has gone unfulfilled (no UID ever appeared)
+                    # while the registry's RECENCY arbitration now recognises
+                    # a MORE-RECENT UID-less native injection — the original
+                    # attribution was a mis-read (e.g. a k8s object uid taken
+                    # for blade evidence). Correct it to the native backend so
+                    # the fault-handle projection can claim the fault and the
+                    # verifier gate opens. If a genuine blade experiment later
+                    # lands its UID, the UPGRADE branch above re-promotes the
+                    # attribution and marks the combo — no recovery coverage
+                    # is lost by this correction.
                     result["injection_method"] = detected_method
-                    logger.info(f"Detected injection_method: {detected_method}")
-                # Set injection_start_time for non-ChaosBlade methods too.
-                if not state.get("injection_start_time") and "injection_start_time" not in result:
+                    _committed_this_scan = True
+                    logger.info(
+                        f"Downgraded injection_method: {current_injection_method} → {detected_method} "
+                        "(experiment attribution unfulfilled — no UID; native "
+                        "evidence is more recent)"
+                    )
+                # Set injection_start_time for non-ChaosBlade methods too —
+                # only when this scan actually committed an attribution.
+                if _committed_this_scan and not state.get("injection_start_time") and "injection_start_time" not in result:
                     result["injection_start_time"] = now_iso()
                     logger.info("Set injection_start_time (%s detected)", detected_method or current_injection_method)
 
         # Extract kubectl exec injection pod name for verifier preference
         current_pod_name = state.get("kubectl_exec_pod_name")
         if not current_pod_name:
-            from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
-            pod_name = _extract_kubectl_exec_pod_name(messages)
+            from chaos_agent.agent.providers import FaultProviderRegistry
+
+            pod_name = FaultProviderRegistry.extract_kubectl_exec_pod_name(
+                messages
+            )
             if pod_name:
                 result["kubectl_exec_pod_name"] = pod_name
                 logger.info(f"Recorded kubectl exec pod name: {pod_name}")
@@ -1999,8 +2018,7 @@ def make_execute_loop(hook=None, llm=None, tools=None, skill_catalog="", env_inf
 
         # --- Last-iteration failure attribution ---
         if count >= MAX_EXECUTE_LOOP:
-            existing_uid = result.get("blade_uid") or state.get("blade_uid")
-            if not existing_uid:
+            if not has_active_fault({**state, **result}):
                 _fs = fail_state(
                     FailureCategory.EXECUTION_TIMEOUT,
                     f"max_iterations={MAX_EXECUTE_LOOP}",
@@ -2014,6 +2032,10 @@ def make_execute_loop(hook=None, llm=None, tools=None, skill_catalog="", env_inf
         # with the LLM channels on the same review + seam writer (see the
         # function docstring for the broken path this replaces).
         _maybe_auto_trigger_replan(state, result)
+
+        # Fault-handle sync — the single projection point (see the helper
+        # docstring for the ordering contract it enforces).
+        _project_fault_handle(state, result)
 
         # Replan must not carry helper pods from the failed execution attempt
         # into a newly approved plan. This is artifact cleanup, not fault

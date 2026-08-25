@@ -296,7 +296,7 @@ class TestTruncatedTurnRecordsNoEffects:
             "operation": "inject",
             "agent_loop_count": 0,
             "messages": [],
-            "fault_spec": {"scope": "pod", "blade_target": "cpu", "blade_action": "fullload"},
+            "fault_spec": {"scope": "pod", "fault_target": "cpu", "fault_action": "fullload"},
         })
 
     async def test_skill_name_is_not_recorded_on_a_truncated_turn(self, monkeypatch):

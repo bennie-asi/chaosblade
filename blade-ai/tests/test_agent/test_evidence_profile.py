@@ -4,7 +4,7 @@ from chaos_agent.agent.spec.fault_spec import FaultSpec
 
 def test_k8s_evidence_profile_requires_identity_primary_and_cross_metric():
     profile = EvidenceProfile.for_fault(
-        FaultSpec(scope="pod", names=("api-0",), blade_target="cpu"), "k8s",
+        FaultSpec(scope="pod", names=("api-0",), fault_target="cpu"), "k8s",
     )
 
     incomplete = profile.coverage([
@@ -21,7 +21,7 @@ def test_k8s_evidence_profile_requires_identity_primary_and_cross_metric():
 
 def test_host_evidence_profile_requires_explicit_host_identity():
     profile = EvidenceProfile.for_fault(
-        FaultSpec(scope="node", blade_target="mem"), "host",
+        FaultSpec(scope="node", fault_target="mem"), "host",
     )
     coverage = profile.coverage([
         {"description": "Host memory", "command": "free -m"},
@@ -33,7 +33,7 @@ def test_host_evidence_profile_requires_explicit_host_identity():
 
 def test_a_single_observation_cannot_satisfy_primary_and_cross_evidence():
     profile = EvidenceProfile.for_fault(
-        FaultSpec(scope="host", blade_target="mem"), "host",
+        FaultSpec(scope="host", fault_target="mem"), "host",
     )
 
     coverage = profile.coverage([
@@ -99,7 +99,7 @@ def test_execution_location_suffix_cannot_fake_coverage():
     from chaos_agent.transports.base import TransportTarget
     from chaos_agent.transports.channels import KubewizHostChannel
 
-    spec = FaultSpec(scope="host", blade_target="network")
+    spec = FaultSpec(scope="host", fault_target="network")
     profile = EvidenceProfile.for_fault(spec, PROFILE_HOST)
 
     target = TransportTarget(

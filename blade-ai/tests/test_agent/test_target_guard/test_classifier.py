@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import pytest
 
+from chaos_agent.agent.providers.chaosblade.provider import BLADE_TARGET_TO_SCOPE
 from chaos_agent.agent.target_guard.classifier import (
-    BLADE_TARGET_TO_SCOPE,
     SCOPE_BANNED,
     SCOPE_ESCAPE,
     SCOPE_READONLY,
@@ -40,18 +40,34 @@ class TestCanonicaliseKind:
     @pytest.mark.parametrize(
         "raw, expected",
         [
-            ("pod", "pod"), ("pods", "pod"), ("po", "pod"), ("POD", "pod"),
-            ("deploy", "deployment"), ("deployment", "deployment"),
-            ("deployments", "deployment"), ("deployment.apps", "deployment"),
+            ("pod", "pod"),
+            ("pods", "pod"),
+            ("po", "pod"),
+            ("POD", "pod"),
+            ("deploy", "deployment"),
+            ("deployment", "deployment"),
+            ("deployments", "deployment"),
+            ("deployment.apps", "deployment"),
             ("deployment.v1.apps", "deployment"),
-            ("svc", "service"), ("service", "service"), ("services", "service"),
-            ("ns", "namespace"), ("namespace", "namespace"),
-            ("ds", "daemonset"), ("sts", "statefulset"), ("rs", "replicaset"),
-            ("hpa", "hpa"), ("cronjob", "cronjob"), ("cj", "cronjob"),
-            ("cm", "configmap"), ("secret", "secret"),
-            ("pvc", "pvc"), ("persistentvolumeclaim", "pvc"),
-            ("storageclass", "storageclass"), ("sc", "storageclass"),
-            ("no", "node"), ("nodes", "node"),
+            ("svc", "service"),
+            ("service", "service"),
+            ("services", "service"),
+            ("ns", "namespace"),
+            ("namespace", "namespace"),
+            ("ds", "daemonset"),
+            ("sts", "statefulset"),
+            ("rs", "replicaset"),
+            ("hpa", "hpa"),
+            ("cronjob", "cronjob"),
+            ("cj", "cronjob"),
+            ("cm", "configmap"),
+            ("secret", "secret"),
+            ("pvc", "pvc"),
+            ("persistentvolumeclaim", "pvc"),
+            ("storageclass", "storageclass"),
+            ("sc", "storageclass"),
+            ("no", "node"),
+            ("nodes", "node"),
         ],
     )
     def test_canonical_form(self, raw, expected):
@@ -125,7 +141,8 @@ class TestParseLabels:
 
     def test_multi_pair(self):
         assert parse_labels(["-l", "app=demo,env=prod"]) == {
-            "app": "demo", "env": "prod",
+            "app": "demo",
+            "env": "prod",
         }
 
     def test_operator_selector_preserved_verbatim(self):
@@ -148,10 +165,15 @@ class TestKnownReadOnlyTools:
     @pytest.mark.parametrize(
         "tool",
         [
-            "blade_status", "blade_query_k8s",
-            "read_knowledge_resource", "read_skill_resource",
-            "activate_skill", "submit_fault_intent",
-            "host_read", "read_file", "save_fault_plan",
+            "blade_status",
+            "blade_query_k8s",
+            "read_knowledge_resource",
+            "read_skill_resource",
+            "activate_skill",
+            "submit_fault_intent",
+            "host_read",
+            "read_file",
+            "save_fault_plan",
             "finish_planning",
         ],
     )
@@ -175,7 +197,8 @@ class TestSkillScriptDefaultBan:
         # signal. Previously this returned UNKNOWN which still got
         # rejected — making the opt-in flag a no-op.
         et = infer_effective_target(
-            "_execute_skill_script", {"path": "/foo"},
+            "_execute_skill_script",
+            {"path": "/foo"},
             skill_script_allowed=True,
         )
         assert et.scope == SCOPE_READONLY
@@ -215,42 +238,69 @@ class TestContainerScopeMapsToPod:
         assert canonicalise_kind("CONTAINER") == "pod"
 
     def test_blade_create_container_scope_resolves_to_pod(self):
-        et = infer_effective_target("blade_create", {
-            "scope": "container", "target": "cpu", "action": "fullload",
-            "namespace": "ns", "names": ["p1"],
-        })
+        et = infer_effective_target(
+            "blade_create",
+            {
+                "scope": "container",
+                "target": "cpu",
+                "action": "fullload",
+                "namespace": "ns",
+                "names": ["p1"],
+            },
+        )
         assert et.scope == "pod"
         assert et.namespace == "ns"
 
     def test_inline_blade_container_subtype_resolves_to_pod(self):
         # `kubectl exec POD -- blade create k8s container-cpu fullload`
-        et = infer_effective_target("kubectl", [
-            "exec", "p1", "-n", "ns", "--",
-            "blade", "create", "k8s", "container-cpu", "fullload",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "p1",
+                "-n",
+                "ns",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "container-cpu",
+                "fullload",
+            ],
+        )
         assert et.scope == "pod"
         assert et.names == ("p1",)
 
 
 class TestBladeCreate:
     def test_pod_cpu(self):
-        et = infer_effective_target("blade_create", {
-            "scope": "pod", "target": "cpu", "action": "fullload",
-            "namespace": "prod", "names": ["pod-a"],
-        })
+        et = infer_effective_target(
+            "blade_create",
+            {
+                "scope": "pod",
+                "target": "cpu",
+                "action": "fullload",
+                "namespace": "prod",
+                "names": ["pod-a"],
+            },
+        )
         assert et.scope == "pod"
         assert et.namespace == "prod"
         assert et.names == ("pod-a",)
-        assert et.blade_target == "cpu"
-        assert et.blade_action == "fullload"
+        assert et.fault_target == "cpu"
+        assert et.fault_action == "fullload"
         assert et.confidence == ConfidenceLevel.HIGH
 
     def test_node_cpu_host_mode(self):
         # blade target=cpu without explicit scope → BLADE_TARGET_TO_SCOPE
         # picks "node" (host blade burns CPU on the node).
-        et = infer_effective_target("blade_create", {
-            "target": "cpu", "action": "fullload",
-        })
+        et = infer_effective_target(
+            "blade_create",
+            {
+                "target": "cpu",
+                "action": "fullload",
+            },
+        )
         assert et.scope == "node"
         # Cluster-scoped → namespace stays empty
         assert et.namespace == ""
@@ -258,33 +308,51 @@ class TestBladeCreate:
     def test_namespace_defaulted(self):
         # Missing namespace on a namespace-scoped scope normalises
         # to "default" so guard comparison doesn't false-positive.
-        et = infer_effective_target("blade_create", {
-            "scope": "pod", "target": "jvm", "names": ["p1"],
-        })
+        et = infer_effective_target(
+            "blade_create",
+            {
+                "scope": "pod",
+                "target": "jvm",
+                "names": ["p1"],
+            },
+        )
         assert et.namespace == "default"
 
     def test_names_as_csv_string(self):
         # Some callers pass names as a CSV string instead of a list.
-        et = infer_effective_target("blade_create", {
-            "scope": "pod", "target": "cpu", "names": "a,b,c",
-            "namespace": "ns",
-        })
+        et = infer_effective_target(
+            "blade_create",
+            {
+                "scope": "pod",
+                "target": "cpu",
+                "names": "a,b,c",
+                "namespace": "ns",
+            },
+        )
         assert et.names == ("a", "b", "c")
 
     def test_labels_dict(self):
-        et = infer_effective_target("blade_create", {
-            "scope": "pod", "target": "cpu",
-            "labels": {"app": "demo", "env": "prod"},
-            "namespace": "ns",
-        })
+        et = infer_effective_target(
+            "blade_create",
+            {
+                "scope": "pod",
+                "target": "cpu",
+                "labels": {"app": "demo", "env": "prod"},
+                "namespace": "ns",
+            },
+        )
         assert et.labels == {"app": "demo", "env": "prod"}
 
     def test_labels_string(self):
-        et = infer_effective_target("blade_create", {
-            "scope": "pod", "target": "cpu",
-            "labels": "app=demo,env=prod",
-            "namespace": "ns",
-        })
+        et = infer_effective_target(
+            "blade_create",
+            {
+                "scope": "pod",
+                "target": "cpu",
+                "labels": "app=demo,env=prod",
+                "namespace": "ns",
+            },
+        )
         assert et.labels == {"app": "demo", "env": "prod"}
 
     def test_no_target_unknown_scope(self):
@@ -295,9 +363,14 @@ class TestBladeCreate:
     def test_low_confidence_when_no_names_no_labels(self):
         # blade_create with scope/target but no names or labels can't
         # pin down a specific resource — LOW confidence.
-        et = infer_effective_target("blade_create", {
-            "scope": "pod", "target": "cpu", "namespace": "ns",
-        })
+        et = infer_effective_target(
+            "blade_create",
+            {
+                "scope": "pod",
+                "target": "cpu",
+                "namespace": "ns",
+            },
+        )
         assert et.confidence == ConfidenceLevel.LOW
 
 
@@ -389,17 +462,32 @@ class TestKubectlBanned:
 
 class TestKubectlScale:
     def test_scale_with_slash_form(self):
-        et = infer_effective_target("kubectl", [
-            "scale", "deploy/myapp", "--replicas=0", "-n", "prod",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "scale",
+                "deploy/myapp",
+                "--replicas=0",
+                "-n",
+                "prod",
+            ],
+        )
         assert et.scope == "deployment"
         assert et.namespace == "prod"
         assert et.names == ("myapp",)
 
     def test_scale_with_separate_form(self):
-        et = infer_effective_target("kubectl", [
-            "scale", "deployment", "myapp", "--replicas=3", "-n", "prod",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "scale",
+                "deployment",
+                "myapp",
+                "--replicas=3",
+                "-n",
+                "prod",
+            ],
+        )
         assert et.scope == "deployment"
         assert et.names == ("myapp",)
         assert et.namespace == "prod"
@@ -418,16 +506,28 @@ class TestKubectlNodeOps:
         assert et.namespace == ""  # cluster-scoped
 
     def test_taint(self):
-        et = infer_effective_target("kubectl", [
-            "taint", "nodes", "node-1", "key=value:NoSchedule",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "taint",
+                "nodes",
+                "node-1",
+                "key=value:NoSchedule",
+            ],
+        )
         assert et.scope == "node"
         assert et.names == ("node-1",)
 
     def test_taint_with_short_kind(self):
-        et = infer_effective_target("kubectl", [
-            "taint", "no", "node-1", "key=value:NoSchedule",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "taint",
+                "no",
+                "node-1",
+                "key=value:NoSchedule",
+            ],
+        )
         assert et.scope == "node"
 
 
@@ -442,27 +542,48 @@ class TestKubectlPatchSetDelete:
     # coverage in ``test_kubectl_arg_shapes.py::TestKubectlSet``.
     @pytest.mark.parametrize("sub", ["patch", "delete", "edit", "label", "annotate"])
     def test_basic_resource_op(self, sub):
-        et = infer_effective_target("kubectl", [
-            sub, "deploy/x", "-n", "prod",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                sub,
+                "deploy/x",
+                "-n",
+                "prod",
+            ],
+        )
         assert et.scope == "deployment"
         assert et.namespace == "prod"
         assert et.names == ("x",)
 
     def test_delete_by_label_selector(self):
         # delete pod -l app=x → labels-based selection, names empty
-        et = infer_effective_target("kubectl", [
-            "delete", "pod", "-l", "app=x", "-n", "prod",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "delete",
+                "pod",
+                "-l",
+                "app=x",
+                "-n",
+                "prod",
+            ],
+        )
         assert et.scope == "pod"
         assert et.labels == {"app": "x"}
 
 
 class TestKubectlRun:
     def test_run_creates_pod(self):
-        et = infer_effective_target("kubectl", [
-            "run", "tester", "--image=busybox", "-n", "ns",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "run",
+                "tester",
+                "--image=busybox",
+                "-n",
+                "ns",
+            ],
+        )
         assert et.scope == "pod"
         assert et.names == ("tester",)
         assert et.namespace == "ns"
@@ -470,26 +591,45 @@ class TestKubectlRun:
 
 class TestKubectlRollout:
     def test_rollout_restart_destructive(self):
-        et = infer_effective_target("kubectl", [
-            "rollout", "restart", "deploy/myapp", "-n", "prod",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "rollout",
+                "restart",
+                "deploy/myapp",
+                "-n",
+                "prod",
+            ],
+        )
         assert et.scope == "deployment"
         assert et.names == ("myapp",)
 
 
 class TestKubectlCp:
     def test_cp_with_namespace_in_path(self):
-        et = infer_effective_target("kubectl", [
-            "cp", "prod/pod-a:/src", "/local",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "cp",
+                "prod/pod-a:/src",
+                "/local",
+            ],
+        )
         assert et.scope == "pod"
         assert et.namespace == "prod"
         assert et.names == ("pod-a",)
 
     def test_cp_with_flag_namespace(self):
-        et = infer_effective_target("kubectl", [
-            "cp", "pod-a:/src", "/local", "-n", "prod",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "cp",
+                "pod-a:/src",
+                "/local",
+                "-n",
+                "prod",
+            ],
+        )
         assert et.scope == "pod"
         assert et.namespace == "prod"
         assert et.names == ("pod-a",)
@@ -497,16 +637,27 @@ class TestKubectlCp:
 
 class TestKubectlDebug:
     def test_debug_node(self):
-        et = infer_effective_target("kubectl", [
-            "debug", "node/node-1", "--image=busybox",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "debug",
+                "node/node-1",
+                "--image=busybox",
+            ],
+        )
         assert et.scope == "node"
         assert et.names == ("node-1",)
 
     def test_debug_pod(self):
-        et = infer_effective_target("kubectl", [
-            "debug", "pod-a", "-n", "ns",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "debug",
+                "pod-a",
+                "-n",
+                "ns",
+            ],
+        )
         assert et.scope == "pod"
         assert et.names == ("pod-a",)
 
@@ -519,24 +670,52 @@ class TestKubectlDebug:
 class TestKubectlExec:
     def test_exec_plain_shell_acts_on_pod(self):
         # A MUTATING plain shell command inside the pod acts on the pod itself.
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "-n", "ns", "--", "rm", "-rf", "/data/x",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "-n",
+                "ns",
+                "--",
+                "rm",
+                "-rf",
+                "/data/x",
+            ],
+        )
         assert et.scope == "pod"
         assert et.names == ("pod-a",)
         assert et.namespace == "ns"
 
     def test_exec_readonly_shell_is_readonly(self):
         # A read-only probe inside the pod is READONLY (no target comparison).
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "-n", "ns", "--", "cat", "/proc/diskstats",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "-n",
+                "ns",
+                "--",
+                "cat",
+                "/proc/diskstats",
+            ],
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_exec_iptables_list_is_readonly(self):
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "-n", "ns", "--", "iptables", "-L",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "-n",
+                "ns",
+                "--",
+                "iptables",
+                "-L",
+            ],
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_exec_no_inner_cmd_still_pod(self):
@@ -549,34 +728,71 @@ class TestKubectlExec:
         # The most important case: kubectl exec POD -- blade create k8s pod-cpu
         # should RECURSE into the inner blade and report the inner
         # target. With no --names in inner, it inherits the host pod.
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "-n", "ns", "--",
-            "blade", "create", "k8s", "pod-cpu", "fullload",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "-n",
+                "ns",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "pod-cpu",
+                "fullload",
+            ],
+        )
         assert et.scope == "pod"
         assert et.names == ("pod-a",)
-        assert et.blade_target == "cpu"
-        assert et.blade_action == "fullload"
+        assert et.fault_target == "cpu"
+        assert et.fault_action == "fullload"
 
     def test_exec_blade_NODE_cpu_escapes_to_node(self):
         # THE critical drift case: exec into approved pod-a but use
         # blade to act on a NODE. Classifier MUST detect this and
         # report scope=node so the guard can catch the escape.
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "-n", "ns", "--",
-            "blade", "create", "k8s", "node-cpu", "fullload",
-            "--node", "node-7",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "-n",
+                "ns",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "node-cpu",
+                "fullload",
+                "--node",
+                "node-7",
+            ],
+        )
         assert et.scope == "node"
         assert et.names == ("node-7",)
         assert et.namespace == ""  # node is cluster-scoped
 
     def test_exec_blade_with_explicit_names_flag(self):
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "-n", "ns", "--",
-            "blade", "create", "k8s", "pod-cpu", "fullload",
-            "--names", "pod-b,pod-c", "-n", "other-ns",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "-n",
+                "ns",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "pod-cpu",
+                "fullload",
+                "--names",
+                "pod-b,pod-c",
+                "-n",
+                "other-ns",
+            ],
+        )
         assert et.scope == "pod"
         # Inner --names override the outer pod
         assert et.names == ("pod-b", "pod-c")
@@ -584,10 +800,20 @@ class TestKubectlExec:
 
     def test_exec_nested_kubectl_inherits_outer_ns(self):
         # kubectl-inside-pod usually inherits the pod's ambient ns
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "-n", "ns", "--",
-            "kubectl", "scale", "deploy/x", "--replicas=0",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "-n",
+                "ns",
+                "--",
+                "kubectl",
+                "scale",
+                "deploy/x",
+                "--replicas=0",
+            ],
+        )
         assert et.scope == "deployment"
         assert et.namespace == "ns"
         assert et.names == ("x",)
@@ -599,9 +825,19 @@ class TestKubectlExec:
         # nsenter / chroot / unshare break out of container — default-deny
         # via dedicated SCOPE_ESCAPE so the guard can give the LLM the
         # truthful reason (security policy, not "unrecognised command").
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "--", escape_cmd, "-t", "1", "-m", "bash",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "--",
+                escape_cmd,
+                "-t",
+                "1",
+                "-m",
+                "bash",
+            ],
+        )
         assert et.scope == SCOPE_ESCAPE
         assert et.confidence == ConfidenceLevel.UNKNOWN
 
@@ -614,12 +850,27 @@ class TestKubectlExec:
         omits --namespace (blade v1.8.0 rejects it for pod-network).
         Classifier must set is_tier1_exec=True and NOT default ns to
         'default'."""
-        et = infer_effective_target("kubectl", [
-            "exec", "otel-c-tool-5pmkc", "-n", "chaosblade", "--",
-            "blade", "create", "k8s", "pod-network", "drop",
-            "--names", "accounting-6fbdb464c7-qn2vr",
-            "--percent", "100", "--interface", "eth0",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "otel-c-tool-5pmkc",
+                "-n",
+                "chaosblade",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "pod-network",
+                "drop",
+                "--names",
+                "accounting-6fbdb464c7-qn2vr",
+                "--percent",
+                "100",
+                "--interface",
+                "eth0",
+            ],
+        )
         assert et.scope == "pod"
         assert et.names == ("accounting-6fbdb464c7-qn2vr",)
         assert et.is_tier1_exec is True
@@ -628,12 +879,25 @@ class TestKubectlExec:
     def test_exec_tier1_tool_pod_with_namespace_in_blade(self):
         """When inner blade DOES specify --namespace, tier1 is False
         (namespace is explicitly provided, normal comparison applies)."""
-        et = infer_effective_target("kubectl", [
-            "exec", "otel-c-tool-5pmkc", "-n", "chaosblade", "--",
-            "blade", "create", "k8s", "pod-cpu", "fullload",
-            "--names", "accounting-6fbdb464c7-qn2vr",
-            "--namespace", "cms-demo",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "otel-c-tool-5pmkc",
+                "-n",
+                "chaosblade",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "pod-cpu",
+                "fullload",
+                "--names",
+                "accounting-6fbdb464c7-qn2vr",
+                "--namespace",
+                "cms-demo",
+            ],
+        )
         assert et.scope == "pod"
         assert et.namespace == "cms-demo"
         assert et.is_tier1_exec is False
@@ -641,10 +905,21 @@ class TestKubectlExec:
     def test_exec_non_tool_ns_no_namespace_defaults_normally(self):
         """When outer exec is NOT into chaosblade ns, standard defaulting
         applies (ns defaults to 'default' when --namespace absent)."""
-        et = infer_effective_target("kubectl", [
-            "exec", "some-pod", "-n", "app-ns", "--",
-            "blade", "create", "k8s", "pod-cpu", "fullload",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "some-pod",
+                "-n",
+                "app-ns",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "pod-cpu",
+                "fullload",
+            ],
+        )
         assert et.scope == "pod"
         assert et.namespace == "default"
         assert et.is_tier1_exec is False
@@ -659,31 +934,71 @@ class TestHelpFlagReadonly:
     """Commands with -h/--help should classify as READONLY."""
 
     def test_exec_inner_blade_create_drop_help(self):
-        et = infer_effective_target("kubectl", [
-            "exec", "otel-c-tool-5pmkc", "-n", "chaosblade", "--",
-            "blade", "create", "k8s", "pod-network", "drop", "-h",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "otel-c-tool-5pmkc",
+                "-n",
+                "chaosblade",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "pod-network",
+                "drop",
+                "-h",
+            ],
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_exec_inner_blade_short_help(self):
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "-n", "ns", "--",
-            "blade", "-h",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "-n",
+                "ns",
+                "--",
+                "blade",
+                "-h",
+            ],
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_exec_inner_blade_long_help(self):
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "-n", "ns", "--",
-            "blade", "create", "--help",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "-n",
+                "ns",
+                "--",
+                "blade",
+                "create",
+                "--help",
+            ],
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_exec_inner_blade_subtype_help(self):
-        et = infer_effective_target("kubectl", [
-            "exec", "pod-a", "-n", "ns", "--",
-            "blade", "create", "k8s", "pod-network", "-h",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "pod-a",
+                "-n",
+                "ns",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "pod-network",
+                "-h",
+            ],
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_kubectl_exec_help(self):
@@ -699,7 +1014,9 @@ class TestHelpFlagReadonly:
         assert et.scope == SCOPE_READONLY
 
     def test_blade_help_tool_readonly(self):
-        et = infer_effective_target("blade_help", {"subcommand": "create k8s pod-network drop"})
+        et = infer_effective_target(
+            "blade_help", {"subcommand": "create k8s pod-network drop"}
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_blade_help_tool_empty_subcommand(self):
@@ -716,28 +1033,59 @@ class TestBladeNonCreateReadonly:
     """blade status/destroy/query inside kubectl exec should be READONLY."""
 
     def test_blade_status_inside_exec_is_readonly(self):
-        et = infer_effective_target("kubectl", [
-            "exec", "otel-c-tool-5pmkc", "-n", "chaosblade", "--",
-            "blade", "status", "98f70a1b2c3d4e5f",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "otel-c-tool-5pmkc",
+                "-n",
+                "chaosblade",
+                "--",
+                "blade",
+                "status",
+                "98f70a1b2c3d4e5f",
+            ],
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_blade_destroy_inside_exec_is_readonly(self):
-        et = infer_effective_target("kubectl", [
-            "exec", "otel-c-tool-5pmkc", "-n", "chaosblade", "--",
-            "blade", "destroy", "98f70a1b2c3d4e5f",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "otel-c-tool-5pmkc",
+                "-n",
+                "chaosblade",
+                "--",
+                "blade",
+                "destroy",
+                "98f70a1b2c3d4e5f",
+            ],
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_blade_create_with_labels_no_fallback_pod_name(self):
         """When --labels is specified, effective_names should be empty
         (not the tool pod name)."""
-        et = infer_effective_target("kubectl", [
-            "exec", "otel-c-tool-5pmkc", "-n", "chaosblade", "--",
-            "blade", "create", "k8s", "pod-network", "drop",
-            "--labels", "app.kubernetes.io/name=accounting",
-            "--namespace", "cms-demo",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "exec",
+                "otel-c-tool-5pmkc",
+                "-n",
+                "chaosblade",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "pod-network",
+                "drop",
+                "--labels",
+                "app.kubernetes.io/name=accounting",
+                "--namespace",
+                "cms-demo",
+            ],
+        )
         assert et.scope == "pod"
         assert et.namespace == "cms-demo"
         assert et.names == ()
@@ -757,8 +1105,18 @@ class TestBladeTargetMapping:
 
     def test_host_targets_resolve_to_node(self):
         # cpu/mem/disk/network without k8s prefix → host = node
-        for t in ("cpu", "mem", "memory", "disk", "network", "process",
-                  "file", "script", "time", "kernel"):
+        for t in (
+            "cpu",
+            "mem",
+            "memory",
+            "disk",
+            "network",
+            "process",
+            "file",
+            "script",
+            "time",
+            "kernel",
+        ):
             assert BLADE_TARGET_TO_SCOPE[t] == "node"
 
 
@@ -769,25 +1127,45 @@ class TestBladeTargetMapping:
 
 class TestGlobalFlagSkipping:
     def test_global_kubeconfig_flag_skipped(self):
-        et = infer_effective_target("kubectl", [
-            "--kubeconfig", "/tmp/kc", "scale", "deploy/x",
-            "--replicas=0", "-n", "prod",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "--kubeconfig",
+                "/tmp/kc",
+                "scale",
+                "deploy/x",
+                "--replicas=0",
+                "-n",
+                "prod",
+            ],
+        )
         assert et.scope == "deployment"
         assert et.names == ("x",)
 
     def test_global_context_flag_skipped(self):
-        et = infer_effective_target("kubectl", [
-            "--context", "prod", "get", "pods",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "--context",
+                "prod",
+                "get",
+                "pods",
+            ],
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_global_namespace_picked_up(self):
         # `--namespace=foo scale deploy/x` — global ns is still
         # recognised by parse_namespace (it scans whole arg list).
-        et = infer_effective_target("kubectl", [
-            "--namespace=foo", "scale", "deploy/x", "--replicas=0",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "--namespace=foo",
+                "scale",
+                "deploy/x",
+                "--replicas=0",
+            ],
+        )
         assert et.namespace == "foo"
 
 
@@ -809,9 +1187,17 @@ class TestParseStopsAtDoubleDash:
 
     def test_parse_namespace_picks_outer_before_double_dash(self):
         # Outer DOES have -n; inner also has -n. Outer wins.
-        ns = parse_namespace([
-            "POD", "-n", "outer", "--", "prog", "-n", "inner",
-        ])
+        ns = parse_namespace(
+            [
+                "POD",
+                "-n",
+                "outer",
+                "--",
+                "prog",
+                "-n",
+                "inner",
+            ]
+        )
         assert ns == "outer"
 
     def test_parse_labels_stops_at_double_dash(self):
@@ -829,10 +1215,18 @@ class TestExecGlobalNamespaceNotLeaked:
         # Global --namespace=foo BEFORE the subcommand, exec with
         # inner program that has its own -n. Previously the inner -n
         # leaked into parse_namespace and produced ns=inner.
-        et = infer_effective_target("kubectl", [
-            "--namespace=foo", "exec", "pod-a", "--",
-            "prog", "-n", "inner-ns",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "--namespace=foo",
+                "exec",
+                "pod-a",
+                "--",
+                "prog",
+                "-n",
+                "inner-ns",
+            ],
+        )
         assert et.scope == "pod"
         assert et.namespace == "foo"
         assert et.names == ("pod-a",)
@@ -847,23 +1241,45 @@ class TestFirstPositionalSkipsBooleanFlags:
         # `kubectl delete --all pod -n ns` — without the boolean-flag
         # set, --all would consume "pod" and the classifier would miss
         # the kind.
-        et = infer_effective_target("kubectl", [
-            "delete", "--all", "pod", "-n", "ns",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "delete",
+                "--all",
+                "pod",
+                "-n",
+                "ns",
+            ],
+        )
         assert et.scope == "pod"
         assert et.namespace == "ns"
 
     def test_delete_with_force_flag(self):
-        et = infer_effective_target("kubectl", [
-            "delete", "--force", "pod/my-pod", "-n", "ns",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "delete",
+                "--force",
+                "pod/my-pod",
+                "-n",
+                "ns",
+            ],
+        )
         assert et.scope == "pod"
         assert et.names == ("my-pod",)
 
     def test_scale_with_recursive_flag(self):
-        et = infer_effective_target("kubectl", [
-            "scale", "-R", "deploy/myapp", "--replicas=0", "-n", "ns",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "scale",
+                "-R",
+                "deploy/myapp",
+                "--replicas=0",
+                "-n",
+                "ns",
+            ],
+        )
         assert et.scope == "deployment"
         assert et.names == ("myapp",)
 
@@ -899,18 +1315,33 @@ class TestKindNameDisambiguation:
     def test_attach_pod_with_explicit_kind_keeps_two_positional_form(self):
         # When the user DOES write "attach pod my-name" explicitly,
         # we still treat it as kind="pod", name="my-name".
-        et = infer_effective_target("kubectl", [
-            "attach", "pod", "my-name", "-n", "ns",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "attach",
+                "pod",
+                "my-name",
+                "-n",
+                "ns",
+            ],
+        )
         assert et.scope == "pod"
         assert et.names == ("my-name",)
 
     def test_scale_deployment_separate_form_still_works(self):
         # Regression check: scale doesn't use default_kind, so the
         # KIND NAME form still works.
-        et = infer_effective_target("kubectl", [
-            "scale", "deployment", "myapp", "--replicas=0", "-n", "ns",
-        ])
+        et = infer_effective_target(
+            "kubectl",
+            [
+                "scale",
+                "deployment",
+                "myapp",
+                "--replicas=0",
+                "-n",
+                "ns",
+            ],
+        )
         assert et.scope == "deployment"
         assert et.names == ("myapp",)
 
@@ -951,17 +1382,23 @@ class TestProductionKubectlShape:
     """
 
     def test_subcommand_plus_v_args_read_only(self):
-        et = infer_effective_target("kubectl", {
-            "subcommand": "get",
-            "v_args": "pods -n prod",
-        })
+        et = infer_effective_target(
+            "kubectl",
+            {
+                "subcommand": "get",
+                "v_args": "pods -n prod",
+            },
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_subcommand_plus_v_args_scale(self):
-        et = infer_effective_target("kubectl", {
-            "subcommand": "scale",
-            "v_args": "deploy/myapp --replicas=0 -n prod",
-        })
+        et = infer_effective_target(
+            "kubectl",
+            {
+                "subcommand": "scale",
+                "v_args": "deploy/myapp --replicas=0 -n prod",
+            },
+        )
         assert et.scope == "deployment"
         assert et.namespace == "prod"
         assert et.names == ("myapp",)
@@ -969,53 +1406,71 @@ class TestProductionKubectlShape:
     def test_subcommand_plus_v_args_exec_with_inner_blade(self):
         # The most important real-world drift case: kubectl exec POD --
         # blade create k8s node-cpu fullload --node node-7 (escape).
-        et = infer_effective_target("kubectl", {
-            "subcommand": "exec",
-            "v_args": "pod-a -n ns -- blade create k8s node-cpu fullload --node node-7",
-        })
+        et = infer_effective_target(
+            "kubectl",
+            {
+                "subcommand": "exec",
+                "v_args": "pod-a -n ns -- blade create k8s node-cpu fullload --node node-7",
+            },
+        )
         assert et.scope == "node"
         assert et.names == ("node-7",)
 
     def test_subcommand_plus_v_args_delete_with_force(self):
         # Production shape + boolean flag combo
-        et = infer_effective_target("kubectl", {
-            "subcommand": "delete",
-            "v_args": "--force pod/my-pod -n ns",
-        })
+        et = infer_effective_target(
+            "kubectl",
+            {
+                "subcommand": "delete",
+                "v_args": "--force pod/my-pod -n ns",
+            },
+        )
         assert et.scope == "pod"
         assert et.names == ("my-pod",)
 
     def test_subcommand_plus_v_args_ignores_kubeconfig_field(self):
         # kubeconfig / context / cluster select the cluster, not the
         # target resource — they must NOT influence classification.
-        et = infer_effective_target("kubectl", {
-            "subcommand": "get",
-            "v_args": "pods",
-            "kubeconfig": "/tmp/kc",
-            "context": "prod",
-            "cluster": "prod-cluster",
-        })
+        et = infer_effective_target(
+            "kubectl",
+            {
+                "subcommand": "get",
+                "v_args": "pods",
+                "kubeconfig": "/tmp/kc",
+                "context": "prod",
+                "cluster": "prod-cluster",
+            },
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_subcommand_only_no_v_args(self):
-        et = infer_effective_target("kubectl", {
-            "subcommand": "version",
-        })
+        et = infer_effective_target(
+            "kubectl",
+            {
+                "subcommand": "version",
+            },
+        )
         assert et.scope == SCOPE_READONLY
 
     def test_subcommand_apply_still_banned(self):
-        et = infer_effective_target("kubectl", {
-            "subcommand": "apply",
-            "v_args": "-f x.yaml",
-        })
+        et = infer_effective_target(
+            "kubectl",
+            {
+                "subcommand": "apply",
+                "v_args": "-f x.yaml",
+            },
+        )
         assert et.scope == SCOPE_BANNED
 
     def test_subcommand_empty_v_args(self):
         # Boundary: subcommand alone with empty v_args still classifies.
-        et = infer_effective_target("kubectl", {
-            "subcommand": "cordon",
-            "v_args": "",
-        })
+        et = infer_effective_target(
+            "kubectl",
+            {
+                "subcommand": "cordon",
+                "v_args": "",
+            },
+        )
         # cordon with no node name is malformed, returns UNKNOWN.
         assert et.scope == SCOPE_UNKNOWN
 
@@ -1024,18 +1479,21 @@ class TestHostInject:
     """``host_inject`` classifies to scope=host with a command-derived family."""
 
     def test_network_command_classifies_host_scope_and_family(self):
-        et = infer_effective_target("host_inject", {
-            "command": "iptables -A INPUT -p tcp --dport 80 -j DROP",
-        })
+        et = infer_effective_target(
+            "host_inject",
+            {
+                "command": "iptables -A INPUT -p tcp --dport 80 -j DROP",
+            },
+        )
         assert et.scope == "host"
         assert et.namespace == ""
-        assert et.blade_target == "network"
+        assert et.fault_target == "network"
         assert et.confidence.value == "high"
 
     def test_process_command_classifies_process_family(self):
         et = infer_effective_target("host_inject", {"command": "kill -9 1234"})
         assert et.scope == "host"
-        assert et.blade_target == "process"
+        assert et.fault_target == "process"
 
     def test_empty_command_is_unknown_confidence(self):
         et = infer_effective_target("host_inject", {"command": ""})
@@ -1056,25 +1514,34 @@ class TestExecReadonlyProbeReason:
     """
 
     def test_malformed_probe_carries_operator_reason(self):
-        et = infer_effective_target("kubectl_read", {
-            "subcommand": "exec",
-            "v_args": "pod-x -n ns -- sh -c 'echo OK; command -v stress-ng'",
-        })
+        et = infer_effective_target(
+            "kubectl_read",
+            {
+                "subcommand": "exec",
+                "v_args": "pod-x -n ns -- sh -c 'echo OK; command -v stress-ng'",
+            },
+        )
         assert et.scope == "pod"
         assert "shell control operator" in et.readonly_probe_reason
 
     def test_unknown_binary_carries_binary_reason(self):
-        et = infer_effective_target("kubectl_read", {
-            "subcommand": "exec",
-            "v_args": "pod-x -n ns -- rm -rf /data/cache",
-        })
+        et = infer_effective_target(
+            "kubectl_read",
+            {
+                "subcommand": "exec",
+                "v_args": "pod-x -n ns -- rm -rf /data/cache",
+            },
+        )
         assert et.scope == "pod"
         assert "'rm' is not a known read-only diagnostic" in et.readonly_probe_reason
 
     def test_valid_probe_stays_readonly_without_reason(self):
-        et = infer_effective_target("kubectl_read", {
-            "subcommand": "exec",
-            "v_args": "pod-x -n ns -- which stress-ng",
-        })
+        et = infer_effective_target(
+            "kubectl_read",
+            {
+                "subcommand": "exec",
+                "v_args": "pod-x -n ns -- which stress-ng",
+            },
+        )
         assert et.scope == SCOPE_READONLY
         assert et.readonly_probe_reason == ""

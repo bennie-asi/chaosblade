@@ -25,7 +25,7 @@ from chaos_agent.agent.spec.fault_spec import (
     read_fault_spec,
     strip_timeout_alias,
 )
-from chaos_agent.agent.state import AgentState
+from chaos_agent.agent.state import AgentState, has_active_fault
 from chaos_agent.agent.state_mgmt.state_helpers import fail_state
 
 logger = logging.getLogger(__name__)
@@ -77,8 +77,8 @@ def _public_fault(spec: FaultSpec) -> dict[str, Any]:
     """Use a stable, renderer-friendly projection without a duplicate model."""
     return {
         "scope": spec.scope,
-        "blade_target": spec.blade_target,
-        "blade_action": spec.blade_action,
+        "fault_target": spec.fault_target,
+        "fault_action": spec.fault_action,
         "fault_type": spec.fault_type,
         "fault_spec": spec.to_intent_dict(),
         "boundaries": list(spec.boundaries),
@@ -217,11 +217,13 @@ async def plan_change_confirm(state: AgentState) -> dict:
         result["execute_loop_count"] = 0
     # Same canonical seam reset the execute-time replan applies: attribution
     # (method / carrier pod / caches / epoch boundary) must not leak across
-    # contracts. keep_blade_uid preserves a recovery handle when an experiment
-    # may still be live, mirroring the replan seam's rationale.
+    # contracts. The keep decision keys on the generic live-fault predicate —
+    # a fault that is ALIVE (any carrier: blade experiment OR attributed
+    # native mutation) keeps its recovery handle; wiping it here would orphan
+    # a live fault the recover graph can no longer identify.
     reset_attribution_state(
         result,
-        keep_blade_uid=bool(state.get("blade_uid")),
+        keep_experiment_uid=has_active_fault(state),
         message_count=len(state.get("messages") or []) + len(result.get("messages") or []),
     )
     if batch is not None:

@@ -28,7 +28,7 @@ from chaos_agent.agent.nodes.execute._debug_pod import (
     parse_debug_pod_name,
     wait_for_debug_pod_ready,
 )
-from chaos_agent.agent.nodes.execute._injection_detection import (
+from chaos_agent.tools.pod_discovery import (
     discover_tool_pod_on_node,
 )
 from chaos_agent.config.settings import settings

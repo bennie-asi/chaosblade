@@ -94,8 +94,6 @@ class CapabilityCase:
     use_case_name: str = ""
     inject_kind: str = "blade"
     structured_cmd: str = ""
-    direct_cmd: str = ""
-    direct_hint: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -126,8 +124,6 @@ class CapabilityCase:
             "use_case_name": self.use_case_name,
             "inject_kind": self.inject_kind,
             "structured_cmd": self.structured_cmd,
-            "direct_cmd": self.direct_cmd,
-            "direct_hint": self.direct_hint,
         }
 
 
@@ -197,8 +193,6 @@ def _parse_case(raw: dict) -> CapabilityCase:
         use_case_name=str(raw.get("use_case_name", "")),
         inject_kind=str(raw.get("inject_kind", "blade")),
         structured_cmd=str(raw.get("structured_cmd", "")),
-        direct_cmd=str(raw.get("direct_cmd", "")),
-        direct_hint=str(raw.get("direct_hint", "")),
     )
 
 

@@ -12,10 +12,6 @@ from chaos_agent.agent.capabilities import (
     build_capability_context,
     filter_tools_for_context,
 )
-from chaos_agent.agent.nodes.execute._injection_detection import (
-    _was_blade_create_attempted,
-    was_kubectl_exec_delivery,
-)
 from chaos_agent.agent.nodes.execute._kubeconfig_inject import (
     _resolve_kubeconfig,
     inject_kubeconfig_into_tool_calls,
@@ -29,12 +25,12 @@ from chaos_agent.agent.nodes.recover._recover_layer1 import (
     _RECOVER_SYNTHETIC_TOOL_CALL_IDS,
     _build_layer1_recovery_prompt,
     _build_recover_baseline_tool_messages,
-    _recover_layer1_to_dict,
-    # noqa: F401 — backward-compat re-export for tests
-    # noqa: F401 — backward-compat re-export for tests
     _parse_layer1_recovery_result,
-    _run_recover_layer1,
 )
+# Phase-7 T1: canonical address — the storage-shape helper lives beside the
+# Layer1Result data class in result/verdict.py (unifying the recover-side and
+# verify-side serializers into one address).
+from chaos_agent.agent.result.verdict import layer1_to_dict
 from chaos_agent.agent.nodes.recover._recover_layer2_parse import (
     _build_recover_verifier_prompt,
     _extract_recovery_verification_section,
@@ -64,7 +60,7 @@ from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.result.operation_outcome import write_recover_verification
 from chaos_agent.agent.nodes.verify._verifier_submit import SUBMIT_RECOVER_VERIFICATION_TOOL_NAME
 from chaos_agent.agent.spec.skill_identity import read_active_skill_name
-from chaos_agent.agent.state import AgentState
+from chaos_agent.agent.state import AgentState, materialize_fault_handle
 from chaos_agent.config.settings import settings
 from chaos_agent.agent.state_mgmt.state_helpers import fail_state
 from chaos_agent.agent.result.verdict import FailureCategory
@@ -80,62 +76,54 @@ logger = logging.getLogger(__name__)
 # Loop budget: settings.max_recover_verifier_loop (default 60, env BLADE_AI_MAX_RECOVER_VERIFIER_LOOP)
 
 
-def _merge_combo_blade_part(
-    layer1: RecoverLayer1Result,
-    state: AgentState,
-    blade_part_override: dict | None = None,
-) -> RecoverLayer1Result:
-    """Composite Layer-1 verdict for combo (blade + kubectl-native) recovery.
-
-    The blade experiment was destroyed deterministically BEFORE the LLM flow;
-    the LLM verdict covers only the native component. Either part failing
-    fails the composite — a partially undone fault is still active.
-
-    ``blade_part_override`` carries the verdict computed in the SAME node
-    invocation (iteration 1): it lives only in the pending result_update
-    there, not yet in ``state``.
-    """
-    blade_part = blade_part_override or state.get("combo_blade_part") or {}
-    if not blade_part:
-        return layer1
-    # model_dump keeps enum objects — normalize to the plain string value.
-    _bp_raw = blade_part.get("status", "")
-    bp_status = str(getattr(_bp_raw, "value", _bp_raw) or "")
-    if bp_status == "passed":
-        layer1.details = (
-            f"[blade experiment destroyed deterministically] {layer1.details}"
-        )
-        return layer1
-    bp_details = str(blade_part.get("details", "") or "")
-    _native_status = getattr(layer1.status, "value", layer1.status)
-    return RecoverLayer1Result(
-        status="failed",
-        details=(
-            f"Combo recovery failed: blade experiment destroy {bp_status}"
-            + (f" ({bp_details[:200]})" if bp_details else "")
-            + f"; native part: {_native_status} ({(layer1.details or '')[:200]})"
-        ),
-        raw_output=layer1.raw_output,
-    )
+# _merge_combo_blade_part moved to providers/chaosblade/provider.py as
+# ``merge_deterministic_recover_verdict`` (phase-3 T4: the composite combo
+# verdict is the experiment carrier's domain knowledge).
 
 
-def _provider_for_recover(injection_method, blade_uid):
+def _experiment_uid_of(handle) -> str:
+    """Experiment UID rendered from the handle (protocol field ``value``);
+    empty for UID-less native handles. Transitional — feeds tracker copy and
+    the legacy ``experiment_uid`` recover kwarg until the render seams are
+    neutralized (phase 4/5)."""
+    return str((handle or {}).get("value") or "")
+
+
+def _provider_for_recover(state, handle=None):
     """Resolve the no-LLM recovery provider through the registry.
 
-    A ``blade_uid`` always means a ChaosBlade experiment to destroy, regardless
-    of the detected method (a UID is the strongest signal). Without a UID, use
-    the backend the registry resolves from ``injection_method`` — ``host_native``
-    -> :class:`HostShellProvider`, ``kubectl_native`` -> :class:`K8sNativeProvider`
-    — defaulting to :class:`K8sNativeProvider` (non-ChaosBlade, no UID to destroy)
-    when no method has been detected.
-    """
-    from chaos_agent.agent.providers import FaultProviderRegistry
-    from chaos_agent.agent.providers.chaosblade import ChaosbladeProvider
-    from chaos_agent.agent.providers.k8s_native import K8sNativeProvider
+    Thin seam over :meth:`FaultProviderRegistry.resolve_fault_dispatch`
+    (see :func:`_resolve_recover_dispatch`). Kept as a module-level hook for
+    tests."""
+    return _resolve_recover_dispatch(state)[0]
 
-    if blade_uid:
-        return ChaosbladeProvider()
-    return FaultProviderRegistry.resolve_by_method(injection_method) or K8sNativeProvider()
+
+def _resolve_recover_dispatch(state):
+    """Registry fault dispatch as a module seam: returns
+    ``(provider, identity_handle)``.
+
+    A live experiment claim outranks attribution (a combo task attributes to
+    the native backend yet its experiment still needs the deterministic
+    destroy); then the attribution handle / method resolve, defaulting to the
+    UID-less native verdict backend. The identity handle is what the
+    dispatched provider consumes as its recovery input."""
+    from chaos_agent.agent.providers import FaultProviderRegistry
+
+    return FaultProviderRegistry.resolve_fault_dispatch(state)
+
+
+async def _layer1_destroy_via_provider(
+    state, experiment_uid: str, kubeconfig: str, *,
+    messages: list | None = None, injection_method: str | None = None,
+):
+    """Provider-mediated Layer-1 destroy: the dispatched carrier destroys its
+    own experiment through the ``layer1_destroy`` protocol hook — the generic
+    recover flow names no carrier tool. Kept as a module seam for tests."""
+    provider = _provider_for_recover(state)
+    return await provider.layer1_destroy(
+        experiment_uid, kubeconfig,
+        messages=messages, injection_method=injection_method,
+    )
 
 
 def _assemble_recover_result_dict(state, task_id, skill_name, result) -> dict:
@@ -158,7 +146,7 @@ def _assemble_recover_result_dict(state, task_id, skill_name, result) -> dict:
     result_out = {
         "task_id": task_id,
         "skill": skill_name,
-        "blade_uid": result.blade_uid,
+        "experiment_uid": result.experiment_uid,
         "recovered": result.recovered,
     }
     result_dict = write_recover_verification(
@@ -181,47 +169,64 @@ def _assemble_recover_result_dict(state, task_id, skill_name, result) -> dict:
 async def recover_verifier(state: AgentState) -> dict:
     """Simple recover verifier without LLM: Layer 1 only."""
     task_id = state.get("task_id", "")
-    blade_uid = state.get("blade_uid", "")
     skill_name = read_active_skill_name(state)
     kubeconfig = _resolve_kubeconfig(state)
 
-    # Defense-in-depth: recover blade_uid from message history if missing in state
-    if not blade_uid:
-        from chaos_agent.agent.nodes.execute.execute_loop import _extract_blade_uid_from_messages
-        messages = state.get("messages", [])
-        blade_uid = _extract_blade_uid_from_messages(messages) or ""
-        if blade_uid:
-            logger.info(f"recover_verifier: recovered blade_uid={blade_uid} from message history")
+    # Attribution handle for logging/echo — ``materialize_fault_handle``
+    # hydrates checkpoints that predate the field from the legacy facts.
+    handle = materialize_fault_handle(state)
+
+    # Route through the registry's recover dispatch (experiment claim →
+    # message-history claim → attribution handle → method): the provider
+    # produces the rich, carrier-agnostic RecoverResult while the node
+    # assembles the standard result_dict and owns tracker events
+    # (sync_to_store stays with the LLM caller). The dispatch identity
+    # handle — which for a combo task is the EXPERIMENT handle even though
+    # attribution is native — is what the provider consumes; the
+    # message-history fallback lives INSIDE the dispatch, so downstream
+    # re-dispatches agree on the same provider.
+    provider, identity = _resolve_recover_dispatch(state)
+    # Experiment UID for the generic flow (tracker/log context): dispatch
+    # identity first (combo-safe — a live experiment claim outranks the
+    # native attribution), the materialized attribution handle as fallback.
+    experiment_uid = _experiment_uid_of(identity) or _experiment_uid_of(handle)
+    if experiment_uid:
+        logger.info(f"recover_verifier: recovery identity handle={identity or handle}")
 
     tracker = get_tracker(task_id)
     tracker.start(
         StatusCategory.NODE,
         "recover_verifier",
-        f"Verifying fault recovery (uid={blade_uid or 'N/A'})",
-        {"blade_uid": blade_uid, "skill_name": skill_name},
+        f"Verifying fault recovery (uid={experiment_uid or 'N/A'})",
+        {"experiment_uid": experiment_uid, "skill_name": skill_name},
     )
 
-    # Route to the execution-backend provider and let it produce the rich,
-    # carrier-agnostic RecoverResult; the node assembles the standard
-    # result_dict and owns tracker events (sync_to_store stays with the LLM
-    # caller). The provider scans messages for its own delivery sub-variant
-    # (e.g. ChaosBlade's kubectl-exec case), so the node passes only messages.
-    messages = state.get("messages", [])
-    provider = _provider_for_recover(state.get("injection_method"), blade_uid)
     result = await provider.recover(
-        state, None,
-        blade_uid=blade_uid,
+        state, identity,
         kubeconfig=kubeconfig,
-        messages=messages,
+        messages=state.get("messages", []),
         task_id=task_id,
     )
     result_dict = _assemble_recover_result_dict(state, task_id, skill_name, result)
 
     layer1_status = (result.layer1 or {}).get("status", "")
+    # Materialize the Layer-1 type for this run's readers (the same field the
+    # LLM flow writes at its layer transitions): when the dispatched carrier
+    # actually executed its deterministic destroy (live experiment UID, not
+    # the "skipped" not-applicable verdict), the type is "deterministic" by
+    # construction — readers no longer need to re-derive it from the None
+    # default. Their None fallback stays for legacy checkpoints. getattr:
+    # the Protocol declares the attribute but minimal test fakes may omit it.
+    if (
+        experiment_uid
+        and getattr(provider, "has_deterministic_recover", False)
+        and layer1_status != "skipped"
+    ):
+        result_dict["recover_layer1_type"] = "deterministic"
     if result.tracker_message:
         tracker.complete(result.tracker_message)
     elif result.recovered:
-        tracker.complete(f"Recovery verification: {layer1_status} (uid={blade_uid or 'N/A'})")
+        tracker.complete(f"Recovery verification: {layer1_status} (uid={experiment_uid or 'N/A'})")
     else:
         tracker.complete(f"Recovery verification: {layer1_status}")
     return result_dict
@@ -252,7 +257,7 @@ def _record_layer1_to_session(hook, state, layer1):
 
 
 async def _run_layer1_recovery(
-    state, hook, llm, tools, task_id, blade_uid, skill_name, kubeconfig, count, tracker,
+    state, hook, llm, tools, task_id, experiment_uid, skill_name, kubeconfig, count, tracker,
 ):
     """Execute Layer 1 recovery (first iteration, continuation, or cache restore).
 
@@ -264,26 +269,26 @@ async def _run_layer1_recovery(
     recover_phase = state.get("recover_phase", "layer1_recovery")
 
     if recover_phase == "layer1_recovery" and count == 1:
-        # When injection was done via kubectl exec, the host blade binary
-        # cannot destroy the experiment (record not found). Route these
-        # cases through the non-ChaosBlade Layer 1 flow (LLM-driven
-        # recovery via kubectl tools) instead of blade_destroy.
-        # Durable record first: by recovery time compaction may have
-        # removed the injection evidence the raw scan needs (see
-        # ``was_kubectl_exec_delivery``).
-        _kubectl_injection = was_kubectl_exec_delivery(state)
+        # In-cluster exec delivery: the dispatched experiment carrier blocks
+        # its own deterministic destroy (the record never existed on the
+        # host side) — route these cases through the non-deterministic
+        # Layer 1 flow (LLM-driven recovery) instead of the programmatic
+        # destroy. Provider hook, so the generic flow names no carrier.
+        _destroy_blocked = _provider_for_recover(state).blocks_deterministic_destroy(
+            state, state.get("messages", [])
+        )
 
-        # COMBO injection (blade experiment + kubectl-native component, either
-        # order): destroy the blade experiment deterministically FIRST, then
+        # COMBO injection (experiment + kubectl-native component, either
+        # order): destroy the experiment deterministically FIRST, then
         # route to the LLM-driven Layer-1 flow for the native undo —
-        # deterministic recovery can ONLY destroy the blade experiment and
-        # would leak the native mutation, while the LLM route is the superset
-        # executor for combo injections.
+        # deterministic recovery can ONLY destroy the experiment and
+        # would leak the native mutation, while the LLM route is the
+        # superset executor for combo injections.
         #
         # Two durable criteria (no message scans — both survive compaction):
         # 1. the issue-time/UPGRADE marker ``combo_native_issued``;
         # 2. CROSS-CHECK fallback: a native-family attribution alongside a
-        #    live blade_uid is combo evidence by itself — a task cannot
+        #    live experiment UID is combo evidence by itself — a task cannot
         #    legitimately hold both, so if it does, both vehicles acted.
         #    Covers the edge where the marker never landed (detection scan
         #    window missed the UPGRADE).
@@ -295,39 +300,42 @@ async def _run_layer1_recovery(
             if _method_rv else None
         )
         _combo_native = bool(state.get("combo_native_issued")) or bool(
-            blade_uid
+            experiment_uid
             and _method_provider_rv is not None
             and _method_provider_rv.is_multi_step
         )
         _combo_blade_part: dict | None = None
 
-        if blade_uid and not _kubectl_injection and _combo_native:
-            _blade_l1 = await _run_recover_layer1(
-                blade_uid, kubeconfig,
+        if experiment_uid and not _destroy_blocked and _combo_native:
+            _blade_l1 = await _layer1_destroy_via_provider(
+                state, experiment_uid, kubeconfig,
                 messages=state.get("messages", []),
                 injection_method=state.get("injection_method"),
             )
-            _combo_blade_part = _recover_layer1_to_dict(_blade_l1)
+            _combo_blade_part = layer1_to_dict(_blade_l1)
             logger.info(
-                f"Combo recovery: blade part handled deterministically "
+                f"Combo recovery: experiment part handled deterministically "
                 f"(status={_blade_l1.status}); native part routed to LLM Layer 1"
             )
 
-        if blade_uid and not _kubectl_injection and not _combo_native:
-            # ChaosBlade on host: deterministic blade_destroy + blade_status
-            layer1 = await _run_recover_layer1(
-                blade_uid, kubeconfig,
+        if experiment_uid and not _destroy_blocked and not _combo_native:
+            # Experiment carrier on host: deterministic destroy through the
+            # dispatched provider's own execution domain.
+            layer1 = await _layer1_destroy_via_provider(
+                state, experiment_uid, kubeconfig,
                 messages=state.get("messages", []),
                 injection_method=state.get("injection_method"),
             )
-        elif not _combo_native and _was_blade_create_attempted(
+        elif not _combo_native and _provider_for_recover(
+            state
+        ).was_fault_create_attempted(
             state.get("messages", []),
             injection_method=state.get("injection_method"),
         ):
             # ChaosBlade injection was done but UID unavailable.
-            # NEVER steals a combo case: a combo with blade_uid present has
+            # NEVER steals a combo case: a combo with experiment_uid present has
             # already been pre-destroyed above and must reach the LLM flow
-            # for the native undo; with blade_uid empty the flag can only
+            # for the native undo; with experiment_uid empty the flag can only
             # survive from a destroyed experiment — the LLM flow (native
             # route) is still the correct vehicle. The terminal branch is
             # meaningful only for the plain "blade attempted, nothing
@@ -337,74 +345,36 @@ async def _run_layer1_recovery(
                 details="blade_create was called during injection but no UID available for recovery",
             )
         else:
-            # Non-ChaosBlade OR kubectl exec injection: LLM-driven Layer 1
+            # Non-ChaosBlade OR in-cluster delivery: LLM-driven Layer 1
             # (Layer 1 runs in the main ReAct loop, not a separate sub-loop)
             inject_context = state.get("inject_context", "")
 
-            # For kubectl exec injection, append blade_uid recovery instructions
-            if _kubectl_injection and blade_uid:
-                original_pod = state.get("kubectl_exec_pod_name")
-                pod_hint = ""
-                if original_pod:
-                    pod_hint = (
-                        f"Original injection Pod: `{original_pod}` — prefer this Pod to run the destroy action "
-                        f"(its namespace is deployment-specific — locate it across all namespaces if needed).\n"
-                        f"If that Pod no longer exists, discover a currently running tool pod across all "
-                        f"namespaces by its tool label.\n"
-                    )
-                inject_context += (
-                    f"\n\n## Experiment Recovery (in-cluster injection channel)\n"
-                    f"The fault was injected from inside the cluster (the injection tool ran within a tool pod).\n"
-                    f"Experiment UID: `{blade_uid}`\n"
-                    f"{pod_hint}"
-                    f"To recover, you MUST destroy the experiment through the same in-cluster channel:\n"
-                    f"run the experiment-destroy command for UID `{blade_uid}` inside a running tool pod, "
-                    f"in that pod's own namespace.\n"
-                    f"The tool pod namespace is deployment-specific — do NOT assume it; use the "
-                    f"namespace you discover.\n"
-                )
-                logger.info(
-                    f"kubectl exec injection detected for uid={blade_uid}, "
-                    f"routing to non-ChaosBlade Layer 1 recovery flow"
-                )
-            elif _combo_native and blade_uid:
-                # Combo: blade part already handled deterministically above —
-                # tell the LLM the experiment is dealt with and its only job
-                # is the native undo (it must not re-destroy anything).
-                _bp_raw_status = (_combo_blade_part or {}).get("status", "unknown")
-                _bp_status = str(getattr(_bp_raw_status, "value", _bp_raw_status) or "unknown")
-                _bp_details = (_combo_blade_part or {}).get("details", "") or ""
-                inject_context += (
-                    f"\n\n## Experiment Recovery (blade component — handled by the framework)\n"
-                    f"The blade experiment (UID `{blade_uid}`) was destroyed deterministically by "
-                    f"the framework BEFORE this phase — destroy status: {_bp_status}.\n"
-                    + (
-                        f"WARNING: the deterministic blade destroy FAILED ({_bp_details[:300]}) — "
-                        f"report this in your Details; the experiment component may still be active.\n"
-                        if _bp_status != "passed" else ""
-                    )
-                    + "Do NOT attempt to destroy any experiment yourself.\n"
-                    "Your ONLY remaining job: undo the kubectl-native injection component — "
-                    "reverse the native mutations recorded in the injection context (e.g. revert "
-                    "patches/labels, kill injected processes, remove tc/iptables rules).\n"
-                )
+            # Experiment-specific recovery guidance (in-cluster delivery /
+            # combo with the experiment part already destroyed) — owned by
+            # the dispatched provider.
+            _guidance_rvl = _provider_for_recover(state).layer1_recover_guidance(
+                state, experiment_uid,
+                combo_native=_combo_native, combo_part=_combo_blade_part,
+            )
+            if _guidance_rvl:
+                inject_context += _guidance_rvl
 
             if not inject_context:
                 # No inject context — skip Layer 1
                 logger.info(f"No inject context for {skill_name}, skipping Layer 1")
                 layer1 = RecoverLayer1Result(
                     status="skipped",
-                    details="Non-ChaosBlade fault: no inject context available",
+                    details="Native fault: no inject context available",
                 )
                 if tracker:
                     tracker.update(
-                        "Recover Layer 1 (non-ChaosBlade): skipped - no inject context",
-                        {"layer1_status": "skipped", "layer1_type": "non_chaosblade"},
+                        "Recover Layer 1 (native): skipped - no inject context",
+                        {"layer1_status": "skipped", "layer1_type": "native"},
                     )
             else:
                 # Build Layer 1 prompt and add to state.messages
                 layer1_system_prompt = _build_layer1_recovery_prompt(
-                    is_kubectl_blade=bool(_kubectl_injection),
+                    is_kubectl_blade=bool(_destroy_blocked),
                     profile=capability_context.profile,
                 )
                 from chaos_agent.agent.spec.fault_spec import read_fault_spec as _rfs_rvl
@@ -426,23 +396,23 @@ async def _run_layer1_recovery(
                 # Injection operation context — provides the LLM with what
                 # was injected and the original state so it can determine
                 # correct recovery actions without guessing (e.g.
-                # "from 7 to 3 replicas" → restore to 7).
-                _blade_uid_rvl = state.get("blade_uid", "") or ""
+                # "from 7 to 3 replicas" → restore to 7). Neutral facts are
+                # rendered here; carrier-owned fact lines go through the
+                # provider's ``recovery_facts_render`` hook.
                 _blast_radius_rvl = state.get("blast_radius_detail", "") or ""
-                _blade_parsed = state.get("blade_parsed_flags") or {}
                 _spec_params_rvl = (
                     dict(_spec_rvl.params) if _spec_rvl and _spec_rvl.params else {}
                 )
-                if _blade_uid_rvl or _blast_radius_rvl or _blade_parsed or _spec_params_rvl:
+                _carrier_facts_rvl = _provider_for_recover(
+                    state
+                ).recovery_facts_render(state, spec_params=_spec_params_rvl)
+                if _blast_radius_rvl or _spec_params_rvl or _carrier_facts_rvl:
                     layer1_human_content += "\n## Injection Operation\n"
-                    if _blade_uid_rvl:
-                        layer1_human_content += f"Blade UID: {_blade_uid_rvl}\n"
+                    layer1_human_content += _carrier_facts_rvl
                     if _blast_radius_rvl:
                         layer1_human_content += f"Impact: {_blast_radius_rvl}\n"
                     if _spec_params_rvl:
                         layer1_human_content += f"Parameters: {_spec_params_rvl}\n"
-                    elif _blade_parsed:
-                        layer1_human_content += f"Blade key parameters: {_blade_parsed}\n"
                 _side_effects_rvl = dict(state.get("side_effects") or {})
                 if _side_effects_rvl:
                     layer1_human_content += (
@@ -579,7 +549,7 @@ async def _run_layer1_recovery(
                         if settings.is_debug:
                             debug_info, tool_names = summarize_llm_response(response)
                             tracker.update(
-                                f"Recover Layer 1 (non-ChaosBlade) iteration 1 LLM:\n{debug_info}",
+                                f"Recover Layer 1 (native) iteration 1 LLM:\n{debug_info}",
                                 {"debug": True, "iteration": 1, "tool_calls": tool_names},
                             )
                         else:
@@ -588,7 +558,7 @@ async def _run_layer1_recovery(
                                 for tc in tool_calls
                             ]
                             tracker.update(
-                                "Recover Layer 1 (non-ChaosBlade) iteration 1: calling tools",
+                                "Recover Layer 1 (native) iteration 1: calling tools",
                                 {"iteration": 1, "tool_calls": tool_names},
                             )
 
@@ -608,7 +578,7 @@ async def _run_layer1_recovery(
                         if settings.is_debug:
                             debug_info, _ = summarize_llm_response(response)
                             tracker.update(
-                                f"Recover Layer 1 (non-ChaosBlade) iteration 1 LLM (final):\n{debug_info}",
+                                f"Recover Layer 1 (native) iteration 1 LLM (final):\n{debug_info}",
                                 {"debug": True, "iteration": 1, "tool_calls": []},
                             )
 
@@ -619,14 +589,16 @@ async def _run_layer1_recovery(
                         # result_update above is already clearing it — the
                         # current invocation's verdict is authoritative.
                         if _combo_blade_part is not None:
-                            layer1 = _merge_combo_blade_part(
-                                layer1, state, blade_part_override=_combo_blade_part
+                            layer1 = _provider_for_recover(
+                                state
+                            ).merge_deterministic_recover_verdict(
+                                layer1, state, part_override=_combo_blade_part
                             )
 
                         if tracker:
                             tracker.update(
-                                f"Recover Layer 1 (non-ChaosBlade): {layer1.status} - {layer1.details[:100]}",
-                                {"layer1_status": layer1.status, "layer1_type": "non_chaosblade"},
+                                f"Recover Layer 1 (native): {layer1.status} - {layer1.details[:100]}",
+                                {"layer1_status": layer1.status, "layer1_type": "native"},
                             )
 
                         # Store Layer 1 output in state.messages for Layer 2 to see
@@ -663,7 +635,7 @@ async def _run_layer1_recovery(
                             return (None, result_update)
 
                         result_update["messages"] = msg_list
-                        result_update["recover_layer1_cache"] = _recover_layer1_to_dict(layer1)
+                        result_update["recover_layer1_cache"] = layer1_to_dict(layer1)
 
                         if layer1.is_terminal():
                             # Layer 1 failed — continue to Layer 2 for state verification
@@ -714,7 +686,7 @@ async def _run_layer1_recovery(
             )
             verification = {
                 "level": "unrecovered",
-                "layer1": _recover_layer1_to_dict(layer1),
+                "layer1": layer1_to_dict(layer1),
                 "layer2": {"status": "skipped", "details": "Layer 1 exceeded max iterations"},
                 "baseline_confidence": _compute_baseline_confidence(state),
                 "warnings": ["Layer 1 recovery execution exceeded max iterations"],
@@ -722,7 +694,7 @@ async def _run_layer1_recovery(
             result = {
                 "task_id": task_id,
                 "skill": skill_name,
-                "blade_uid": blade_uid,
+                "experiment_uid": experiment_uid,
                 "recovered": False,
             }
             tracker.complete("Recovery failed at Layer 1: max iterations exceeded")
@@ -822,14 +794,14 @@ async def _run_layer1_recovery(
                 result_update["messages"] = [response]
 
                 if settings.is_debug:
-                    post_invoke_debug(tracker, response, layer1_iteration, "Recover Layer 1 (non-ChaosBlade) iteration")
+                    post_invoke_debug(tracker, response, layer1_iteration, "Recover Layer 1 (native) iteration")
                 else:
                     tool_names = [
                         extract_tool_call_fields(tc)[0]
                         for tc in tool_calls
                     ]
                     tracker.update(
-                        f"Recover Layer 1 (non-ChaosBlade) iteration {layer1_iteration}: calling tools",
+                        f"Recover Layer 1 (native) iteration {layer1_iteration}: calling tools",
                         {"iteration": layer1_iteration, "tool_calls": tool_names},
                     )
 
@@ -839,15 +811,17 @@ async def _run_layer1_recovery(
                 # Layer 1 completed — parse result
                 content = getattr(response, "content", "") or ""
 
-                post_invoke_debug(tracker, response, layer1_iteration, "Recover Layer 1 (non-ChaosBlade) iteration")
+                post_invoke_debug(tracker, response, layer1_iteration, "Recover Layer 1 (native) iteration")
 
                 layer1 = _parse_layer1_recovery_result(content)
-                layer1 = _merge_combo_blade_part(layer1, state)
+                layer1 = _provider_for_recover(
+                    state
+                ).merge_deterministic_recover_verdict(layer1, state)
 
                 if tracker:
                     tracker.update(
-                        f"Recover Layer 1 (non-ChaosBlade): {layer1.status} - {layer1.details[:100]}",
-                        {"layer1_status": layer1.status, "layer1_type": "non_chaosblade"},
+                        f"Recover Layer 1 (native): {layer1.status} - {layer1.details[:100]}",
+                        {"layer1_status": layer1.status, "layer1_type": "native"},
                     )
 
                 # Same programmatic success guard as the first iteration;
@@ -874,7 +848,7 @@ async def _run_layer1_recovery(
                     return (None, result_update)
 
                 result_update["messages"] = [response]
-                result_update["recover_layer1_cache"] = _recover_layer1_to_dict(layer1)
+                result_update["recover_layer1_cache"] = layer1_to_dict(layer1)
 
                 if layer1.is_terminal():
                     # Layer 1 failed — continue to Layer 2 for state verification
@@ -981,7 +955,7 @@ def _layer1_success_guard_feedback(layer1, state) -> str | None:
 
 
 async def _run_layer2_verification(
-    state, hook, llm, tools, task_id, blade_uid, skill_name, kubeconfig, count, tracker, layer1,
+    state, hook, llm, tools, task_id, experiment_uid, skill_name, kubeconfig, count, tracker, layer1,
 ):
     """Layer 2: LLM-based fault-specific recovery verification (ReAct step)."""
     capability_context = build_capability_context(state, "recover_verify", tools or [])
@@ -998,14 +972,21 @@ async def _run_layer2_verification(
     is_first_layer2 = not state.get("layer2_context_added", False)
     inject_context = state.get("inject_context", "")
 
-    # Determine Layer 1 type: "deterministic" (blade_destroy on host) or "llm_driven"
-    # (non-ChaosBlade or kubectl exec injection). Used by Layer 2 prompt and context.
+    # Determine Layer 1 type: "deterministic" (programmatic destroy through
+    # the dispatched provider's execution domain) or "llm_driven" (UID-less
+    # or in-cluster exec delivery). Used by Layer 2 prompt and context.
     # recover_layer1_type may be None (field default for fresh runs where
     # the deterministic path didn't explicitly set it). Fall back to the
-    # blade_uid heuristic in that case.
+    # dispatched provider's deterministic-recover capability in that case
+    # (a live experiment UID implies an experiment-carrier dispatch).
     _rl1_type = state.get("recover_layer1_type")
-    if _rl1_type is None:
-        _rl1_type = "deterministic" if blade_uid else "llm_driven"
+    _rl1_type_inferred = _rl1_type is None
+    if _rl1_type_inferred:
+        _rl1_type = (
+            "deterministic"
+            if experiment_uid and _provider_for_recover(state).has_deterministic_recover
+            else "llm_driven"
+        )
     _layer1_is_deterministic = _rl1_type == "deterministic"
 
     # Build messages for LLM
@@ -1133,11 +1114,11 @@ async def _run_layer2_verification(
 
         # Build Layer 1 context section — the ChaosBlade-vs-non-ChaosBlade
         # framing is owned by the resolved provider (no carrier branching here).
-        _recover_provider = _provider_for_recover(state.get("injection_method"), blade_uid)
+        _recover_provider = _provider_for_recover(state)
         layer1_context, layer2_instruction = _recover_provider.recover_layer2_context(
             state, layer1,
             is_deterministic=_layer1_is_deterministic,
-            blade_uid=blade_uid,
+            experiment_uid=experiment_uid,
             is_host_scope=_is_host_scope_rv,
         )
 
@@ -1154,27 +1135,9 @@ async def _run_layer2_verification(
             )
         else:
             context += f"Target authority: {capability_context.target_authority}\n"
-        # Structured key parameters from parsed flags (e.g. path, percent, size)
-        _blade_parsed = state.get("blade_parsed_flags") or {}
-        if _blade_parsed:
-            context += f"Blade key parameters: {_blade_parsed}\n"
-        # Disk partition/overlay semantics (imagefs vs nodefs, /host, df -h) are
-        # NOT hardcoded here: they live in the skill case's 恢复验证 section
-        # (embedded above as PRIMARY AUTHORITY) and the knowledge docs
-        # (fault-verification-strategies.md), loaded on demand.
-        # Timeout info: simplified informational note
-        _timeout_val_rv = _blade_parsed.get("timeout")
-        if _timeout_val_rv:
-            try:
-                _timeout_sec_rv = int(str(_timeout_val_rv).strip())
-                if _timeout_sec_rv < 600:
-                    context += (
-                        f"ℹ Duration note: Original --timeout was {_timeout_sec_rv}s. "
-                        f"The fault may have already auto-expired before manual recovery. "
-                        f"If recovery verification shows no residual fault effects, this is expected.\n"
-                    )
-            except (ValueError, TypeError):
-                pass
+        # Carrier-owned verification facts (parsed operation parameters /
+        # auto-expiry note) — owned by the dispatched provider.
+        context += _recover_provider.layer2_facts_note(state)
         if kubeconfig and _is_k8s_profile_rv:
             context += (
                 f"**IMPORTANT**: You MUST pass `kubeconfig='{kubeconfig}'` to EVERY "
@@ -1182,11 +1145,11 @@ async def _run_layer2_verification(
                 f"Do NOT omit the kubeconfig parameter.\n"
             )
         # Tool pod context: provide accurate information about tool pod capabilities
-        _blade_scope = _spec_rvl2.scope if _spec_rvl2 else ""
-        _blade_target = _spec_rvl2.blade_target if _spec_rvl2 else ""
-        _blade_action = _spec_rvl2.blade_action if _spec_rvl2 else ""
-        _tool_pod_name = state.get("kubectl_exec_pod_name")
-        if _is_k8s_profile_rv and _blade_scope == "node" and _tool_pod_name:
+        _fault_scope = _spec_rvl2.scope if _spec_rvl2 else ""
+        _fault_target = _spec_rvl2.fault_target if _spec_rvl2 else ""
+        _fault_action = _spec_rvl2.fault_action if _spec_rvl2 else ""
+        _tool_pod_name = _provider_for_recover(state).recovery_vehicle(state)
+        if _is_k8s_profile_rv and _fault_scope == "node" and _tool_pod_name:
             # Namespace is deployment-specific and never recorded in state —
             # instruct discovery instead of asserting one (task-e9bae269: the
             # pods lived in `default`, not `chaosblade`).
@@ -1202,9 +1165,9 @@ async def _run_layer2_verification(
                 f"- LIMITATION: This pod does NOT mount /host. `df -h` shows overlay, NOT host disk.\n"
                 f"  For host filesystem verification, use a node debug pod instead.\n"
             )
-            if blade_uid:
+            if experiment_uid:
                 context += (
-                    f"- **UID Dual Mapping**: The experiment UID ({blade_uid}) is the CRD resource name. "
+                    f"- **UID Dual Mapping**: The experiment UID ({experiment_uid}) is the CRD resource name. "
                     f"Inside a tool pod, the injection tool's local status subcommand searches the LOCAL "
                     f"experiment database and typically returns 'record not found' for an experiment "
                     f"created through the cluster API — NEVER use it for this check (it causes false "
@@ -1313,9 +1276,9 @@ async def _run_layer2_verification(
     # Final-iteration conclusion prompt (tools already unbound at max-1)
     if count >= settings.max_recover_verifier_loop:
         # Single source with the system-prompt label (see the builder call
-        # below): the raw blade_uid heuristic mislabels kubectl-blade/combo
+        # below): the raw experiment_uid heuristic mislabels kubectl-blade/combo
         # recoveries, whose Layer 1 is LLM-driven despite a live UID.
-        layer1_label = "blade_destroy" if _layer1_is_deterministic else "recovery execution"
+        layer1_label = "deterministic destroy" if _layer1_is_deterministic else "recovery execution"
         messages.append(HumanMessage(content=wrap_system_reminder(
             f"**FINAL RECOVERY VERIFICATION ITERATION**: This is iteration {count} of max {settings.max_recover_verifier_loop}. "
             f"NO more iterations available. Tools are no longer available.\n"
@@ -1366,7 +1329,7 @@ async def _run_layer2_verification(
 
     from chaos_agent.agent.progress_ledger import build_ledger_prompt_section
     system_prompt = _build_recover_verifier_prompt(
-        layer1_label="blade_destroy" if _layer1_is_deterministic else "recovery execution",
+        layer1_label="deterministic destroy" if _layer1_is_deterministic else "recovery execution",
         profile=capability_context.profile,
         ledger_section=build_ledger_prompt_section(state.get("progress_ledger")),
     )
@@ -1390,17 +1353,17 @@ async def _run_layer2_verification(
         result_dict = write_recover_verification(
             {
                 "verifier_loop_count": count,
-                "recover_layer1_cache": _recover_layer1_to_dict(layer1),
+                "recover_layer1_cache": layer1_to_dict(layer1),
                 "layer2_context_added": True,
                 **fail_state(
                     FailureCategory.RECOVERY_VERIFICATION_TIMEOUT,
                     f"Layer 2 LLM call timed out after {settings.llm_read_timeout}s",
                 ),
             },
-            result={"task_id": task_id, "skill": skill_name, "blade_uid": blade_uid, "recovered": False},
+            result={"task_id": task_id, "skill": skill_name, "experiment_uid": experiment_uid, "recovered": False},
             verification={
                 "level": "unrecovered",
-                "layer1": _recover_layer1_to_dict(layer1),
+                "layer1": layer1_to_dict(layer1),
                 "layer2": {"status": "error", "details": f"LLM call timed out after {settings.llm_read_timeout}s"},
                 "baseline_confidence": _compute_baseline_confidence(state),
             },
@@ -1416,17 +1379,17 @@ async def _run_layer2_verification(
         result_dict = write_recover_verification(
             {
                 "verifier_loop_count": count,
-                "recover_layer1_cache": _recover_layer1_to_dict(layer1),
+                "recover_layer1_cache": layer1_to_dict(layer1),
                 "layer2_context_added": True,
                 **fail_state(
                     FailureCategory.RECOVERY_FAILED,
                     f"Layer 2 LLM call failed: {e}",
                 ),
             },
-            result={"task_id": task_id, "skill": skill_name, "blade_uid": blade_uid, "recovered": False},
+            result={"task_id": task_id, "skill": skill_name, "experiment_uid": experiment_uid, "recovered": False},
             verification={
                 "level": "unrecovered",
-                "layer1": _recover_layer1_to_dict(layer1),
+                "layer1": layer1_to_dict(layer1),
                 "layer2": {"status": "error", "details": f"LLM call failed: {e}"},
                 "baseline_confidence": _compute_baseline_confidence(state),
             },
@@ -1452,9 +1415,15 @@ async def _run_layer2_verification(
     # Build result
     result_update = {
         "verifier_loop_count": count,
-        "recover_layer1_cache": _recover_layer1_to_dict(layer1),  # persist for subsequent iterations
+        "recover_layer1_cache": layer1_to_dict(layer1),  # persist for subsequent iterations
         "layer2_context_added": True,  # mark Layer 2 context as built
     }
+    # Materialize the inferred Layer-1 type (deterministic Layer-1 runs never
+    # write the field at their transition — only the LLM-driven path does).
+    # Legacy-checkpoint None stays readable via the readers' own fallback;
+    # from this iteration on the value is explicit on state.
+    if _rl1_type_inferred:
+        result_update["recover_layer1_type"] = _rl1_type
 
     tool_calls = getattr(response, "tool_calls", None) or []
     # Scheme B: recover_verifier_loop Layer 2 is a pure ReAct step.
@@ -1510,7 +1479,6 @@ def make_recover_verifier(hook=None, llm=None, tools=None, registry=None):
 
     async def _recover_verifier_with_llm(state: AgentState) -> dict:
         task_id = state.get("task_id", "")
-        blade_uid = state.get("blade_uid", "")
         skill_name = read_active_skill_name(state)
         kubeconfig = _resolve_kubeconfig(state)
         count = state.get("verifier_loop_count", 0) + 1
@@ -1522,20 +1490,23 @@ def make_recover_verifier(hook=None, llm=None, tools=None, registry=None):
         from chaos_agent.tools.wait import check_and_reset_wait_guard
         check_and_reset_wait_guard(state.get("messages", []))
 
-        # Defense-in-depth: recover blade_uid from message history if missing in state
-        if not blade_uid:
-            from chaos_agent.agent.nodes.execute.execute_loop import _extract_blade_uid_from_messages
-            messages = state.get("messages", [])
-            blade_uid = _extract_blade_uid_from_messages(messages) or ""
-            if blade_uid:
-                logger.info(f"recover_verifier_with_llm: recovered blade_uid={blade_uid} from message history")
+        # Single source of fault identity (mirrors the simple entry): the
+        # registry's recover-dispatch identity (combo-safe — a live
+        # experiment claim outranks the native attribution, and the
+        # message-history fallback lives INSIDE the dispatch, so every
+        # downstream re-dispatch in this flow resolves the same provider),
+        # then the materialized carrier-agnostic attribution handle.
+        _, _identity_rvl = _resolve_recover_dispatch(state)
+        experiment_uid = _experiment_uid_of(_identity_rvl) or _experiment_uid_of(
+            materialize_fault_handle(state)
+        )
 
         tracker = get_tracker(task_id)
         tracker.start(
             StatusCategory.NODE,
             "recover_verifier",
-            f"Verifying fault recovery (uid={blade_uid or 'N/A'}, iteration={count})",
-            {"blade_uid": blade_uid, "skill_name": skill_name, "iteration": count},
+            f"Verifying fault recovery (uid={experiment_uid or 'N/A'}, iteration={count})",
+            {"experiment_uid": experiment_uid, "skill_name": skill_name, "iteration": count},
         )
 
         # ---- Guard: max iterations exceeded ----
@@ -1551,7 +1522,7 @@ def make_recover_verifier(hook=None, llm=None, tools=None, registry=None):
             result = {
                 "task_id": task_id,
                 "skill": skill_name,
-                "blade_uid": blade_uid,
+                "experiment_uid": experiment_uid,
                 "recovered": False,  # Cannot confirm recovered
             }
             result_dict = write_recover_verification(
@@ -1568,19 +1539,19 @@ def make_recover_verifier(hook=None, llm=None, tools=None, registry=None):
 
         # ---- Layer 1: Execute recovery ----
         layer1, early = await _run_layer1_recovery(
-            state, hook, llm, tools, task_id, blade_uid, skill_name, kubeconfig, count, tracker,
+            state, hook, llm, tools, task_id, experiment_uid, skill_name, kubeconfig, count, tracker,
         )
         if early is not None:
             return early
 
         # ---- Terminal check: Layer 1 failed ----
         if layer1.is_terminal():
-            if blade_uid:
+            if experiment_uid:
                 # ChaosBlade fault: blade_destroy failed → skip Layer 2
                 # (preserve existing ChaosBlade recovery behavior)
                 verification = {
                     "level": "unrecovered",
-                    "layer1": _recover_layer1_to_dict(layer1),
+                    "layer1": layer1_to_dict(layer1),
                     "layer2": {"status": "skipped", "details": "Layer 1 failed, skipping Layer 2"},
                     "warnings": [f"Layer 1 recovery verification failed: {layer1.details}"],
                     "baseline_confidence": _compute_baseline_confidence(state),
@@ -1588,7 +1559,7 @@ def make_recover_verifier(hook=None, llm=None, tools=None, registry=None):
                 result = {
                     "task_id": task_id,
                     "skill": skill_name,
-                    "blade_uid": blade_uid,
+                    "experiment_uid": experiment_uid,
                     "recovered": False,
                 }
                 tracker.complete(f"Recovery failed at Layer 1: {layer1.status}")
@@ -1619,7 +1590,7 @@ def make_recover_verifier(hook=None, llm=None, tools=None, registry=None):
 
         # ---- Layer 2: LLM-based fault-specific recovery verification ----
         return await _run_layer2_verification(
-            state, hook, llm, tools, task_id, blade_uid, skill_name, kubeconfig, count, tracker, layer1,
+            state, hook, llm, tools, task_id, experiment_uid, skill_name, kubeconfig, count, tracker, layer1,
         )
 
     return _recover_verifier_with_llm

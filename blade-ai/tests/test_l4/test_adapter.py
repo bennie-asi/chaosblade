@@ -47,14 +47,13 @@ class TestTestTaskToInitialState:
         assert state["task_id"] == "t-001"
         assert state["operation"] == "inject"
         assert state["interaction_mode"] == "l4"
-        assert state["direct"] is False
         assert state["kubeconfig"] == "/home/user/.kube/config"
 
         fs = state["fault_spec"]
         assert fs["namespace"] == "cms-demo"
         assert fs["scope"] == "pod"
-        assert fs["blade_target"] == "cpu"
-        assert fs["blade_action"] == "fullload"
+        assert fs["fault_target"] == "cpu"
+        assert fs["fault_action"] == "fullload"
         assert fs["names"] == ["app=myapp"]
         assert fs["labels"] == {"app": "myapp"}
         assert fs["params"] == {"cpu-percent": "80"}
@@ -142,15 +141,6 @@ class TestTestTaskToInitialState:
         with pytest.raises(ValueError, match="missing required field"):
             _to_initial_state(task)
 
-    def test_direct_false_override(self):
-        task = L4TestTask(
-            task_id="t-006",
-            intent="test",
-            payload=_valid_payload(direct=False),
-        )
-        state = _to_initial_state(task)
-        assert state["direct"] is False
-
     def test_messages_empty(self):
         task = L4TestTask(task_id="t-007", intent="test", payload=_valid_payload())
         state = _to_initial_state(task)
@@ -171,7 +161,7 @@ class TestStateToTaskResult:
         mock_infer.return_value = "injected"
         mock_build.return_value = {"fault_type": "pod-cpu", "phase": "verify"}
 
-        values = {"blade_uid": "uid-123", "safety_status": "safe"}
+        values = {"experiment_uid": "uid-123", "safety_status": "safe"}
         result = _to_task_result(values, "t-001", "traj-001")
 
         assert isinstance(result, L4TaskResult)
@@ -216,11 +206,13 @@ class TestStateToTaskResult:
             "status": "ok",  # should be excluded
         }
 
-        values = {"blade_uid": "abc", "safety_status": "safe"}
+        values = {"experiment_uid": "abc", "safety_status": "safe"}
         result = _to_task_result(values, "t-004")
 
-        # Explicit fields
-        assert result.extras["blade_uid"] == "abc"
+        # Explicit fields pass through on the modern key (phase-14 G4
+        # retired the legacy-spelling hydration this once exercised).
+        assert result.extras["experiment_uid"] == "abc"
+        assert "blade_uid" not in result.extras
         assert result.extras["safety"] == "safe"
         # Spread from status_data (excluding task_id, stage, status)
         assert result.extras["fault_type"] == "pod-cpu"
@@ -236,7 +228,7 @@ class TestBuildRecoverInitialState:
 
         inject_values = {
             "tui_session_id": "sess-1",
-            "blade_uid": "uid-abc",
+            "experiment_uid": "uid-abc",
             "skill_name": "pod-cpu-fullload",
             "skill_case_content": "steps...",
             "inject_verification_summary": "verified OK",
@@ -249,7 +241,7 @@ class TestBuildRecoverInitialState:
         assert result["task_id"] == "recover-t-001"
         assert result["parent_task_id"] == "t-001"
         assert result["operation"] == "recover"
-        assert result["blade_uid"] == "uid-abc"
+        assert result["experiment_uid"] == "uid-abc"
         assert result["inject_context"] == "inject context summary"
         assert result["fault_spec"] == {"scope": "pod"}
         assert result["messages"] == []  # Fresh messages
@@ -261,7 +253,7 @@ class TestBuildRecoverInitialState:
     def test_missing_fields_use_defaults(self, mock_ctx):
         mock_ctx.return_value = ""
         result = _build_recover({}, "t-002")
-        assert result["blade_uid"] == ""
+        assert result["experiment_uid"] == ""
         assert result["skill_name"] == ""
         assert result["kubeconfig"] == ""
 

@@ -4,7 +4,7 @@ Each checker probes current resource usage via kubectl and compares
 against the injection target parameters to determine headroom.
 
 I/O helpers are module-private; they mirror the kubectl patterns in
-direct_execute.py but are decoupled from task_id/tracker dependencies
+the execute path but are decoupled from task_id/tracker dependencies
 so they can be called from the safety_check context.
 """
 
@@ -314,7 +314,7 @@ async def _fetch_node_cpu_capacity_millicores(
 
 
 class MemoryFeasibilityChecker:
-    blade_target = "mem"
+    fault_target = "mem"
     requires_metrics_server = True
 
     async def assess(
@@ -395,7 +395,7 @@ class MemoryFeasibilityChecker:
 
 
 class CpuFeasibilityChecker:
-    blade_target = "cpu"
+    fault_target = "cpu"
     requires_metrics_server = True
 
     async def assess(
@@ -403,7 +403,7 @@ class CpuFeasibilityChecker:
     ) -> FeasibilityReport | None:
         target_percent = _parse_int_param(spec.params.get("cpu-percent"))
         if target_percent is None or target_percent <= 0:
-            if spec.blade_action in ("fullload", "burn"):
+            if spec.fault_action in ("fullload", "burn"):
                 target_percent = 100
             else:
                 return None
@@ -478,7 +478,7 @@ class CpuFeasibilityChecker:
 
 
 class NetworkFeasibilityChecker:
-    blade_target = "network"
+    fault_target = "network"
     requires_metrics_server = False
 
     async def assess(
@@ -574,7 +574,7 @@ class NetworkFeasibilityChecker:
         node_name = await _fetch_pod_node(pod_name, namespace, kubeconfig)
         if node_name:
             ready, missing_bins, tool_detail = await _check_blade_tool_pod_ready(
-                node_name, spec.blade_action, kubeconfig
+                node_name, spec.fault_action, kubeconfig
             )
             if ready is False:
                 if missing_bins:
@@ -1030,7 +1030,7 @@ async def _check_active_network_experiment(
 
 
 class DiskFeasibilityChecker:
-    blade_target = "disk"
+    fault_target = "disk"
     requires_metrics_server = False
 
     async def assess(
@@ -1061,7 +1061,7 @@ class DiskFeasibilityChecker:
         # fill action has a target-percent headroom to assess; burn just needs
         # an accessible path. This action branch is intentionally kept (not a
         # hard-coded scope/target check).
-        if spec.blade_action == "fill":
+        if spec.fault_action == "fill":
             target_pct = _parse_int_param(spec.params.get("percent"))
             if target_pct is None:
                 target_pct = 90

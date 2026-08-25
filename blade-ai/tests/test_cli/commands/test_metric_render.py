@@ -45,7 +45,7 @@ def _task_data() -> dict:
             "resource_type": "pod",
         },
         "params": {"process": "nginx"},
-        "blade_uid": "uid-123",
+        "experiment_uid": "uid-123",
         "safety_status": "safe",
         "verification": {
             "level": "verified",

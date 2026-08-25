@@ -22,7 +22,12 @@ logger = logging.getLogger(__name__)
 # Compatible additions (new optional fields, new event types the TUI
 # can ignore) do NOT require a bump. Removing or repurposing existing
 # fields, or changing their semantics, does.
-PROTOCOL_VERSION = "1"
+#
+# v2 (phase-14): the ``result`` event's ``data.blade_uid`` key was
+# repurposed to ``data.experiment_uid`` (phase-9 rename; frontends
+# aligned in phase-14). A v1 TUI reads the old key and renders an
+# empty UID row — silent breakage this bump surfaces as a warning.
+PROTOCOL_VERSION = "2"
 
 
 # Process-level auth bypass for the TS TUI's embedded server. The TUI

@@ -42,7 +42,7 @@ class _GateSettings:
 def _failed_inject_state(**extra) -> dict:
     state = {
         "confirmed_intent": "inject",
-        "fault_spec": {"scope": "pod", "blade_target": "cpu", "blade_action": "fullload"},
+        "fault_spec": {"scope": "pod", "fault_target": "cpu", "fault_action": "fullload"},
         "failure_detail": {"category": "execution_failed"},
     }
     state.update(extra)
@@ -119,8 +119,8 @@ class TestShouldPublish:
         s = _GateSettings()
         state = {
             "confirmed_intent": "inject",
-            "fault_spec": {"scope": "pod", "blade_target": "cpu", "blade_action": "fullload"},
-            "blade_uid": "uid-clean",
+            "fault_spec": {"scope": "pod", "fault_target": "cpu", "fault_action": "fullload"},
+            "experiment_uid": "uid-clean",
             "verification": {
                 "level": "verified",
                 "layer1": {"status": "passed"},
@@ -148,7 +148,7 @@ class TestShouldPublish:
         state = _failed_inject_state(
             failure_detail=None,
             error="earlier attempt timed out",
-            blade_uid="uid-x",
+            experiment_uid="uid-x",
             verification={
                 "level": "verified",
                 "layer1": {"status": "passed"},
@@ -172,7 +172,7 @@ class TestShouldPublish:
         s = _GateSettings()
         state = _failed_inject_state(
             failure_detail=None,
-            blade_uid="uid-y",
+            experiment_uid="uid-y",
             verification={
                 "level": "unverified",
                 "layer1": {"status": "passed"},
@@ -384,7 +384,7 @@ class TestNoMessageScanning:
     def test_envelope_summary_no_longer_embedded(self):
         """Result-envelope fields (blade_uid etc.) stay out of the body —
         the full record is referenced by local path instead."""
-        state = _failed_inject_state(blade_uid="uid-secret-marker-123")
+        state = _failed_inject_state(experiment_uid="uid-secret-marker-123")
         body = build_issue_body(state, "task-ns3", None)
         assert "uid-secret-marker-123" not in body
         assert "tasks/task-ns3.json" in body  # local reference survives

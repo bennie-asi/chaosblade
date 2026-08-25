@@ -49,7 +49,7 @@ from chaos_agent.agent.target_guard.types import EffectiveTarget
 from chaos_agent.config.settings import settings
 
 _DISCOVERY = (
-    "chaos_agent.agent.nodes.execute._injection_detection"
+    "chaos_agent.tools.pod_discovery"
     ".discover_tool_pods_cluster_wide"
 )
 
@@ -129,8 +129,8 @@ class TestDriftPolicyVehicleExemption:
             "namespace": "ark-system",
             "names": ["kone-runtime-5b69b7b8bd-6swrx"],
             "labels": {},
-            "blade_target": "network",
-            "blade_action": "corrupt",
+            "fault_target": "network",
+            "fault_action": "corrupt",
         })
 
     def test_vehicle_exec_skips_identity_drift(self):
@@ -179,8 +179,8 @@ class TestScreenerVehicleExemption:
                     "names": ["kone-runtime-5b69b7b8bd-6swrx"],
                 },
                 params={"scope": "pod"},
-                blade_scope="pod", blade_target="network",
-                blade_action="corrupt",
+                fault_scope="pod", fault_target="network",
+                fault_action="corrupt",
             ),
         }
         state.update(extra)
@@ -365,8 +365,8 @@ class TestDriftCorrectionNeverRewritesTowardVehicle:
             "fault_spec": {
                 "namespace": "ark-system", "scope": "pod",
                 "names": ["kone-runtime-5b69b7b8bd-6swrx"],
-                "labels": {}, "blade_target": "network",
-                "blade_action": "corrupt",
+                "labels": {}, "fault_target": "network",
+                "fault_action": "corrupt",
                 "params": {}, "params_flags": [], "duration_seconds": 0,
                 "source": "test", "user_description": "",
             },

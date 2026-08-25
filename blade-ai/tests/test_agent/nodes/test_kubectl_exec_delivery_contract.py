@@ -33,10 +33,10 @@ so recovery agrees with verification. These tests pin:
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from chaos_agent.agent.nodes.execute._injection_detection import (
+from chaos_agent.agent.providers.chaosblade.verify import (
     was_kubectl_exec_delivery,
 )
-from chaos_agent.agent.providers._detection import scan_kubectl_blade_success
+from chaos_agent.agent.providers.chaosblade.verify import scan_kubectl_blade_success
 
 UID = "a1b2c3d4e5f60718"
 

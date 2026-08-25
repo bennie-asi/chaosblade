@@ -36,8 +36,8 @@ def test_task_to_initial_state(task: L4TestTask) -> dict:
             f"Got payload keys={list(payload.keys())}."
         )
 
-    blade_target = fi.get("target", "")
-    blade_action = fi.get("action", "")
+    fault_target = fi.get("target", "")
+    fault_action = fi.get("action", "")
     scope = fi.get("scope", "")
     namespace = fi.get("namespace", "")
 
@@ -51,8 +51,8 @@ def test_task_to_initial_state(task: L4TestTask) -> dict:
     from chaos_agent.agent.spec.fault_registry import aggregate_cluster_scoped
 
     _required = [
-        ("target", blade_target),
-        ("action", blade_action),
+        ("target", fault_target),
+        ("action", fault_action),
         ("scope", scope),
     ]
     if scope not in aggregate_cluster_scoped():
@@ -84,8 +84,8 @@ def test_task_to_initial_state(task: L4TestTask) -> dict:
         "scope": scope,
         "names": fi.get("names", []),
         "labels": fi.get("labels", {}),
-        "blade_target": blade_target,
-        "blade_action": blade_action,
+        "fault_target": fault_target,
+        "fault_action": fault_action,
         "params": fi.get("params", {}),
         "duration_seconds": fi.get("duration", 600),
         "source": "l4_sdk",
@@ -97,7 +97,6 @@ def test_task_to_initial_state(task: L4TestTask) -> dict:
         task_id=task.task_id,
         fault_spec=fault_spec_dict,
         confirmed_intent="inject",
-        direct=payload.get("direct", False),
         needs_confirmation=False,
         interaction_mode="l4",  # Avoid CLI auto-reject in confirmation_gate
         kubeconfig=payload.get("kubeconfig", ""),
@@ -176,6 +175,12 @@ def state_to_task_result(
     )
     outcome = read_operation_outcome(values)
 
+    experiment_uid_out = (
+        status_data.get("experiment_uid")
+        or values.get("experiment_uid")
+        or ""
+    )
+
     return L4TaskResult(
         task_id=task_id,
         status=status,
@@ -183,7 +188,7 @@ def state_to_task_result(
         summary=status_data.get("fault_type", "") + " \u00b7 " + task_state,
         error=error,
         extras={
-            "blade_uid": status_data.get("blade_uid") or values.get("blade_uid", ""),
+            "experiment_uid": experiment_uid_out,
             "verification": verification,
             "safety": values.get("safety_status"),
             "task_state": task_state,

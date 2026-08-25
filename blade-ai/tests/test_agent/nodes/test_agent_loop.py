@@ -110,8 +110,8 @@ class TestAgentLoop:
             "messages": [],
             "fault_spec": {
                 "scope": "host",
-                "blade_target": "cpu",
-                "blade_action": "fullload",
+                "fault_target": "cpu",
+                "fault_action": "fullload",
                 "names": ["host-1"],
             },
             "kube_connection_mode": "kubeconfig",
@@ -159,8 +159,8 @@ class TestAgentLoop:
             "agent_loop_count": 0,
             "messages": [],
             "fault_spec": {
-                "scope": "node", "blade_target": "cpu",
-                "blade_action": "fullload", "names": ["node-1"],
+                "scope": "node", "fault_target": "cpu",
+                "fault_action": "fullload", "names": ["node-1"],
             },
             "kube_connection_mode": "kubeconfig",
         })
@@ -208,7 +208,7 @@ class TestAgentLoopReplanHandoff:
                 "trigger": "execute_loop",
                 "error_summary": "blade failed",
                 "failed_tool_calls": [{"name": "blade_create", "error": "failed"}],
-                "existing_blade_uids": [],
+                "existing_experiment_uids": [],
             },
             "replan_history": [],
             "replan_count": 1,

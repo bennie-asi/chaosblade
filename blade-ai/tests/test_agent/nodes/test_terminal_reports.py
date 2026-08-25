@@ -1,7 +1,7 @@
 """Behavioral tests for the ``terminal_reports`` node (task-349ccf5d funnel).
 
 The node is the single report-producing step on every experiment
-terminal path (``se_detect`` / ``direct_execute`` end / ``reject``),
+terminal path (``se_detect`` / ``reject``),
 ahead of ``save_memory``. These tests pin:
 
 1. Non-injection intents (chat / recover-bridge) short-circuit without
@@ -83,7 +83,7 @@ class TestPlanningRejectedReport:
         state = {
             "task_id": "task-plrej01",
             "confirmed_intent": "inject",
-            "blade_uid": "",
+            "experiment_uid": "",
             "failure_detail": {
                 "category": "planning_rejected",
                 "context": "user refused the injection plan",
@@ -122,7 +122,7 @@ class TestPlanningRejectedReport:
         state = {
             "task_id": "task-pmdur01",
             "confirmed_intent": "inject",
-            "blade_uid": "",
+            "experiment_uid": "",
             "failure_detail": {
                 "category": "planning_rejected",
                 "context": "user refused the injection plan",
@@ -284,7 +284,7 @@ class TestR11AlwaysWrite:
         state = {
             "task_id": "task-urej01",
             "confirmed_intent": "inject",
-            "blade_uid": "",
+            "experiment_uid": "",
             "failure_detail": {"category": "user_rejected"},
             "messages": [],
         }

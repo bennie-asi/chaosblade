@@ -117,10 +117,11 @@ async def recover_handler(state: AgentState) -> dict:
             if tracker:
                 tracker.update(f"Auto-selected experiment {tid}")
                 tracker.complete()
+            _selected_uid = selected.get("experiment_uid")
             return {
                 "operation": "recover",
                 "recover_task_id": tid,
-                "blade_uid": selected.get("blade_uid"),
+                "experiment_uid": _selected_uid,
                 "messages": [await _announce(state, msg)],
                 "result": {"status": "completed", "message": msg, "recover_task_id": tid},
             }

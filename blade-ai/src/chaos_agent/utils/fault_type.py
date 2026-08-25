@@ -1,121 +1,14 @@
-"""Fault-type classification utilities."""
+"""Fault-type classification utilities.
 
-import shlex
-
-# ChaosBlade K8s valid scopes
-VALID_SCOPES = {"node", "pod", "container"}
-
-# ChaosBlade K8s valid targets per scope
-VALID_TARGETS: dict[str, set[str]] = {
-    "pod": {"cpu", "network", "disk", "process", "pod", "mem", "file", "script"},
-    "node": {"cpu", "network", "disk", "process", "mem"},
-    "container": {"cpu", "network", "disk", "process", "mem"},
-}
-
-
-def validate_blade_params(scope: str, target: str, action: str) -> tuple[bool, str]:
-    """Validate scope/target/action for ChaosBlade K8s scenarios.
-
-    Returns:
-        (is_valid, error_message) — error_message is empty string when valid.
-    """
-    if scope not in VALID_SCOPES:
-        return False, f"Invalid scope '{scope}', must be one of {sorted(VALID_SCOPES)}"
-    valid = VALID_TARGETS.get(scope, set())
-    if target not in valid:
-        return False, f"Invalid target '{target}' for scope '{scope}', must be one of {sorted(valid)}"
-    if not action:
-        return False, "action is required"
-    return True, ""
-
-
-def build_blade_create_args(
-    scope: str,
-    target: str,
-    action: str,
-    namespace: str = "",
-    names: str = "",
-    labels: str = "",
-    kubeconfig: str = "",
-    params: dict = None,
-    params_flags: list = None,
-    duration: int = 0,
-) -> dict:
-    """Build blade_create.ainvoke() arguments from structured parameters.
-
-    Construction logic:
-    1. params key-value pairs → "--key value" in flags
-    2. params_flags bare keys → "--key" in flags (boolean flags)
-    3. duration > 0 → "--timeout <duration>" appended to flags
-    4. evict_count/evict_percent left empty (not needed for direct scenarios)
-
-    Returns:
-        Dict matching blade_create tool signature:
-        {scope, target, action, namespace, names, labels, kubeconfig,
-         evict_count, evict_percent, flags}
-    """
-    # Duration auto-boost: if params already has "timeout", override its value;
-    # otherwise append --timeout after params. Either way, only one --timeout.
-    if duration > 0 and params and "timeout" in params:
-        params["timeout"] = str(duration)
-
-    flags_parts = []
-    if params:
-        for k, v in params.items():
-            flags_parts.extend([f"--{k}", str(v)])
-    if params_flags:
-        for flag in params_flags:
-            flags_parts.append(f"--{flag}")
-    if duration > 0 and (not params or "timeout" not in params):
-        flags_parts.extend(["--timeout", str(duration)])
-
-    return {
-        "scope": scope,
-        "target": target,
-        "action": action,
-        "namespace": namespace,
-        "names": names,
-        "labels": labels,
-        "kubeconfig": kubeconfig,
-        "evict_count": "",
-        "evict_percent": "",
-        "flags": " ".join(flags_parts),
-    }
-
-
-def parse_blade_flags(flags_str: str) -> dict[str, str]:
-    """Parse key parameters from blade flags string.
-
-    Extracts structured parameter values from the raw flags string
-    for verifier/recover_verifier consumption.
-
-    Returns dict with only the parameters found, e.g.:
-      {"path": "/tmp", "percent": "85", "timeout": "600"}
-    """
-    # Key parameters that affect verification strategy
-    KEY_PARAMS = {"path", "percent", "size", "timeout", "time", "cpu-percent", "mem-percent"}
-    result: dict[str, str] = {}
-    if not flags_str:
-        return result
-    try:
-        tokens = shlex.split(flags_str)
-    except ValueError:
-        return result
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
-        if token.startswith("--"):
-            key, separator, inline_value = token[2:].partition("=")
-            if key in KEY_PARAMS and separator:
-                result[key] = inline_value
-                i += 1
-                continue
-            if key in KEY_PARAMS and i + 1 < len(tokens):
-                result[key] = tokens[i + 1]
-                i += 2
-                continue
-        i += 1
-    return result
+Phase-9 T3.3: the ChaosBlade create-args constructor
+``build_blade_create_args`` moved to the carrier side (phase-12: now in
+``providers/chaosblade/declaration.py``; sole consumer is the /plan
+preview); ``validate_blade_params`` and its scope/target tables
+(``VALID_SCOPES``/``VALID_TARGETS``) were dead code (zero consumers
+repo-wide) and deleted outright. What remains is carrier-agnostic
+fault-type knowledge: duration policy, timeout normalization, category
+extraction, and K8s quantity parsing.
+"""
 
 
 def normalize_timeout_flag(argv: list[str]) -> str | None:
@@ -185,8 +78,25 @@ _FAULT_TYPE_MIN_DURATION: dict[tuple[str, str, str], int] = {
 }
 
 # Default minimum duration when fault type is not in the table
-# Must be >= 600s per requirement
+# Must be >= 600s per requirement. This is the ABSOLUTE safety floor:
+# the operator-configured ``experiment_timeout`` is clamped up to it.
 _DEFAULT_MIN_DURATION = 600
+
+
+def _configured_experiment_timeout() -> int:
+    """Return the operator-configured experiment timeout (seconds).
+
+    Reads ``settings.experiment_timeout`` (config.json / env override).
+    Imported lazily so this carrier-agnostic utility module stays
+    import-light. Values below ``_DEFAULT_MIN_DURATION`` are clamped
+    up: the empirical verification-latency floor always wins.
+    """
+    try:
+        from chaos_agent.config.settings import settings
+        configured = int(settings.experiment_timeout)
+    except (ImportError, ValueError, TypeError):
+        configured = _DEFAULT_MIN_DURATION
+    return max(configured, _DEFAULT_MIN_DURATION)
 
 
 def get_recommended_duration(scope: str, target: str, action: str) -> int:
@@ -206,19 +116,24 @@ def ensure_min_duration(
     """Ensure timeout meets the minimum recommended duration for the fault type.
 
     This is the SINGLE source of truth for duration auto-boost logic.
-    Called from blade_create tool, CLI, and direct_execute.
+    Called from the blade_create tool and CLI.
+
+    When no timeout is specified, the operator-configured
+    ``experiment_timeout`` (see settings) is the injected default,
+    never below the per-fault-type empirical floor. Explicit timeouts
+    above the floor pass through untouched.
 
     Args:
         timeout_value: Current --timeout value (0, None, or a positive int/string).
         scope/target/action: Fault type identifiers.
 
     Returns:
-        The effective timeout value (at least the recommended minimum).
+        The effective timeout value in seconds.
     """
     if scope and target and action:
-        recommended = get_recommended_duration(scope, target, action)
+        floor = get_recommended_duration(scope, target, action)
     else:
-        recommended = _DEFAULT_MIN_DURATION
+        floor = _DEFAULT_MIN_DURATION
 
     # Parse current value
     try:
@@ -226,8 +141,11 @@ def ensure_min_duration(
     except (ValueError, TypeError):
         current = 0
 
-    if current < recommended:
-        return recommended
+    if current <= 0:
+        # Unspecified: inject the configured default, clamped to the floor.
+        return max(_configured_experiment_timeout(), floor)
+    if current < floor:
+        return floor
     return current
 
 

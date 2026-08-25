@@ -127,7 +127,7 @@ class TestNameLessSelectionFailsClosed:
 
     APPROVED = {
         "scope": "deployment", "namespace": "ns",
-        "names": ["demo"], "blade_target": "pod",
+        "names": ["demo"], "fault_target": "pod",
     }
 
     def _verdict(self, subcommand: str, v_args: str):

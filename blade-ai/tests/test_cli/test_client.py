@@ -128,7 +128,7 @@ class TestAgentClientConvenience:
                 return None
 
             async def aiter_lines(self):
-                yield 'data: {"type":"result","content":"{\\"status\\":\\"success\\",\\"data\\":{\\"task_id\\":\\"task-recover\\",\\"operation\\":\\"recover\\",\\"task_state\\":\\"recovered\\",\\"blade_uid\\":\\"uid-1\\",\\"target\\":{\\"namespace\\":\\"default\\",\\"names\\":[\\"pod-a\\"]}}}"}'
+                yield 'data: {"type":"result","content":"{\\"status\\":\\"success\\",\\"data\\":{\\"task_id\\":\\"task-recover\\",\\"operation\\":\\"recover\\",\\"task_state\\":\\"recovered\\",\\"experiment_uid\\":\\"uid-1\\",\\"target\\":{\\"namespace\\":\\"default\\",\\"names\\":[\\"pod-a\\"]}}}"}'
 
             async def __aenter__(self):
                 return self

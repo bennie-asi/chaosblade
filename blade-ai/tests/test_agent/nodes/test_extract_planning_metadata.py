@@ -332,9 +332,9 @@ class TestExtractPlanningMetadataNode:
         state = AgentState(
             task_id="test-task",
             skill_case_content="already loaded",
-            blade_scope="pod",
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_scope="pod",
+            fault_target="cpu",
+            fault_action="fullload",
             messages=[],
         )
         result = await extract_planning_metadata(state)
@@ -345,9 +345,9 @@ class TestExtractPlanningMetadataNode:
         """State has blade_scope but not skill_case_content → only skill_case extracted."""
         state = AgentState(
             task_id="test-task",
-            blade_scope="pod",
-            blade_target="disk",
-            blade_action="burn",
+            fault_scope="pod",
+            fault_target="disk",
+            fault_action="burn",
             messages=[
                 _make_tool_msg_read_skill(SAMPLE_SKILL_CASE),
             ],

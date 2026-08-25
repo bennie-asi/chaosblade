@@ -11,7 +11,7 @@ one sampling path instead of inline ``if scope ==`` / hardcoded-command
 branches.
 
 They live in this leaf module so the ``VerificationProfile.post_injection_checks``
-seam can reference them without importing the large ``direct_execute`` node
+seam can reference them without importing the large execute-loop node
 module. Cluster/tool-pod discovery stays lazily imported inside the channel
 layer to avoid load-time coupling.
 """
@@ -32,7 +32,7 @@ async def _verify_disk_fill_effect(
     names: str,
     kubeconfig: str,
     params: dict,
-    blade_uid: str,
+    experiment_uid: str,
     task_id: str,
     state: dict | None = None,
 ) -> dict | None:
@@ -80,7 +80,7 @@ async def _verify_disk_fill_effect(
         "requested_size": size,
         "ls_output": ls_stdout[:500],
         "df_output": df_stdout[:500],
-        "blade_uid": blade_uid,
+        "experiment_uid": experiment_uid,
         "scope": scope,
     }
     if channel.pod_name:
@@ -96,8 +96,8 @@ async def _verify_disk_fill_effect(
     else:
         logger.warning(
             "disk-fill post-check WARNING: no fill file found (scope=%s, path=%s) — "
-            "blade_uid=%s reports Success but filesystem may not have been modified",
-            scope, fill_path, blade_uid,
+            "experiment_uid=%s reports Success but filesystem may not have been modified",
+            scope, fill_path, experiment_uid,
         )
 
     return result
@@ -110,7 +110,7 @@ async def _verify_disk_burn_effect(
     names: str,
     kubeconfig: str,
     params: dict,
-    blade_uid: str,
+    experiment_uid: str,
     task_id: str,
     namespace: str = "",
     state: dict | None = None,
@@ -223,7 +223,7 @@ async def _verify_disk_burn_effect(
         "target_pod": channel.pod_name,
         "node": channel.node_name,
         "scope": scope,
-        "blade_uid": blade_uid,
+        "experiment_uid": experiment_uid,
         "sample_interval_seconds": _SAMPLE_INTERVAL,
     }
 
@@ -238,7 +238,7 @@ async def _verify_disk_burn_effect(
         logger.warning(
             f"disk-burn post-check WARNING: no significant I/O detected on any partition "
             f"(top: {active_partitions[0] if active_partitions else 'none'}) — "
-            f"blade_uid={blade_uid} reports Success but no burn I/O observed"
+            f"experiment_uid={experiment_uid} reports Success but no burn I/O observed"
         )
 
     return result

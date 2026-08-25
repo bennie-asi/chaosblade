@@ -1,5 +1,6 @@
 """Tests for verifier node."""
 
+import inspect
 import json
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
@@ -7,15 +8,35 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+# Phase-13 T2: the blade-success scan's canonical address (the generic-layer
+# shim was retired with the detection import; kept under the historical call
+# name as the equivalence anchor for the successful-test group). Phase-14 G1:
+# the scan's physical address moved from the retired chaosblade/detection.py
+# to chaosblade/verify.py.
+from chaos_agent.agent.providers.chaosblade.verify import (
+    scan_kubectl_blade_success as _was_kubectl_blade_injection_successful,
+)
 from chaos_agent.agent.nodes.execute._injection_detection import (
-    _was_kubectl_blade_injection_successful,
-    _was_blade_create_attempted,
     _was_kubectl_injection_attempted,
+)
+# Phase-4 T2 canonical address (kept under the historical call name as the
+# equivalence anchor for the attempted-test group).
+from chaos_agent.agent.providers.chaosblade.verify import (
+    was_blade_create_attempted as _was_blade_create_attempted,
 )
 from chaos_agent.agent.nodes.verify.verifier import (
     verifier,
-    _run_host_blade_layer1,
+    make_verifier,
     _cleanup_debug_pods,
+    _experiment_uid_of,
+    _recovery_vehicle_of,
+    _resolve_fault_dispatch,
+)
+from chaos_agent.agent.state import materialize_fault_handle
+# Phase-4 T4 canonical address (the Layer-1 execution domain moved to the
+# provider layer; the nodes facade re-exports only the state orchestration).
+from chaos_agent.agent.providers.chaosblade.verify import (
+    _run_host_blade_layer1,
 )
 from chaos_agent.agent.result.verdict import Layer1Result
 from chaos_agent.agent.state import infer_task_state
@@ -52,7 +73,7 @@ def _patch_blade_cmd(mock_async):
     After the transport-layer migration, blade_status/blade_query_k8s
     call ``execute_via_transport`` instead of ``run_command`` directly.
     """
-    with patch("chaos_agent.tools.blade.execute_via_transport", mock_async):
+    with patch("chaos_agent.agent.providers.chaosblade.cli.execute_via_transport", mock_async):
         yield
 
 
@@ -64,7 +85,7 @@ class TestVerifier:
         state = sample_agent_state
         state["task_id"] = "task-123"
         state["skill_name"] = "pod-delete"
-        state["blade_uid"] = "abc123xyz"
+        state["experiment_uid"] = "abc123xyz"
 
         with _patch_blade_cmd(_mock_blade_running()):
             result = await verifier(state)
@@ -74,7 +95,8 @@ class TestVerifier:
         assert result["verification"]["level"] == "partial"
         assert result["result"]["task_id"] == "task-123"
         assert result["result"]["skill"] == "pod-delete"
-        assert result["result"]["blade_uid"] == "abc123xyz"
+        assert result["result"]["experiment_uid"] == "abc123xyz"
+        assert "blade_uid" not in result["result"]
 
     @pytest.mark.asyncio
     async def test_not_verified_without_blade_uid(self, sample_agent_state):
@@ -82,7 +104,7 @@ class TestVerifier:
         state = sample_agent_state
         state["task_id"] = "task-456"
         state["skill_name"] = "pod-delete"
-        state["blade_uid"] = ""
+        state["experiment_uid"] = ""
         state["messages"] = []  # No blade_create ToolMessage
 
         result = await verifier(state)
@@ -97,7 +119,7 @@ class TestVerifier:
         state = sample_agent_state
         state["task_id"] = "task-789"
         state["skill_name"] = "network-delay"
-        state["blade_uid"] = None
+        state["experiment_uid"] = None
         state["messages"] = []  # No blade_create ToolMessage
 
         result = await verifier(state)
@@ -109,15 +131,16 @@ class TestVerifier:
         state = sample_agent_state
         state["task_id"] = "task-struct"
         state["skill_name"] = "cpu-burn"
-        state["blade_uid"] = "uid-999"
+        state["experiment_uid"] = "uid-999"
 
         with _patch_blade_cmd(_mock_blade_running("uid-999")):
             result = await verifier(state)
         r = result["result"]
         assert "task_id" in r
         assert "skill" in r
-        assert "blade_uid" in r
+        assert "experiment_uid" in r
         assert "verified" in r
+        assert "blade_uid" not in r
 
     @pytest.mark.asyncio
     async def test_verification_field_present(self, sample_agent_state):
@@ -125,7 +148,7 @@ class TestVerifier:
         state = sample_agent_state
         state["task_id"] = "task-verify"
         state["skill_name"] = "cpu-burn"
-        state["blade_uid"] = "uid-v1"
+        state["experiment_uid"] = "uid-v1"
 
         with _patch_blade_cmd(_mock_blade_running("uid-v1")):
             result = await verifier(state)
@@ -143,7 +166,7 @@ class TestVerifier:
         state = sample_agent_state
         state["task_id"] = "task-l2skip"
         state["skill_name"] = "cpu-burn"
-        state["blade_uid"] = "uid-l2"
+        state["experiment_uid"] = "uid-l2"
 
         with _patch_blade_cmd(_mock_blade_running("uid-l2")):
             result = await verifier(state)
@@ -156,7 +179,7 @@ class TestVerifier:
         state = sample_agent_state
         state["task_id"] = ""
         state["skill_name"] = "pod-delete"
-        state["blade_uid"] = "uid-1"
+        state["experiment_uid"] = "uid-1"
 
         with _patch_blade_cmd(_mock_blade_running("uid-1")):
             result = await verifier(state)
@@ -169,7 +192,7 @@ class TestVerifier:
         # No blade_create in messages → non-ChaosBlade, Layer 1 skipped, unverified
         assert result["result"]["task_id"] == ""
         assert result["result"]["skill"] == ""
-        assert result["result"]["blade_uid"] == ""
+        assert result["result"]["experiment_uid"] == ""
         assert result["result"]["verified"] is False
         assert result["verification"]["layer1"]["status"] == "skipped"
 
@@ -179,12 +202,49 @@ class TestVerifier:
         state = sample_agent_state
         state["task_id"] = "task-fail"
         state["skill_name"] = "pod-delete"
-        state["blade_uid"] = "uid-fail"
+        state["experiment_uid"] = "uid-fail"
 
         with _patch_blade_cmd(_mock_blade_failed()):
             result = await verifier(state)
         assert result["result"]["verified"] is False
         assert result["verification"]["layer1"]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# make_verifier (entry factory)
+# ---------------------------------------------------------------------------
+
+class TestMakeVerifier:
+    """Phase-5 T4: entry-factory wiring (graph.py:436 assembly semantics)."""
+
+    def test_no_llm_returns_simple_entry(self):
+        # llm=None → the factory hands back the simple (Layer-1 only) entry
+        # itself, not a wrapper.
+        assert make_verifier() is verifier
+        assert make_verifier(llm=None) is verifier
+
+    def test_llm_returns_two_layer_closure(self):
+        # Any non-None llm → the two-layer ReAct closure: callable and
+        # distinct from the simple entry (whose Layer 2 silently skips).
+        node = make_verifier(llm=object())
+        assert callable(node)
+        assert node is not verifier
+
+    def test_active_params_captured_by_closure(self):
+        # graph.py:436 passes hook/llm/tools/registry. The closure actually
+        # consumes hook/llm/tools (free variables); registry is a signature-
+        # compatibility placeholder the closure never reads — asserted absent
+        # so a future wiring change cannot silently drop the active three.
+        fake_llm, fake_hook, fake_registry = object(), object(), object()
+        fake_tools = ["submit_verification"]
+        node = make_verifier(
+            hook=fake_hook, llm=fake_llm, tools=fake_tools, registry=fake_registry,
+        )
+        captured = inspect.getclosurevars(node).nonlocals
+        assert captured["llm"] is fake_llm
+        assert captured["hook"] is fake_hook
+        assert captured["tools"] is fake_tools
+        assert "registry" not in captured
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +340,7 @@ class TestRunLayer1Verification:
 
         # Replace the k8s-only query tool so we can assert it is never invoked.
         query_mock = AsyncMock()
-        monkeypatch.setattr("chaos_agent.tools.blade.blade_query_k8s", query_mock)
+        monkeypatch.setattr("chaos_agent.agent.providers.chaosblade.cli.blade_query_k8s", query_mock)
 
         with _patch_blade_cmd(_mock_blade_running("abc123xyz")):
             result = await _run_host_blade_layer1(
@@ -318,10 +378,10 @@ class TestRunRecoverLayer1DurableRouting:
         """Replan/compaction leaves a failed blade_create ToolMessage but the
         durable record says kubectl-native → recovery must NOT terminate as
         'no UID available'; the fault is live and LLM-recoverable."""
-        from chaos_agent.agent.nodes.recover._recover_layer1 import _run_recover_layer1
+        from chaos_agent.agent.providers.chaosblade.recover import run_layer1_destroy
 
         msg = ToolMessage(content='{"code": 500, "success": false}', name="blade_create", tool_call_id="tc1")
-        result = await _run_recover_layer1(
+        result = await run_layer1_destroy(
             "", "", messages=[msg], injection_method="kubectl_native",
         )
         assert result.status == "skipped"
@@ -330,10 +390,10 @@ class TestRunRecoverLayer1DurableRouting:
     async def test_no_durable_record_keeps_failed_branch(self):
         """Without a durable record the message scan still drives the
         'blade attempted but no UID' terminal failure (backward compatible)."""
-        from chaos_agent.agent.nodes.recover._recover_layer1 import _run_recover_layer1
+        from chaos_agent.agent.providers.chaosblade.recover import run_layer1_destroy
 
         msg = ToolMessage(content='{"code": 500, "success": false}', name="blade_create", tool_call_id="tc1")
-        result = await _run_recover_layer1("", "", messages=[msg])
+        result = await run_layer1_destroy("", "", messages=[msg])
         assert result.status == "failed"
         assert "no UID" in result.details
 
@@ -431,11 +491,19 @@ class TestChaosBladeFailedNoUid:
 
     @pytest.mark.asyncio
     async def test_chaosblade_failed_no_uid_verifier(self, sample_agent_state):
-        """ChaosBlade injection attempted but failed → blade_create ToolMessage exists, no uid → Layer 1 failed."""
+        """ChaosBlade injection attempted but failed, with NO durable
+        attribution (no UID / method / handle) → the evidence-less fault
+        dispatch lands on the UID-less native carrier, whose Layer-1
+        verdict is ``skipped`` (the runner's attempted→``warning`` branch
+        stays reachable only along evidence-bearing routes — a blade-kind
+        attribution handle). Same routing the recover chain's dispatch
+        gives this state; verdict unchanged: unverified. Phase-4 T5
+        dispatch change (was ``warning`` pre-dispatch); the skipped
+        double-meaning split is a separate task (design Non-Goals)."""
         state = sample_agent_state
         state["task_id"] = "task-cb-fail"
         state["skill_name"] = "cpu-burn"
-        state["blade_uid"] = ""
+        state["experiment_uid"] = ""
         # Simulate a failed blade_create call in messages
         state["messages"] = [
             ToolMessage(
@@ -445,8 +513,113 @@ class TestChaosBladeFailedNoUid:
             ),
         ]
         result = await verifier(state)
-        assert result["verification"]["layer1"]["status"] == "warning"
+        assert result["verification"]["layer1"]["status"] == "skipped"
         assert result["result"]["verified"] is False
+
+
+class TestFaultDispatchVerifyMatrix:
+    """Phase-4 T5: verify-chain identity resolution through the unified
+    fault dispatch — the same four-level resolution the recover chain uses
+    (spec verify-chain-provider-protocol, Requirement 1).
+
+    The verify dimension of the dispatch matrix: message-history claim /
+    combo / native attribution states, dual-entry isomorphism, internal
+    resolution agreement, and the end-to-end message-UID path."""
+
+    @staticmethod
+    def _message_history_state(sample_agent_state, uid="msg-uid-1"):
+        """State with NO durable identity record whose message history
+        carries a live experiment claim (successful blade_create)."""
+        state = sample_agent_state
+        state["task_id"] = "task-dispatch-verify"
+        state["skill_name"] = "pod-delete"
+        state["experiment_uid"] = ""
+        state["injection_method"] = None
+        state["fault_handle"] = None
+        state["messages"] = [
+            ToolMessage(
+                content=json.dumps({"code": 200, "success": True, "result": uid}),
+                name="blade_create",
+                tool_call_id="tc-live",
+            ),
+        ]
+        return state
+
+    def test_message_history_uid_routes_experiment_carrier(self, sample_agent_state):
+        """Spec Scenario: message-history claim carries the experiment UID
+        and routes the experiment carrier (replaces the old execute-loop
+        message fallback, which only the simple entry had)."""
+        provider, identity = _resolve_fault_dispatch(
+            self._message_history_state(sample_agent_state)
+        )
+        assert provider.carrier == "chaosblade"
+        assert _experiment_uid_of(identity) == "msg-uid-1"
+
+    def test_combo_attribution_keeps_experiment_uid(self, sample_agent_state):
+        """Spec Scenario: combo state (live experiment UID + native durable
+        attribution) — the verify dispatch identity is the EXPERIMENT
+        handle (UID non-empty), agreeing with the recover chain's
+        dispatch."""
+        state = sample_agent_state
+        state["experiment_uid"] = "uid-combo"
+        state["injection_method"] = "kubectl_native"
+        state["combo_native_issued"] = True
+        state["fault_handle"] = None
+        provider, identity = _resolve_fault_dispatch(state)
+        assert provider.carrier == "chaosblade"
+        assert _experiment_uid_of(identity) == "uid-combo"
+
+    def test_native_attribution_routes_uidless_carrier(self, sample_agent_state):
+        """Spec Scenario: native attribution without an experiment — routes
+        the UID-less native carrier, experiment UID empty."""
+        state = sample_agent_state
+        state["experiment_uid"] = ""
+        state["injection_method"] = "kubectl_native"
+        state["fault_handle"] = None
+        provider, identity = _resolve_fault_dispatch(state)
+        assert provider.carrier == "k8s_native"
+        assert _experiment_uid_of(identity) == ""
+
+    def test_dual_entry_resolution_isomorphic(self, sample_agent_state):
+        """Spec Scenario: dual-entry fallback isomorphism — both entries
+        render their identity through the SAME seam and the SAME expression
+        (dispatch identity first, materialized attribution handle as
+        fallback), and the dispatch is idempotent, so every re-dispatch on
+        the same state (the LLM entry's later ``_recovery_vehicle_of``
+        resolution included) agrees on the same carrier + identity. The LLM
+        entry lacked this message fallback pre-T5."""
+        state = self._message_history_state(sample_agent_state)
+        provider, identity = _resolve_fault_dispatch(state)
+        handle = materialize_fault_handle(state)
+        uid = _experiment_uid_of(identity) or _experiment_uid_of(handle)
+        provider2, identity2 = _resolve_fault_dispatch(state)
+        assert (provider.carrier, identity) == (provider2.carrier, identity2)
+        assert uid == "msg-uid-1"
+
+    def test_recovery_vehicle_follows_dispatch(self, sample_agent_state):
+        """Internal resolution agreement: ``_recovery_vehicle_of`` renders
+        through the DISPATCHED provider — a message-history experiment
+        claim routes to the experiment carrier, whose vehicle record
+        renders (the UID-less default would render None)."""
+        state = self._message_history_state(sample_agent_state)
+        state["kubectl_exec_pod_name"] = "otel-c-tool-abc"
+        assert _recovery_vehicle_of(state) == "otel-c-tool-abc"
+
+    @pytest.mark.asyncio
+    async def test_message_uid_end_to_end_layer1(self, sample_agent_state):
+        """End-to-end (spec Scenario): a message-history UID reaches the
+        experiment carrier's Layer-1 runner through the simple entry —
+        ``run_layer1_for_state`` dispatches on the same evidence and
+        executes Layer 1 WITH that UID."""
+        state = self._message_history_state(sample_agent_state)
+        runner = AsyncMock(return_value=Layer1Result(status="passed", details="ok"))
+        with patch(
+            "chaos_agent.agent.providers.chaosblade.verify._run_host_blade_layer1",
+            runner,
+        ):
+            result = await verifier(state)
+        assert runner.await_args.args[0] == "msg-uid-1"
+        assert result["verification"]["layer1"]["status"] == "passed"
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +800,7 @@ class TestWasBladeCreateAttemptedKubectlOverride:
 
 class TestFindBladeQueryInMessages:
     def test_find_matching_query(self):
-        from chaos_agent.agent.nodes.verify._verifier_layer1 import _find_blade_query_in_messages
+        from chaos_agent.agent.providers.chaosblade.verify import _find_blade_query_in_messages
         query_output = json.dumps({
             "code": 200,
             "success": True,
@@ -645,7 +818,7 @@ class TestFindBladeQueryInMessages:
         assert result == query_output
 
     def test_no_matching_uid(self):
-        from chaos_agent.agent.nodes.verify._verifier_layer1 import _find_blade_query_in_messages
+        from chaos_agent.agent.providers.chaosblade.verify import _find_blade_query_in_messages
         msg = ToolMessage(
             content='{"code":200,"success":true,"result":{"uid":"other-uid"}}',
             name="kubectl",
@@ -655,7 +828,7 @@ class TestFindBladeQueryInMessages:
         assert result == ""
 
     def test_no_kubectl_messages(self):
-        from chaos_agent.agent.nodes.verify._verifier_layer1 import _find_blade_query_in_messages
+        from chaos_agent.agent.providers.chaosblade.verify import _find_blade_query_in_messages
         msg = ToolMessage(content="some output", name="blade_create", tool_call_id="tc1")
         result = _find_blade_query_in_messages([msg], "a0f2357a939a9bb8")
         assert result == ""
@@ -1015,7 +1188,7 @@ class TestExtractKubectlExecPodName:
 
     def test_kubectl_exec_blade_create_extracts_pod_name(self):
         """kubectl exec with blade create → pod name extracted from v_args."""
-        from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
+        from chaos_agent.agent.providers.chaosblade.provider import extract_kubectl_exec_pod_name as _extract_kubectl_exec_pod_name
         msgs = _make_kubectl_tool_call_pair(
             "tc1", "exec",
             "otel-c-tool-abc123 -n chaosblade -- blade create k8s pod-cpu fullload",
@@ -1025,7 +1198,7 @@ class TestExtractKubectlExecPodName:
 
     def test_kubectl_get_not_extracted(self):
         """kubectl get (not exec blade create) → None."""
-        from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
+        from chaos_agent.agent.providers.chaosblade.provider import extract_kubectl_exec_pod_name as _extract_kubectl_exec_pod_name
         msgs = _make_kubectl_tool_call_pair(
             "tc2", "get",
             "pods -n default",
@@ -1035,7 +1208,7 @@ class TestExtractKubectlExecPodName:
 
     def test_kubectl_exec_without_blade_not_extracted(self):
         """kubectl exec without blade create → None."""
-        from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
+        from chaos_agent.agent.providers.chaosblade.provider import extract_kubectl_exec_pod_name as _extract_kubectl_exec_pod_name
         msgs = _make_kubectl_tool_call_pair(
             "tc3", "exec",
             "otel-c-tool -n chaosblade -- ls /tmp",
@@ -1045,12 +1218,12 @@ class TestExtractKubectlExecPodName:
 
     def test_empty_messages_returns_none(self):
         """Empty messages list → None."""
-        from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
+        from chaos_agent.agent.providers.chaosblade.provider import extract_kubectl_exec_pod_name as _extract_kubectl_exec_pod_name
         assert _extract_kubectl_exec_pod_name([]) is None
 
     def test_non_chaosblade_json_returns_none(self):
         """kubectl exec with non-ChaosBlade JSON response → None."""
-        from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
+        from chaos_agent.agent.providers.chaosblade.provider import extract_kubectl_exec_pod_name as _extract_kubectl_exec_pod_name
         msgs = _make_kubectl_tool_call_pair(
             "tc4", "exec",
             "otel-c-tool -n chaosblade -- blade create k8s pod-cpu fullload",
@@ -1060,7 +1233,7 @@ class TestExtractKubectlExecPodName:
 
     def test_multiple_blade_creates_returns_most_recent(self):
         """Multiple kubectl exec blade creates → returns the most recent pod name."""
-        from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
+        from chaos_agent.agent.providers.chaosblade.provider import extract_kubectl_exec_pod_name as _extract_kubectl_exec_pod_name
         msgs1 = _make_kubectl_tool_call_pair(
             "tc1", "exec",
             "otel-c-tool-old -n chaosblade -- blade create k8s pod-cpu fullload",
@@ -1076,7 +1249,7 @@ class TestExtractKubectlExecPodName:
 
     def test_v_args_with_leading_whitespace(self):
         """v_args with leading whitespace → still extracts pod name correctly."""
-        from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
+        from chaos_agent.agent.providers.chaosblade.provider import extract_kubectl_exec_pod_name as _extract_kubectl_exec_pod_name
         msgs = _make_kubectl_tool_call_pair(
             "tc5", "exec",
             "  otel-c-tool-ws  -n chaosblade -- blade create k8s pod-cpu fullload",
@@ -1088,7 +1261,7 @@ class TestExtractKubectlExecPodName:
         """v_args starting with `-n` is valid kubectl syntax — pod name must
         still be extracted (task-2d612caa regression: losing the injection
         pod made Layer 1 read an unrelated pod's empty local DB as failure)."""
-        from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
+        from chaos_agent.agent.providers.chaosblade.provider import extract_kubectl_exec_pod_name as _extract_kubectl_exec_pod_name
         msgs = _make_kubectl_tool_call_pair(
             "tc6", "exec",
             "-n chaosblade otel-c-tool -- blade create k8s pod-cpu fullload",
@@ -1098,7 +1271,7 @@ class TestExtractKubectlExecPodName:
 
     def test_legacy_session_without_tool_call_id(self):
         """ToolMessage without tool_call_id → fallback to AIMessage scan."""
-        from chaos_agent.agent.nodes.execute._injection_detection import _extract_kubectl_exec_pod_name
+        from chaos_agent.agent.providers.chaosblade.provider import extract_kubectl_exec_pod_name as _extract_kubectl_exec_pod_name
         ai_msg = AIMessage(
             content="",
             tool_calls=[{
@@ -1133,14 +1306,14 @@ class TestLayer2ToolPodNamespace:
             namespace="cms-demo",
             scope="node",
             names=("node-a",),
-            blade_target="network",
-            blade_action="delay",
+            fault_target="network",
+            fault_action="delay",
             params={"time": "3000"},
         )
         return {
             "messages": [HumanMessage(content="inject")],
             "fault_spec": spec.to_dict(),
-            "blade_parsed_flags": {},
+            "injection_parsed_params": {},
             "params": {},
             "kubeconfig": "/path/to/kc",
         }
@@ -1179,7 +1352,9 @@ class TestParsePodNameFromVArgs:
     """Flag-order tolerance of _parse_pod_name_from_v_args (task-2d612caa)."""
 
     def _parse(self, v_args):
-        from chaos_agent.agent.nodes.execute._injection_detection import _parse_pod_name_from_v_args
+        # phase-3 T3: the pod-name argv parser moved to the chaosblade provider
+        # (kubectl-exec delivery domain knowledge).
+        from chaos_agent.agent.providers.chaosblade.provider import _parse_pod_name_from_v_args
         return _parse_pod_name_from_v_args(v_args)
 
     def test_pod_first_classic_order(self):
@@ -1213,7 +1388,7 @@ class TestRunLayer1ViaKubectlExecWithOriginalPod:
     @pytest.mark.asyncio
     async def test_original_pod_succeeds(self):
         """Original pod is available → uses blade query k8s directly, no discovery needed."""
-        from chaos_agent.agent.nodes.verify._verifier_layer1 import _run_layer1_via_kubectl_exec
+        from chaos_agent.agent.providers.chaosblade.verify import _run_layer1_via_kubectl_exec
         from chaos_agent.tools.shell import CommandResult
 
         # blade query k8s returns success for a running experiment
@@ -1243,7 +1418,7 @@ class TestRunLayer1ViaKubectlExecWithOriginalPod:
     @pytest.mark.asyncio
     async def test_original_pod_not_found_falls_back(self):
         """Original pod blade query k8s returns error → falls back to blade status → discovery."""
-        from chaos_agent.agent.nodes.verify._verifier_layer1 import _run_layer1_via_kubectl_exec
+        from chaos_agent.agent.providers.chaosblade.verify import _run_layer1_via_kubectl_exec
         from chaos_agent.tools.shell import CommandResult
 
         # blade query k8s returns error on original pod (unavailable)
@@ -1288,7 +1463,7 @@ class TestRunLayer1ViaKubectlExecWithOriginalPod:
     @pytest.mark.asyncio
     async def test_no_original_pod_discovers_normally(self):
         """No original pod name → falls through to discovery, uses blade query k8s."""
-        from chaos_agent.agent.nodes.verify._verifier_layer1 import _run_layer1_via_kubectl_exec
+        from chaos_agent.agent.providers.chaosblade.verify import _run_layer1_via_kubectl_exec
         from chaos_agent.tools.shell import CommandResult
 
         discover_result = CommandResult(
@@ -1324,7 +1499,7 @@ class TestRunLayer1ViaKubectlExecWithOriginalPod:
         """task-2d612caa: a discovered pod whose LOCAL DB lacks the record is
         not a verdict — the experiment lives in the injection pod's DB only,
         so discovery must probe the next pod before failing."""
-        from chaos_agent.agent.nodes.verify._verifier_layer1 import _run_layer1_via_kubectl_exec
+        from chaos_agent.agent.providers.chaosblade.verify import _run_layer1_via_kubectl_exec
         from chaos_agent.tools.shell import CommandResult
 
         discover_result = CommandResult(
@@ -1373,7 +1548,7 @@ class TestRunLayer1ViaKubectlExecWithOriginalPod:
         """Discovery order is arbitrary: the injection pod may sit at
         position 3+, past the former 2-pod cap. The sweep must keep probing
         until the pod holding the record is reached."""
-        from chaos_agent.agent.nodes.verify._verifier_layer1 import _run_layer1_via_kubectl_exec
+        from chaos_agent.agent.providers.chaosblade.verify import _run_layer1_via_kubectl_exec
         from chaos_agent.tools.shell import CommandResult
 
         discover_result = CommandResult(
@@ -1419,7 +1594,7 @@ class TestRunLayer1ViaKubectlExecWithOriginalPod:
     async def test_discovery_record_not_found_everywhere_fails(self):
         """Every probed pod answered but none holds the record → genuine
         failure (experiment lost), not an infrastructure skip."""
-        from chaos_agent.agent.nodes.verify._verifier_layer1 import _run_layer1_via_kubectl_exec
+        from chaos_agent.agent.providers.chaosblade.verify import _run_layer1_via_kubectl_exec
         from chaos_agent.tools.shell import CommandResult
 
         discover_result = CommandResult(
@@ -2320,7 +2495,7 @@ class TestL2DowngradeLevelSync:
         state = {
             "operation": "inject",
             "skill_name": "test-fault",
-            "blade_uid": "test-uid",
+            "experiment_uid": "test-uid",
             "verification": {
                 "level": "partial",
                 "layer1": {"status": "passed"},
@@ -2453,18 +2628,17 @@ class TestBaselineComparisonInLayer2Context:
         ] if baseline_success else []
         return {
             "task_id": "test-bl-1",
-            "blade_scope": "node",
-            "blade_target": "disk",
-            "blade_action": "fill",
-            "blade_uid": "test-uid-123",
-            "direct": True,
+            "fault_scope": "node",
+            "fault_target": "disk",
+            "fault_action": "fill",
+            "experiment_uid": "test-uid-123",
             "baseline_data": {
                 "captured_at": "2026-05-09T10:00:00",
                 "source": "registry",
                 "observations": observations,
                 "success_count": 1 if baseline_success else 0,
             },
-            "blade_parsed_flags": {"path": "/tmp", "size": "10000"},
+            "injection_parsed_params": {"path": "/tmp", "size": "10000"},
             "params": {},
             "target": {"namespace": "default", "names": ["test-node"], "labels": {}},
             "kubeconfig": "/path/to/kubeconfig",
@@ -2484,7 +2658,7 @@ class TestBaselineComparisonInLayer2Context:
         # Verify _build_baseline_tool_messages produces ToolMessage pairs
         msgs = _build_baseline_tool_messages(
             baseline, "disk", "fill",
-            blade_parsed={"path": "/tmp", "size": "10000"},
+            injection_parsed={"path": "/tmp", "size": "10000"},
         )
         assert len(msgs) >= 2  # At least one AIMessage + ToolMessage pair
         # First pair: raw observations
@@ -2533,7 +2707,7 @@ class TestFillFileCheck:
 
     def test_fill_file_context_for_node_disk_fill(self):
         """For node-disk-fill, the Fill File Check section should be generated."""
-        blade_parsed = {"path": "/tmp", "size": "10000"}
+        injection_parsed = {"path": "/tmp", "size": "10000"}
         blade_scope = "node"
         blade_target = "disk"
         blade_action = "fill"
@@ -2541,7 +2715,7 @@ class TestFillFileCheck:
         kubeconfig = "/path/to/kubeconfig"
 
         # Simulate the context generation logic
-        fill_path = blade_parsed.get("path", "/tmp")
+        fill_path = injection_parsed.get("path", "/tmp")
         context = ""
         if blade_target == "disk" and blade_action == "fill" and blade_scope == "node":
             if tool_pod_name:
@@ -2602,11 +2776,10 @@ class TestSyntheticMessagePersistence:
         """State with baseline_data for synthetic message injection."""
         return {
             "task_id": "test-synth-1",
-            "blade_scope": "pod",
-            "blade_target": "cpu",
-            "blade_action": "fullload",
-            "blade_uid": "uid-synth-123",
-            "direct": True,
+            "fault_scope": "pod",
+            "fault_target": "cpu",
+            "fault_action": "fullload",
+            "experiment_uid": "uid-synth-123",
             "baseline_data": {
                 "captured_at": "2026-05-09T10:00:00",
                 "source": "registry",
@@ -2623,7 +2796,7 @@ class TestSyntheticMessagePersistence:
                 ],
                 "success_count": 1,
             },
-            "blade_parsed_flags": {},
+            "injection_parsed_params": {},
             "params": {},
             "target": {"namespace": "default", "names": ["myapp-pod"], "labels": {"app": "myapp"}},
             "kubeconfig": "/path/to/kubeconfig",
@@ -2679,7 +2852,7 @@ class TestSyntheticMessagePersistence:
         # Build synthetic messages as if they were persisted from count==1
         baseline = baseline_state["baseline_data"]
         synthetic_msgs = _build_baseline_tool_messages(
-            baseline, "cpu", "fullload", blade_parsed={},
+            baseline, "cpu", "fullload", injection_parsed={},
         )
 
         # Simulate state after count==1: synthetic msgs in messages history
@@ -2736,7 +2909,7 @@ class TestSyntheticMessagePersistence:
 
         baseline = baseline_state["baseline_data"]
         synthetic_for_state = _build_baseline_tool_messages(
-            baseline, "cpu", "fullload", blade_parsed={},
+            baseline, "cpu", "fullload", injection_parsed={},
         )
 
         # Simulate response (AIMessage with no tool_calls — final answer)
@@ -3369,7 +3542,7 @@ class TestVerificationCycleDetection:
         state = {
             "messages": [self._marker(), HumanMessage(content="new cycle start")],
             "attribution_epoch_index": 1,
-            "blade_parsed_flags": {},
+            "injection_parsed_params": {},
             "params": {},
         }
         assert self._layer2_context_count(state, count=5) == 1
@@ -3377,7 +3550,7 @@ class TestVerificationCycleDetection:
     def test_layer2_skips_when_marker_current(self):
         state = {
             "messages": [HumanMessage(content="inject"), self._marker()],
-            "blade_parsed_flags": {},
+            "injection_parsed_params": {},
             "params": {},
         }
         assert self._layer2_context_count(state, count=2) == 0

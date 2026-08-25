@@ -349,11 +349,11 @@ async def extract_planning_metadata(state: AgentState) -> dict:
     in messages) and baseline_capture (which reads from State).
 
     For each field: only writes if the field is NOT already in State
-    (direct_setup may have populated these for CLI mode).
+    (an upstream node may have populated these).
 
     Returns:
         dict with keys to merge into State. May be empty if all fields
-        are already populated (direct mode).
+        are already populated.
     """
     from chaos_agent.agent.spec.fault_spec import read_fault_spec
 
@@ -505,12 +505,12 @@ async def extract_planning_metadata(state: AgentState) -> dict:
     # NOTE: Guard 1a (path-based case validation) removed.
     # LLM explicitly chooses the skill case via finish_planning — trust that decision.
     # Static keyword matching is strictly less capable than model reasoning and
-    # produces false negatives (e.g. "Pod_OOM内存异常" vs blade_action="load").
+    # produces false negatives (e.g. "Pod_OOM内存异常" vs fault_action="load").
     _case_content = result.get("skill_case_content") or state.get("skill_case_content") or ""
 
     # 1b. Guard: reject planning if no catalogue use-case was loaded.
     # Only enforce when messages exist (agent_loop has run). Empty messages
-    # means direct_setup path or test — no guard needed.
+    # means a test entry — no guard needed.
     # Bypass: if the LLM has browsed the catalogue and found no match,
     # it may design its own plan — allow that through.
     has_case = bool(
@@ -535,7 +535,7 @@ async def extract_planning_metadata(state: AgentState) -> dict:
         ))]
         return result
 
-    # 2. fault_spec scope/blade_target/blade_action derivation.
+    # 2. fault_spec scope/fault_target/fault_action derivation.
     #
     # TUI mode: intent_clarification populates the spec from the user's
     # explicit submit_fault_intent — spec.is_complete is True here, this
@@ -548,7 +548,7 @@ async def extract_planning_metadata(state: AgentState) -> dict:
     # with "No target specified".
     spec = read_fault_spec(state)
     if spec is not None and not (
-        spec.scope and spec.blade_target and spec.blade_action
+        spec.scope and spec.fault_target and spec.fault_action
     ):
         source_case = (
             result.get("skill_case_content")
@@ -581,10 +581,10 @@ async def extract_planning_metadata(state: AgentState) -> dict:
                     updates["names"] = ()
             elif not scope_from_blade and not spec.scope:
                 updates["scope"] = derived_scope
-        if derived_target and not spec.blade_target:
-            updates["blade_target"] = derived_target
-        if derived_action and not spec.blade_action:
-            updates["blade_action"] = derived_action
+        if derived_target and not spec.fault_target:
+            updates["fault_target"] = derived_target
+        if derived_action and not spec.fault_action:
+            updates["fault_action"] = derived_action
         if updates:
             new_spec = spec.replace(**updates)
             result["fault_spec"] = new_spec.to_dict()

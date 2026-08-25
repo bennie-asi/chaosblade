@@ -1,6 +1,7 @@
 """Agent factory: creates compiled graphs with checkpointer and tools."""
 
 import logging
+from dataclasses import dataclass
 
 from chaos_agent.agent.graph import build_recover_graph
 from chaos_agent.config.settings import settings
@@ -51,6 +52,208 @@ def _append_provider_tools(base: list, phase: str) -> list:
                 seen.add(name)
                 out.append(tool)
     return out
+
+
+@dataclass(frozen=True)
+class PhaseSpec:
+    """One row of the phase → tool-surface matrix (see ``create_agent``).
+
+    Declarative build-time description of one command phase's tool surface:
+    the static base tools, the provider phase whose union is appended, and
+    the MCP attach_to phase name (if any). Frozen on purpose — this is a
+    build-time declaration, not a runtime-mutable registry;
+    ``_assemble_phase_tools`` is its only consumer.
+    """
+
+    name: str
+    static_base: tuple
+    provider_phase: str
+    mcp_attach: str | None
+
+
+def _phase_specs(skill_tools) -> tuple[PhaseSpec, ...]:
+    """The declarative phase → tool-surface matrix (single source of truth).
+
+    The assembly loop in ``_assemble_phase_tools`` builds each phase's tool
+    list from each row's three inputs, strictly in order:
+    static base → MCP attach (if a manager is present) → provider union.
+
+    Safety rationale per row (preserved from the previous per-phase blocks
+    in ``create_agent`` — do not drop):
+
+    clarification — only available in intent_clarification node (TUI
+      mode). All tools are real @tool functions processed by ToolNode;
+      the LLM's action IS the intent — no separate classification tool
+      is needed: pure text response = chat/Q&A (graph
+      ends, TUI waits for next input), submit_fault_intent = inject flow,
+      submit_batch_intent = batch inject flow, recover_task = recover
+      flow, activate_skill / read_skill_resource = semantic catalog
+      lookup, provider PLAN tools = read-only discovery of the current
+      environment. Intent always receives the complete skill catalog; its
+      discovery tool binding is selected from the active transport only,
+      so it can inspect targets without making the supported fault
+      vocabulary transport-dependent.
+
+    phase1 (P1-1 tightened tool surface; planning / agent_loop) —
+      ``blade_create`` ABSENT from planning: ChaosBlade has no dry-run
+      mode, so binding it here handed
+      the planner a path past the confirmation gate (caught in
+      sess_dd91ed7271b2: four ``blade_create`` attempts during
+      ``agent_loop`` before ``confirmation_gate`` fired).
+      ``blade_destroy`` ABSENT: it mutates cluster state; partial-create
+      cleanup belongs to Phase 2 ReAct (UID-provenance guarded).
+      ``kubectl_read`` (NOT full ``kubectl``): full kubectl was the bypass
+      vector in task-ce9647931ce1 (``kubectl exec <pod> -- blade create``);
+      ``kubectl_read``'s ``Literal`` subcommand constraint + read-only exec
+      gating block it. Static base excludes ``write_file`` /
+      ``search_files`` / ``execute_skill_script`` — planning is read-only
+      + save_fault_plan. The backend planning tools are contributed by
+      the PLAN-phase provider union (the row's provider_phase column),
+      NOT hardcoded in the static base — see ChaosbladeProvider.tools /
+      K8sNativeProvider.tools for the per-tool safety rationale.
+
+    phase2 (P1-1; execution / execute_loop) — executes the APPROVED
+      Phase-1 plan (injected into the execute
+      prompt via ``plan`` / ``plan_path``). ``blade_destroy`` is available
+      for ReAct cleanup of a partial/failed create, but the screener only
+      permits UIDs observed in this task's own blade_create ToolMessages.
+      ``read_skill_resource`` NOT bound: planning already distilled the
+      skill use-case into the approved plan, so re-reading the raw case
+      during execution is unnecessary.
+
+    verifier — read-only verification work. ``submit_verification``
+      (Scheme B) is the control-signal tool the verifier LLM calls to
+      submit a structured verdict and end verification;
+      ``route_after_verifier_tools`` routes its execution to
+      ``finalize_verification``.
+
+    recover_verifier — read-only verification work; shares the same MCP
+      attach_to as the inject verifier phase ("verifier"). Its provider
+      union (RECOVER_VERIFY) contributes kubectl-native's full ``kubectl``
+      (run the reverse op; superset of ``kubectl_read``) and host-shell's
+      ``host_inject`` (superset of ``host_read``).
+    """
+    _by_name = {t.name: t for t in skill_tools}
+    _activate_skill = _by_name["activate_skill"]
+    _read_skill_resource = _by_name["read_skill_resource"]
+    _read_file = _by_name["read_file"]
+    _save_fault_plan = _by_name["save_fault_plan"]
+    _finish_planning = _by_name["finish_planning"]
+    _propose_plan_change = _by_name["propose_plan_change"]
+    _execute_skill_script = _by_name["execute_skill_script"]
+
+    from chaos_agent.agent.nodes.planning.intent_clarification import submit_fault_intent, submit_batch_intent, query_active_experiments, recover_task
+    from chaos_agent.tools.progress import update_progress  # progress ledger (all ReAct phases)
+    from chaos_agent.tools.wait import time_wait
+    from chaos_agent.agent.replan import request_replan
+    from chaos_agent.agent.nodes.verify._verifier_submit import submit_verification, submit_recover_verification
+    from chaos_agent.agent.providers import EXECUTE, PLAN, RECOVER_VERIFY, VERIFY
+
+    return (
+        PhaseSpec(
+            name="clarification",
+            static_base=(
+                _activate_skill,
+                _read_skill_resource,
+                submit_fault_intent,
+                submit_batch_intent,
+                query_active_experiments,
+                recover_task,
+            ),
+            provider_phase=PLAN,
+            mcp_attach="clarification",
+        ),
+        # PLAN-phase provider union contributes the read-only backend
+        # planning tools: ChaosBlade's ``blade_help`` / ``blade_status`` and
+        # kubectl-native's ``kubectl_read`` (NOT full kubectl — see row
+        # comment above and K8sNativeProvider.tools docstring).
+        # ``blade_create`` / ``blade_destroy`` / full ``kubectl`` are
+        # execute-only and never surface here.
+        PhaseSpec(
+            name="phase1",
+            static_base=(
+                _activate_skill,
+                _read_skill_resource,
+                _read_file,
+                _save_fault_plan,
+                _finish_planning,
+                _propose_plan_change,
+                read_knowledge_resource,
+                update_progress,
+            ),
+            provider_phase=PLAN,
+            mcp_attach="phase1",
+        ),
+        # EXECUTE-phase provider union contributes the injection carriers:
+        # ChaosBlade's ``blade_create`` / ``blade_destroy`` / ``blade_help`` /
+        # ``blade_status`` / ``blade_query_k8s``, kubectl-native's full
+        # ``kubectl``, host-shell's ``host_inject`` (superset of
+        # ``host_read``), and the Python-app carrier's ``blade_python_*``.
+        PhaseSpec(
+            name="phase2",
+            static_base=(
+                _execute_skill_script,
+                read_knowledge_resource,
+                time_wait,
+                request_replan,
+                update_progress,
+            ),
+            provider_phase=EXECUTE,
+            mcp_attach="phase2",
+        ),
+        # VERIFY-phase provider union contributes kubectl-native's read-only
+        # ``kubectl_read`` and host-shell's read-only ``host_read``.
+        PhaseSpec(
+            name="verifier",
+            static_base=(
+                _read_skill_resource,
+                _execute_skill_script,
+                read_knowledge_resource,
+                submit_verification,
+                time_wait,
+                update_progress,
+            ),
+            provider_phase=VERIFY,
+            mcp_attach="verifier",
+        ),
+        PhaseSpec(
+            name="recover_verifier",
+            static_base=(
+                _read_skill_resource,
+                _execute_skill_script,
+                read_knowledge_resource,
+                submit_recover_verification,
+                time_wait,
+                update_progress,
+            ),
+            provider_phase=RECOVER_VERIFY,
+            mcp_attach="verifier",  # shared with the inject verifier phase
+        ),
+    )
+
+
+def _assemble_phase_tools(skill_tools, mcp_manager=None) -> dict[str, list]:
+    """Assemble every phase's tool list from the PhaseSpec matrix.
+
+    Per row, strictly in order: static base → MCP attach (if a manager is
+    present) → provider union. ``_append_provider_tools`` dedups by name
+    against everything already in the list, so the static base must come
+    first.
+
+    Note: the previous per-phase blocks in ``create_agent`` assembled
+    ``clarification`` as static → provider → MCP while the other four were
+    static → MCP → provider; this loop unifies on the latter. With an MCP
+    manager present that swaps the relative order of provider vs MCP tools
+    in the clarification list only — the tool *set* is unchanged, and tool
+    binding / dispatch is by name, not position.
+    """
+    tools_by_phase: dict[str, list] = {}
+    for spec in _phase_specs(skill_tools):
+        tools = list(spec.static_base)
+        if mcp_manager is not None and spec.mcp_attach is not None:
+            tools = tools + mcp_manager.tools_for_phase(spec.mcp_attach)
+        tools_by_phase[spec.name] = _append_provider_tools(tools, spec.provider_phase)
+    return tools_by_phase
 
 
 # ---------------------------------------------------------------------------
@@ -546,9 +749,10 @@ def _build_skill_tools(registry: SkillRegistry):
           - plan_content: full plan in Markdown using these EXACT ``##``
             headers: ``## Task Summary``, ``## Execution Steps``,
             ``## Expected Impact``, ``## Verification Methods``,
-            ``## Rollback and Recovery``. Phase 2 executes only "Execution
-            Steps"; "Verification Methods" + "Expected Impact" reach the
-            verifier as its environment-adapted overlay.
+            ``## Rollback and Recovery``. Phase 2 executes "Execution Steps"
+            literally — keep it to MUTATION steps (observation steps go to
+            "Verification Methods"). "Verification Methods" + "Expected
+            Impact" reach the verifier as its environment-adapted overlay.
           - task_id: task identifier used as the filename.
           - skill_case_resource: The resource_path of the chosen skill case file
             (e.g. "references/catalogue/Pod_镜像拉取失败/Pod_镜像拉取失败_镜像不存在或标签错误.md").
@@ -792,146 +996,18 @@ async def create_agent(
     Returns:
         Dict with compiled graph instances: {"inject": ..., "recover": ...}
     """
-    # Build tool lists
+    # Build tool lists. The phase → tool-surface matrix (which tools each
+    # command phase may call, with per-phase safety rationale) and its
+    # assembly loop are single-sourced at module level — see
+    # ``_phase_specs`` / ``_assemble_phase_tools``.
     skill_tools = _build_skill_tools(registry)
-    _skill_tools_by_name = {t.name: t for t in skill_tools}
-    _activate_skill = _skill_tools_by_name["activate_skill"]
-    _read_skill_resource = _skill_tools_by_name["read_skill_resource"]
-    _read_file = _skill_tools_by_name["read_file"]
-    _save_fault_plan = _skill_tools_by_name["save_fault_plan"]
-    _finish_planning = _skill_tools_by_name["finish_planning"]
-    _propose_plan_change = _skill_tools_by_name["propose_plan_change"]
-    _execute_skill_script = _skill_tools_by_name["execute_skill_script"]
+    tools_by_phase = _assemble_phase_tools(skill_tools, mcp_manager)
 
-    # Clarification tools: only available in intent_clarification node (TUI mode).
-    # All tools are real @tool functions processed by ToolNode. The LLM's
-    # action IS the intent — no separate classification tool needed:
-    #   - Pure text response = chat/Q&A (graph ends, TUI waits for next input)
-    #   - submit_fault_intent = inject flow
-    #   - submit_batch_intent = batch inject flow
-    #   - recover_task = recover flow
-    #   - activate_skill / read_skill_resource = semantic catalog lookup
-    #   - provider PLAN tools = read-only discovery of the current environment
-    #
-    # Intent always receives the complete skill catalog. Its discovery tool
-    # binding is selected from the active transport only, so it can inspect
-    # targets without making the supported fault vocabulary transport-dependent.
-    from chaos_agent.agent.nodes.planning.intent_clarification import submit_fault_intent, submit_batch_intent, query_active_experiments, recover_task
-
-    clarification_tools = [
-        _activate_skill,
-        _read_skill_resource,
-        submit_fault_intent,
-        submit_batch_intent,
-        query_active_experiments,
-        recover_task,
-    ]
-    from chaos_agent.agent.providers import EXECUTE, PLAN, RECOVER_VERIFY, VERIFY
-    clarification_tools = _append_provider_tools(clarification_tools, PLAN)
-    if mcp_manager is not None:
-        clarification_tools = clarification_tools + mcp_manager.tools_for_phase("clarification")
-
-    # P1-1: Phase 1 (planning / agent_loop) — tightened tool surface.
-    #
-    # The backend planning tools (ChaosBlade ``blade_help`` / ``blade_status``,
-    # kubectl-native ``kubectl_read``) are contributed by the PLAN-phase provider
-    # union below, NOT hardcoded here — see ChaosbladeProvider.tools /
-    # K8sNativeProvider.tools for the per-tool safety rationale. The critical
-    # Phase-1 invariants those docstrings enforce:
-    #   - ``blade_create`` ABSENT from planning — ChaosBlade has no dry-run mode,
-    #     so binding it here handed the planner a path past the confirmation gate
-    #     (caught in sess_dd91ed7271b2: four ``blade_create`` attempts during
-    #     ``agent_loop`` before ``confirmation_gate`` fired).
-    #   - ``blade_destroy`` ABSENT — it mutates cluster state; partial-create
-    #     cleanup belongs to Phase 2 ReAct (UID-provenance guarded).
-    #   - ``kubectl_read`` (NOT full ``kubectl``) — full kubectl was the bypass
-    #     vector in task-ce9647931ce1 (``kubectl exec <pod> -- blade create``);
-    #     ``kubectl_read``'s ``Literal`` subcommand constraint + read-only exec
-    #     gating block it.
-    #
-    # This static base excludes ``write_file`` / ``search_files`` /
-    # ``execute_skill_script`` for the "planning is read-only + save_fault_plan"
-    # reason.
-    from chaos_agent.tools.progress import update_progress  # progress ledger (all ReAct phases)
-    phase1_tools = [
-        _activate_skill,
-        _read_skill_resource,
-        _read_file,
-        _save_fault_plan,
-        _finish_planning,
-        _propose_plan_change,
-        read_knowledge_resource,
-        update_progress,
-    ]
-    if mcp_manager is not None:
-        phase1_tools = phase1_tools + mcp_manager.tools_for_phase("phase1")
-    # Provider tool union (plan phase). Contributes the read-only backend
-    # planning tools: ChaosBlade's ``blade_help`` / ``blade_status`` and
-    # kubectl-native's ``kubectl_read`` (NOT full kubectl — see K8sNativeProvider.
-    # tools docstring). ``blade_create`` / ``blade_destroy`` / full ``kubectl``
-    # are execute-only and never surface here.
-    phase1_tools = _append_provider_tools(phase1_tools, PLAN)
-
-    # P1-1: Phase 2 (execution / execute_loop) — tightened tool surface.
-    # Excludes read_skill_resource. ``blade_destroy`` is available for ReAct
-    # cleanup of a partial/failed create, but the screener only permits UIDs
-    # observed in this task's own blade_create ToolMessages.
-    #   - read_skill_resource: NOT bound here. Phase 2 executes the APPROVED PLAN
-    #     produced in Phase 1 (injected into the execute prompt via ``plan`` /
-    #     ``plan_path``); planning already distilled the skill use-case into that
-    #     plan, so re-reading the raw case during execution is unnecessary.
-    from chaos_agent.tools.wait import time_wait
-    from chaos_agent.agent.replan import request_replan
-    phase2_tools = [
-        _execute_skill_script,
-        read_knowledge_resource,
-        time_wait,
-        request_replan,
-        update_progress,
-    ]
-    if mcp_manager is not None:
-        phase2_tools = phase2_tools + mcp_manager.tools_for_phase("phase2")
-    # Provider tool union (execute phase). Contributes the injection carriers:
-    # ChaosBlade's ``blade_create`` / ``blade_destroy`` / ``blade_help`` /
-    # ``blade_status`` / ``blade_query_k8s``, kubectl-native's full ``kubectl``,
-    # and host-shell's ``host_inject`` (superset of ``host_read``).
-    phase2_tools = _append_provider_tools(phase2_tools, EXECUTE)
-
-    # submit_verification (Scheme B): control-signal tool the verifier LLM
-    # calls to submit a structured verdict and end verification.
-    # route_after_verifier_tools routes its execution to finalize_verification.
-    from chaos_agent.agent.nodes.verify._verifier_submit import submit_verification
-    verifier_tools = [
-        _read_skill_resource,
-        _execute_skill_script,
-        read_knowledge_resource,
-        submit_verification,
-        time_wait,
-        update_progress,
-    ]
-    if mcp_manager is not None:
-        verifier_tools = verifier_tools + mcp_manager.tools_for_phase("verifier")
-    # Provider tool union (verify phase). Contributes kubectl-native's read-only
-    # ``kubectl_read`` and host-shell's read-only ``host_read``.
-    verifier_tools = _append_provider_tools(verifier_tools, VERIFY)
-
-    from chaos_agent.agent.nodes.verify._verifier_submit import submit_recover_verification
-    recover_verifier_tools = [
-        _read_skill_resource,
-        _execute_skill_script,
-        read_knowledge_resource,
-        submit_recover_verification,
-        time_wait,
-        update_progress,
-    ]
-    if mcp_manager is not None:
-        # Recover verifier shares the same MCP attach_to as the inject
-        # verifier phase — both are read-only verification work.
-        recover_verifier_tools = recover_verifier_tools + mcp_manager.tools_for_phase("verifier")
-    # Provider tool union (recover-verify phase). Contributes kubectl-native's
-    # full ``kubectl`` (run the reverse op; superset of ``kubectl_read``) and
-    # host-shell's ``host_inject`` (superset of ``host_read``).
-    recover_verifier_tools = _append_provider_tools(recover_verifier_tools, RECOVER_VERIFY)
+    clarification_tools = tools_by_phase["clarification"]
+    phase1_tools = tools_by_phase["phase1"]
+    phase2_tools = tools_by_phase["phase2"]
+    verifier_tools = tools_by_phase["verifier"]
+    recover_verifier_tools = tools_by_phase["recover_verifier"]
 
     # Set up checkpointer
     conn = None  # connection/pool ref for cleanup

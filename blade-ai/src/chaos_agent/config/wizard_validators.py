@@ -419,7 +419,7 @@ async def discover_kube_contexts(kubeconfig_path: str) -> list[str]:
     non-zero exit all collapse to an empty list. The caller (validate or
     a UI radio-options builder) decides what to do with it.
     """
-    from chaos_agent.utils.blade_paths import resolve_exec_path
+    from chaos_agent.utils.exec_path import resolve_exec_path
     kubectl_bin = resolve_exec_path("kubectl")
     if not os.path.dirname(kubectl_bin):
         return []

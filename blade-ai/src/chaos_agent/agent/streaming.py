@@ -413,7 +413,7 @@ def parse_stream_event(raw_event: dict) -> Optional[StreamEvent | list[StreamEve
                 "task_id": result_entry.get("task_id", ""),
                 "task_state": task_state,
                 "fault_type": result_entry.get("fault_type", ""),
-                "blade_uid": result_entry.get("blade_uid", ""),
+                "experiment_uid": result_entry.get("experiment_uid", ""),
                 "duration_ms": result_entry.get("duration_ms", 0),
             }
             for k in ("target", "verification", "side_effects", "postmortem",

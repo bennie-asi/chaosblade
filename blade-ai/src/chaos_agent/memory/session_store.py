@@ -24,7 +24,7 @@ from chaos_agent.utils.time import now_iso
 logger = logging.getLogger(__name__)
 
 # Global SessionStore reference for direct access from non-hook graph nodes
-# (e.g., direct_execute, which bypasses PreReasoningHook and cannot reach
+# (e.g., execute_loop, which bypasses PreReasoningHook and cannot reach
 #  the SessionStore through the normal state→hook channel).
 _global_session_store: Optional["SessionStore"] = None
 

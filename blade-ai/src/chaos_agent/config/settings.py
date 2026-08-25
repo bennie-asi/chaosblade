@@ -510,8 +510,9 @@ class Settings(BaseSettings):
     timeout_default: int = 60                # BLADE_AI_TIMEOUT_DEFAULT
     timeout_skill_script: int = 60           # BLADE_AI_TIMEOUT_SKILL_SCRIPT，skill 脚本执行超时
 
-    # 实验级默认超时(秒) — blade create 无 --timeout 时自动注入
-    # NOTE: This must be >= _DEFAULT_MIN_DURATION in fault_type.py (currently 600)
+    # 实验级默认时长(秒) — blade create 无 --timeout 时作为默认时长注入
+    # 已接线 fault_type.ensure_min_duration：低于 _DEFAULT_MIN_DURATION(600)
+    # 的值在运行时被钳位到 600（经验验证时延下限永远优先）
     experiment_timeout: int = 600            # BLADE_AI_EXPERIMENT_TIMEOUT
 
     # Confirm gate 等待用户决策的最大秒数 — 超过则服务端礼貌中断 turn，避免用户离开后未回收 future
@@ -739,20 +740,26 @@ class Settings(BaseSettings):
     log_level: str = "DEBUG"                  # BLADE_AI_LOG_LEVEL
 
     def _resolve_blade_path(self) -> str:
-        """Resolve blade path: explicit setting > auto-detect."""
+        """Resolve blade path: explicit setting > auto-detect.
+
+        Auto-detection is the chaosblade carrier's domain knowledge and
+        lives in its lightweight ``declaration`` module (phase-12 D4) —
+        importing the declaration surface, NOT the provider implementation,
+        keeps config decoupled from the execution stack.
+        """
         if self.blade_path:
             return self.blade_path
-        from chaos_agent.utils.blade_paths import get_bundled_blade_path
+        from chaos_agent.agent.providers.chaosblade.declaration import get_bundled_blade_path
         return get_bundled_blade_path()
 
     def _resolve_wiz_path(self) -> str:
         """Resolve wiz path to absolute path for posix_spawn."""
-        from chaos_agent.utils.blade_paths import resolve_exec_path
+        from chaos_agent.utils.exec_path import resolve_exec_path
         return resolve_exec_path(self.wiz_path or "wiz")
 
     def _resolve_kubectl_path(self) -> str:
         """Resolve kubectl path to absolute path for posix_spawn."""
-        from chaos_agent.utils.blade_paths import resolve_exec_path
+        from chaos_agent.utils.exec_path import resolve_exec_path
         return resolve_exec_path(self.kubectl_path or "kubectl")
 
     @property

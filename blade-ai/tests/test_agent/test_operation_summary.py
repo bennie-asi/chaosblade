@@ -28,14 +28,14 @@ def test_task_summary_uses_fault_spec_not_active_skill_name():
         namespace="arms-prom",
         scope="pod",
         names=("pod-a",),
-        blade_target="network",
-        blade_action="delay",
+        fault_target="network",
+        fault_action="delay",
     )
     text = build_task_summary_text(
         {
             "fault_spec": spec.to_dict(),
             "skill_name": "k8s-pod-network-delay-skill",
-            "blade_uid": "uid-1",
+            "experiment_uid": "uid-1",
             "result": {"success": True},
             "verification": {
                 "level": "strong",
@@ -48,7 +48,7 @@ def test_task_summary_uses_fault_spec_not_active_skill_name():
 
     assert text.startswith("[Task Summary] task_id=task-inject")
     assert "Type: pod-network-delay | Target: arms-prom/pod-a" in text
-    assert "Result: injected | blade_uid: uid-1" in text
+    assert "Result: injected | experiment_uid: uid-1" in text
     assert "Verification: strong (L1=passed, L2=passed)" in text
     assert "current existence MUST be re-verified with kubectl" in text
 
@@ -87,15 +87,15 @@ def test_recover_summary_falls_back_to_inject_state_fault_type():
         namespace="arms-prom",
         scope="pod",
         names=("pod-a",),
-        blade_target="cpu",
-        blade_action="fullload",
+        fault_target="cpu",
+        fault_action="fullload",
     )
     text = build_recover_summary_text(
         {
             "data": {
                 "task_id": "task-recover",
                 "task_state": "recovered",
-                "blade_uid": "uid-1",
+                "experiment_uid": "uid-1",
                 "target": {"namespace": "arms-prom", "names": ["pod-a"]},
                 "verification": {
                     "level": "recovered",
@@ -105,13 +105,13 @@ def test_recover_summary_falls_back_to_inject_state_fault_type():
             },
         },
         "task-inject",
-        {"fault_spec": spec.to_dict(), "blade_uid": "uid-1"},
+        {"fault_spec": spec.to_dict(), "experiment_uid": "uid-1"},
     )
 
     assert text.startswith("[Recover Summary] task_id=task-recover")
     assert "parent_task_id: task-inject" in text
     assert "Type: pod-cpu-fullload | Target: arms-prom/pod-a" in text
-    assert "Result: recovered | blade_uid: uid-1" in text
+    assert "Result: recovered | experiment_uid: uid-1" in text
     assert "Recovery verification: recovered (L1=passed, L2=passed)" in text
     assert "current existence MUST be re-verified with kubectl" in text
 
@@ -121,8 +121,8 @@ def test_recover_summary_falls_back_to_inject_state_target_only():
         namespace="arms-prom",
         scope="pod",
         names=("pod-a",),
-        blade_target="cpu",
-        blade_action="fullload",
+        fault_target="cpu",
+        fault_action="fullload",
     )
     text = build_recover_summary_text(
         {
@@ -130,7 +130,7 @@ def test_recover_summary_falls_back_to_inject_state_target_only():
                 "task_id": "task-recover",
                 "task_state": "recovered",
                 "fault_type": "pod-cpu-fullload",
-                "blade_uid": "uid-1",
+                "experiment_uid": "uid-1",
                 "verification": {
                     "level": "recovered",
                     "layer1": {"status": "passed"},

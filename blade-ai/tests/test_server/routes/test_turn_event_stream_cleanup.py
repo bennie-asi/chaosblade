@@ -121,3 +121,86 @@ async def test_defensive_finalize_preserves_explicit_user_cancellation():
         )
 
     assert finalize.await_args.kwargs["status_override"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_finalize_writes_task_row_cancelled():
+    """Turn abort must stamp the TaskStore row cancelled: no later writer
+    comes, and inference cannot derive "cancelled" on its own."""
+    values = {"task_id": "task-cancelled", "operation": "inject", "messages": []}
+    graph = SimpleNamespace(
+        aget_state=AsyncMock(return_value=SimpleNamespace(values=values, next=())),
+    )
+    store = SimpleNamespace(has_active=lambda _task_id: True)
+    task_store = SimpleNamespace(update_task_state=AsyncMock())
+
+    with patch(
+        "chaos_agent.memory.session_store.get_global_session_store",
+        return_value=store,
+    ), patch(
+        "chaos_agent.memory.session_finalizer.finalize_inject_session",
+        new=AsyncMock(),
+    ), patch(
+        "chaos_agent.persistence.task_store.get_task_store",
+        new=AsyncMock(return_value=task_store),
+    ):
+        await _finalize_task_session(
+            graph, {}, "turn-1", lambda _task_id: None, cancelled=True,
+        )
+
+    task_store.update_task_state.assert_awaited_once_with("task-cancelled", "cancelled")
+
+
+@pytest.mark.asyncio
+async def test_clean_finalize_leaves_task_row_to_inference():
+    """cancelled=False (clean exit): the row's state stays with normal
+    inference — the abort stamp is reserved for actual aborts."""
+    values = {"task_id": "task-done", "operation": "inject", "messages": []}
+    graph = SimpleNamespace(
+        aget_state=AsyncMock(return_value=SimpleNamespace(values=values, next=())),
+    )
+    store = SimpleNamespace(has_active=lambda _task_id: True)
+    task_store = SimpleNamespace(update_task_state=AsyncMock())
+
+    with patch(
+        "chaos_agent.memory.session_store.get_global_session_store",
+        return_value=store,
+    ), patch(
+        "chaos_agent.memory.session_finalizer.finalize_inject_session",
+        new=AsyncMock(),
+    ), patch(
+        "chaos_agent.persistence.task_store.get_task_store",
+        new=AsyncMock(return_value=task_store),
+    ):
+        await _finalize_task_session(
+            graph, {}, "turn-1", lambda _task_id: None,
+        )
+
+    task_store.update_task_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_but_paused_at_interrupt_keeps_row_alive():
+    """paused_at_interrupt means the graph is parked at a confirmation
+    card waiting for resume — an abort flag must NOT stamp the row
+    cancelled (the task is resumable, that is the whole point of the
+    interrupt checkpoint)."""
+    values = {"task_id": "task-paused", "operation": "inject", "messages": []}
+    graph = SimpleNamespace(
+        aget_state=AsyncMock(return_value=SimpleNamespace(values=values, next=("intent_confirm",))),
+    )
+    store = SimpleNamespace(has_active=lambda _task_id: True)
+    task_store = SimpleNamespace(update_task_state=AsyncMock())
+
+    with patch(
+        "chaos_agent.memory.session_store.get_global_session_store",
+        return_value=store,
+    ), patch(
+        "chaos_agent.persistence.task_store.get_task_store",
+        new=AsyncMock(return_value=task_store),
+    ):
+        await _finalize_task_session(
+            graph, {}, "turn-1", lambda _task_id: None, cancelled=True,
+        )
+
+    task_store.update_task_state.assert_not_awaited()

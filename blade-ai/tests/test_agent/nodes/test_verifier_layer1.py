@@ -1,11 +1,18 @@
-"""Tests for _verifier_layer1.py — Layer 1 verification parsing."""
+"""Tests for the Layer 1 verification domain.
+
+Parsing lives in ``providers/chaosblade/verify.py`` (moved from
+``nodes/verify/_verifier_layer1.py`` in phase-4 T4); state orchestration
+(``run_layer1_for_state`` channel selection) stays in ``_verifier_layer1.py``.
+"""
 
 import json
 
 import pytest
 from langchain_core.messages import ToolMessage
 
-from chaos_agent.agent.nodes.verify._verifier_layer1 import (
+# Phase-4 T4 canonical address (the Layer-1 execution domain moved from
+# nodes/verify/_verifier_layer1.py to the provider layer).
+from chaos_agent.agent.providers.chaosblade.verify import (
     _parse_blade_status_output,
     _parse_blade_query_k8s_output,
     _find_blade_query_in_messages,
@@ -316,10 +323,10 @@ class TestHostNativeLayer1Skip:
         # `blade status ''` when there is no UID — that returns ChaosBlade code
         # 45000 which reads as a genuine FAILURE. An absent UID is skipped
         # (not applicable), letting Layer 2 verify the actual cluster state.
-        from chaos_agent.agent.nodes.verify._verifier_layer1 import (
+        from chaos_agent.agent.providers.chaosblade.verify import (
             _run_layer1_via_kubectl_exec,
         )
 
         r = await _run_layer1_via_kubectl_exec("", "/tmp/kubeconfig", task_id="t")
         assert r.status == "skipped"
-        assert "no blade_uid" in r.details
+        assert "no experiment_uid" in r.details

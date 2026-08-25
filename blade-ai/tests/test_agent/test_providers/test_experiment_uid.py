@@ -1,4 +1,9 @@
-"""Tests for the multi-strategy blade UID extractor.
+"""Tests for the multi-strategy experiment-UID extractor.
+
+Phase-9 T3.1: moved from ``tests/test_utils/test_blade_uid.py`` alongside
+the extractor's move to ``providers.chaosblade.detection`` (line-for-line equivalent
+rename ``extract_blade_uid`` -> ``extract_experiment_uid``). Phase-14 G1: the
+extractor's physical address is now ``providers.chaosblade.verify``.
 
 The 10 SAMPLES below come from real-world variants we have observed in
 ChaosBlade tool output: clean blade_create JSON, kubectl-exec wrapping,
@@ -16,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from chaos_agent.utils.blade_uid import extract_blade_uid
+from chaos_agent.agent.providers.chaosblade.verify import extract_experiment_uid
 
 VALID_UID = "abcd1234-ef56-7890-abcd-1234567890ab"
 SECOND_UID = "11112222-3333-4444-5555-666677778888"
@@ -111,22 +116,22 @@ SAMPLES_REJECT: list[tuple[str, str]] = [
 
 
 @pytest.mark.parametrize("name,text,expected", SAMPLES_SUCCESS, ids=lambda x: x if isinstance(x, str) else "")
-def test_extract_blade_uid_success_samples(name: str, text: str, expected: str) -> None:
-    assert extract_blade_uid(text) == expected, f"sample={name}"
+def test_extract_experiment_uid_success_samples(name: str, text: str, expected: str) -> None:
+    assert extract_experiment_uid(text) == expected, f"sample={name}"
 
 
 @pytest.mark.parametrize("name,text", SAMPLES_REJECT, ids=lambda x: x if isinstance(x, str) else "")
-def test_extract_blade_uid_rejects_failed_54000(name: str, text: str) -> None:
+def test_extract_experiment_uid_rejects_failed_54000(name: str, text: str) -> None:
     # 54000+success=false means the injection failed; we must return None
     # AND must not let regex/resource fallbacks rescue the uid.
-    assert extract_blade_uid(text) is None, f"sample={name}"
+    assert extract_experiment_uid(text) is None, f"sample={name}"
 
 
-def test_extract_blade_uid_total_success_rate() -> None:
+def test_extract_experiment_uid_total_success_rate() -> None:
     """Sanity guard: 9/9 success samples extract correctly (100%)."""
     successes = sum(
         1 for _, text, expected in SAMPLES_SUCCESS
-        if extract_blade_uid(text) == expected
+        if extract_experiment_uid(text) == expected
     )
     assert successes == len(SAMPLES_SUCCESS)
 
@@ -142,8 +147,8 @@ def test_extract_blade_uid_total_success_rate() -> None:
         '{"code":500,"success":false,"error":"boom"}',  # unrelated error
     ],
 )
-def test_extract_blade_uid_returns_none_for_unusable_inputs(text) -> None:
-    assert extract_blade_uid(text) is None
+def test_extract_experiment_uid_returns_none_for_unusable_inputs(text) -> None:
+    assert extract_experiment_uid(text) is None
 
 
 def test_strategy_order_json_wins_over_regex() -> None:
@@ -157,7 +162,7 @@ def test_strategy_order_json_wins_over_regex() -> None:
         f'{{"code":200,"success":true,"result":"{VALID_UID}"}} '
         f'{{"code":54000,"success":false,"result":{{"uid":"{SECOND_UID}"}}}}'
     )
-    assert extract_blade_uid(text) == VALID_UID
+    assert extract_experiment_uid(text) == VALID_UID
 
 
 def test_strategy_order_failed_54000_blocks_regex_rescue() -> None:
@@ -169,7 +174,7 @@ def test_strategy_order_failed_54000_blocks_regex_rescue() -> None:
     verifier to wait for a non-existent live experiment.
     """
     text = f'{{"code":54000,"success":false,"result":{{"uid":"{VALID_UID}"}}}}'
-    assert extract_blade_uid(text) is None
+    assert extract_experiment_uid(text) is None
 
 
 def test_resource_fallback_only_when_no_uuid_present() -> None:
@@ -179,4 +184,4 @@ def test_resource_fallback_only_when_no_uuid_present() -> None:
         f"name: {RESOURCE_NAME}\n"
         f'response: {{"code":200,"success":true,"result":"{VALID_UID}"}}'
     )
-    assert extract_blade_uid(text) == VALID_UID
+    assert extract_experiment_uid(text) == VALID_UID

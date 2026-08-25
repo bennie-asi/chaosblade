@@ -1,0 +1,20 @@
+# Golden 05 — safety pass: healthy CPU fullload target in an ordinary
+# namespace. Final status depends on kubeconfig availability at runtime
+# ("safe" with cluster reachability, "warning" without) — both are passes;
+# anything stricter (confirm_required/rejected) is a regression.
+name: safety-healthy-cpu-pass
+description: 健康 CPU 满载目标通过安全门
+surface: safety
+input:
+  skill_name: pod-cpu-fullload
+  fault_spec:
+    scope: pod
+    fault_target: cpu
+    fault_action: fullload
+    namespace: cms-demo
+    names: ["accounting"]
+    params:
+      cpu-percent: "80"
+    duration_seconds: 300
+expected:
+  safety_status_in: [safe, warning]

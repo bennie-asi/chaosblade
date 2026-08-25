@@ -26,6 +26,35 @@ def _ts_add_messages(left, right):
     return add_messages(left, right)
 
 
+def materialize_fault_handle(values: dict) -> Optional[dict]:
+    """Return the active fault handle for *values*, deriving it when absent.
+
+    The handle is the carrier-agnostic identity of a live fault (who injected,
+    what to recover). It is written by the execute loop's attribution sync and
+    inherited by the recover graph; when it is missing the registry derives
+    it from the legacy attribution facts each provider claims
+    (experiment_uid / injection_method). Generic consumers must go through
+    this helper (or :func:`has_active_fault`) instead of reading carrier
+    fields directly.
+    """
+    handle = values.get("fault_handle")
+    if isinstance(handle, dict) and handle:
+        return handle
+    from chaos_agent.agent.providers import FaultProviderRegistry
+
+    return FaultProviderRegistry.derive_handle_from_legacy(values)
+
+
+def has_active_fault(values: dict) -> bool:
+    """True when *values* describe a live (committed) fault injection.
+
+    The single generic predicate replacing every carrier-specific presence
+    check (historically ``bool(experiment_uid)``). A native injection with no
+    experiment UID satisfies it exactly like a ChaosBlade experiment.
+    """
+    return materialize_fault_handle(values) is not None
+
+
 def infer_task_state(values: dict) -> str:
     """Infer the overall task_state from AgentState values.
 
@@ -47,8 +76,7 @@ def infer_task_state(values: dict) -> str:
 
     operation = values.get("operation", "")
     safety_status = values.get("safety_status", "pending")
-    active_skill_name = read_active_skill_name(values)
-    blade_uid = values.get("blade_uid")
+    has_fault = has_active_fault(values)
     verification = read_inject_verification(values)
     outcome = read_operation_outcome(values)
     error = outcome.error
@@ -75,7 +103,7 @@ def infer_task_state(values: dict) -> str:
 
     # Replan exhaustion: replan was attempted but graph completed without success.
     if (values.get("replan_count", 0) > 0 or values.get("verify_replan_count", 0) > 0) and values.get("replan_context"):
-        if not blade_uid and not verification:
+        if not has_fault and not verification:
             return "failed"
 
     # Recovery operation
@@ -100,11 +128,9 @@ def infer_task_state(values: dict) -> str:
 
     # Injection lifecycle
     if not verification:
-        # Still in injection process
-        if blade_uid:
-            return "injecting"
-        if active_skill_name:
-            return "injecting"
+        # Still in injection process — the lifecycle position comes from the
+        # verification verdict, not from handle presence (a handle proves a
+        # creation/issue happened, not where the run is).
         return "injecting"
 
     # Verification done for injection
@@ -175,8 +201,8 @@ def terminal_task_state(values: dict) -> str:
     that ended without a verdict.
 
     The policy is that task state comes from verification: without one there is
-    no basis to call the fault injected, no matter what handles exist. A
-    ``blade_uid`` proves a creation request was accepted, not that the fault took
+    no basis to call the fault injected, no matter what handles exist. An
+    experiment UID proves a creation request was accepted, not that the fault took
     effect. task-ff057e7f shipped ``status=success / task_state=injected`` with
     ``verification=null`` on a run whose own postmortem said it stalled without
     injecting.
@@ -228,7 +254,7 @@ def infer_phase(values: dict) -> str:
     operation = values.get("operation", "")
     safety_status = values.get("safety_status", "pending")
     active_skill_name = read_active_skill_name(values)
-    blade_uid = values.get("blade_uid")
+    has_fault = has_active_fault(values)
     verification = read_inject_verification(values)
     outcome = read_operation_outcome(values)
     error = outcome.error
@@ -247,7 +273,7 @@ def infer_phase(values: dict) -> str:
 
     # Replan in progress (Phase 2 errored, routed back to Phase 1)
     if values.get("replan_context") and (values.get("replan_count", 0) > 0 or values.get("verify_replan_count", 0) > 0):
-        if not blade_uid:
+        if not has_fault:
             return "replanning"
 
     # --- Recovery phases ---
@@ -264,16 +290,16 @@ def infer_phase(values: dict) -> str:
         return "recovering"
 
     # --- Injection phases ---
-    if not active_skill_name and not blade_uid:
+    if not active_skill_name and not has_fault:
         return "planning"
-    if not active_skill_name and blade_uid:
-        # blade created but skill not yet identified (edge case)
+    if not active_skill_name and has_fault:
+        # fault committed but skill not yet identified (edge case)
         return "executing"
     if needs_confirmation:
         return "confirming"
-    if safety_status in ("safe", "warning") and not blade_uid:
+    if safety_status in ("safe", "warning") and not has_fault:
         return "safety_check"
-    if not blade_uid:
+    if not has_fault:
         return "planning"
     if not verification:
         return "executing"
@@ -508,7 +534,7 @@ def build_status_data(task_id: str, values: dict) -> dict:
     )
 
     active_skill_name = read_active_skill_name(values)
-    blade_uid = values.get("blade_uid") or ""
+    experiment_uid = values.get("experiment_uid") or ""
     blade_params = legacy_params_dict(values)
     target = legacy_target_dict(values)
     verification = read_inject_verification(values)
@@ -549,7 +575,7 @@ def build_status_data(task_id: str, values: dict) -> dict:
         "active_skill_name": active_skill_name,
         "target": target,
         "params": blade_params or None,
-        "blade_uid": blade_uid,
+        "experiment_uid": experiment_uid,
         "safety_status": values.get("safety_status", "pending"),
         "safety_reason": safety_reason,
         "needs_confirm": values.get("needs_confirmation", False),
@@ -647,15 +673,24 @@ class AgentState(MessagesState):
     truncated_tool_calls: bool = False
 
     # ── Execution ──────────────────────────────────────────────────
-    blade_uid: Optional[str] = None      # ChaosBlade experiment UID
+    experiment_uid: Optional[str] = None   # experiment UID attribution field (renamed from experiment_uid in phase-9; legacy checkpoints hydrate via the read fallback). Generic consumers use fault_handle.
+    # Carrier-agnostic handle of the live fault, written by the execute loop's
+    # attribution sync and consumed by every generic decision point via
+    # ``has_active_fault`` / ``materialize_fault_handle``. Shape is owned by
+    # the provider that built it: ``{"kind": "experiment_uid", "value": <uid>,
+    # "method": <method>}`` for experiment carriers (kind renamed off
+    # ``"blade_uid"`` in phase-14 G7), ``{"kind": "native",
+    # "method": "kubectl_native"|"host_native"}`` for UID-less carriers.
+    # None = no committed fault (or the attribution was cleared at a seam).
+    fault_handle: Optional[dict] = None
     # UIDs retired by FRAMEWORK-side cleanup (verify-replan residual destroy).
     # Such destroys run in code, so they leave NO blade_destroy ToolMessage in
     # history and _collect_destroyed_uids cannot see them; without this list a
-    # stale UID gets re-extracted into blade_uid and misroutes the verifier
+    # stale UID gets re-extracted into experiment_uid and misroutes the verifier
     # Layer-1 onto a destroyed experiment (task-29848471). Append-only; never
     # cleared within a task. Recover graphs have their own state and never
     # inherit it — the retired experiment is exactly what they recover.
-    retired_blade_uids: Optional[list[str]] = None
+    retired_experiment_uids: Optional[list[str]] = None
     injection_method: Optional[str] = None   # "host_blade" | "kubectl_exec" | "kubectl_native" | "host_native" | "python_agent"
     # Combo injection marker (durable, both orders): a kubectl-native mutating
     # injection was issued ALONGSIDE an experiment-carrying method — either
@@ -700,8 +735,7 @@ class AgentState(MessagesState):
     # means the probe failed or matched nothing (negative entry, keeps the
     # fail-closed review).
     selector_name_probes: Optional[tuple[tuple[str, tuple[str, ...]], ...]] = None
-    blade_parsed_flags: Optional[dict] = None    # {"path": "/tmp", "percent": "85", ...}
-    direct: bool = False                 # True: skip LLM, go direct path
+    injection_parsed_params: Optional[dict] = None  # issue-time parsed injection parameters, e.g. {"path": "/tmp", "percent": "85"}
     original_replicas: Optional[dict] = None     # kubectl scale-based faults: {resource -> count}
     kubeconfig: Optional[str] = None
     kube_context: Optional[str] = None
@@ -723,7 +757,6 @@ class AgentState(MessagesState):
     side_effects: Optional[dict] = None
     baseline_data: Optional[dict] = None     # Pre-injection baseline (from baseline_capture node)
     target_metadata: Optional[dict] = None   # {pod_memory_limit_mb, active_same_action_experiments, ...}
-    evidence_snapshot: Optional[dict] = None  # P0: quick evidence after blade_create (ls + df)
     disk_burn_post_check: Optional[dict] = None   # Post-injection I/O throughput verification
     disk_fill_post_check: Optional[dict] = None   # Post-injection fill file verification
     se_snapshot: Optional[dict] = None       # Pre-injection side-effect snapshot
@@ -752,7 +785,12 @@ class AgentState(MessagesState):
 
     # ── Recovery ───────────────────────────────────────────────────
     recover_phase: str = "layer1_recovery"   # "layer1_recovery" | "layer2_verification"
-    recover_layer1_type: Optional[str] = None    # "deterministic" | "llm_driven"
+    # "deterministic" | "llm_driven". Written by the flow that runs Layer 1:
+    # the LLM flow at its layer transitions ("llm_driven"), the simple
+    # entry / the first Layer-2 iteration after a deterministic destroy.
+    # None (legacy checkpoints) falls back at each reader to the dispatched
+    # provider's deterministic-recover capability.
+    recover_layer1_type: Optional[str] = None
     layer1_iteration_count: int = 0
     layer2_context_added: bool = False       # Non-ChaosBlade Layer 2 may start at count > 1
     recover_layer2_first: bool = False       # Verdict on first Layer 2 turn (anti-laziness guard)
@@ -819,7 +857,7 @@ class IntentState(MessagesState):
     """State for the Intent Graph (conversation layer).
 
     Contains only dialogue-level fields. Execution-level fields
-    (blade_uid, verification, safety_status, skill_name, etc.)
+    (experiment_uid, verification, safety_status, skill_name, etc.)
     live on AgentState in the Pipeline Graph.
     """
 

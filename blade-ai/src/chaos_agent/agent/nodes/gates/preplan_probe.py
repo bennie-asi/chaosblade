@@ -32,6 +32,7 @@ from chaos_agent.agent.nodes.execute._kubeconfig_inject import (
     _resolve_kubeconfig,
     sync_kubewiz_runtime,
 )
+from chaos_agent.agent.nodes.planning.handoff_strip import CONTEXT_ANCHOR_FLAG
 from chaos_agent.agent.nodes.store._store_sync import (
     sync_node_status_to_session,
     sync_to_store,
@@ -76,7 +77,14 @@ def _observation_message(items: dict) -> SystemMessage:
         "re-verifies authoritatively. If your own runtime observation "
         "directly contradicts one, trust your observation."
     )
-    return SystemMessage(content=content)
+    return SystemMessage(
+        content=content,
+        # Handoff-retention anchor: planning/handoff_strip keys on this
+        # flag — the environment facts feed the Phase 2 executor's path
+        # decisions (e.g. operator availability routing), so the bundle
+        # must survive the planning-round strip.
+        additional_kwargs={CONTEXT_ANCHOR_FLAG: True},
+    )
 
 
 # ── Individual probes ────────────────────────────────────────────────
@@ -113,7 +121,7 @@ async def _probe_operator(
         # the target node. Without it the planner must re-discover placement
         # in-loop (observed: ~5 LLM rounds / ~100s in inject-ccfadf7d).
         try:
-            from chaos_agent.agent.nodes.execute._injection_detection import (
+            from chaos_agent.tools.pod_discovery import (
                 discover_tool_pods_cluster_wide_with_nodes,
             )
 
@@ -236,8 +244,6 @@ async def preplan_probe(state: AgentState) -> dict:
     skip_reason = ""
     if not settings.preplan_probes_enabled:
         skip_reason = "disabled by settings"
-    elif state.get("direct"):
-        skip_reason = "direct mode does not consume probes"
 
     if skip_reason:
         tracker.complete(f"Pre-task probes skipped: {skip_reason}")

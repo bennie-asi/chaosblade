@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 def _extract_baseline_key_metrics(
     baseline: dict,
-    blade_target: str,
-    blade_action: str,
+    fault_target: str,
+    fault_action: str,
 ) -> dict[str, str]:
     """Extract structured key metrics from baseline observations.
 
@@ -32,7 +32,7 @@ def _extract_baseline_key_metrics(
     fault-filtered dict the existing Layer 2 prompt builder expects.
     """
     from chaos_agent.agent.nodes.verify._metric_extractor import extract_baseline_metrics
-    return extract_baseline_metrics(baseline, blade_target, blade_action)
+    return extract_baseline_metrics(baseline, fault_target, fault_action)
 
 
 _BASELINE_INTEGRITY_PROMPT: str = (
@@ -68,9 +68,9 @@ _BASELINE_INTEGRITY_PROMPT: str = (
 
 
 def _get_fault_verification_hints(
-    blade_scope: str | None,
-    blade_target: str | None,
-    blade_action: str | None,
+    fault_scope: str | None,
+    fault_target: str | None,
+    fault_action: str | None,
     parsed_flags: dict | None = None,
 ) -> str:
     """Generate verification hints based on fault metadata.
@@ -84,14 +84,14 @@ def _get_fault_verification_hints(
 
     The fault-type-specific fragments (parameter observability, dynamic partition
     hints, node-disk topology, event filtering) are owned by the
-    ``VerificationProfile`` for ``blade_target``; this function only assembles
+    ``VerificationProfile`` for ``fault_target``; this function only assembles
     the fault-agnostic scaffolding and inserts each profile slot at its former
     position.
     """
     hints = []
 
     # Node-level overlay filesystem hint
-    if blade_scope == "node":
+    if fault_scope == "node":
         # Host-level checks are done via kubectl_read(subcommand="debug").
         # Host paths inside the debug pod live under /host/...; the
         # verifier finalization scans message history and removes the
@@ -99,27 +99,27 @@ def _get_fault_verification_hints(
         pass
 
     # Fault metadata (factual context) — OR so partial metadata is still useful
-    if blade_scope or blade_target or blade_action:
+    if fault_scope or fault_target or fault_action:
         known = []
-        if blade_scope:
-            known.append(f"Scope: {blade_scope}")
-        if blade_target:
-            known.append(f"Target: {blade_target}")
-        if blade_action:
-            known.append(f"Action: {blade_action}")
+        if fault_scope:
+            known.append(f"Scope: {fault_scope}")
+        if fault_target:
+            known.append(f"Target: {fault_target}")
+        if fault_action:
+            known.append(f"Action: {fault_action}")
         hints.append(f"Fault metadata: {' | '.join(known)}")
 
-        if blade_scope and blade_target and blade_action:
-            scope_target_action = f"{blade_scope}-{blade_target} {blade_action}"
-            hints.append(f"ChaosBlade scenario: {scope_target_action}")
+        if fault_scope and fault_target and fault_action:
+            scope_target_action = f"{fault_scope}-{fault_target} {fault_action}"
+            hints.append(f"Fault scenario: {scope_target_action}")
 
     # Per-fault-type verification KNOWLEDGE is NOT emitted from code. It lives in
     # the data layer: the skill case (PRIMARY AUTHORITY, embedded by the caller)
     # and the knowledge docs (shared, channel-aware). Emit a per-target pointer
     # so the LLM loads the right doc on demand instead of us hardcoding it here.
-    if blade_target:
+    if fault_target:
         hints.append(
-            f"For '{blade_target}' verification specifics (observation methods, "
+            f"For '{fault_target}' verification specifics (observation methods, "
             f"partition/overlay or protocol semantics, data-interpretation "
             f"pitfalls), load the relevant knowledge doc via `read_knowledge_resource` "
             f"— e.g. `fault-verification-strategies.md`."

@@ -33,7 +33,7 @@ def test_record_evidence_text_flattens_dict():
 
 
 def test_supplement_adds_identity_and_cross_for_cpu():
-    spec = FaultSpec(scope="host", blade_target="cpu")
+    spec = FaultSpec(scope="host", fault_target="cpu")
     existing = [{"description": "CPU", "command": "vmstat 1 2", "stdout": "us 80 cpu"}]
     calls: list[list[str]] = []
 
@@ -61,7 +61,7 @@ def test_supplement_adds_identity_and_cross_for_cpu():
 
 
 def test_supplement_skips_when_evidence_already_present():
-    spec = FaultSpec(scope="host", blade_target="cpu")
+    spec = FaultSpec(scope="host", fault_target="cpu")
     existing = [
         {"description": "Host identity", "command": "hostname", "stdout": "host-01"},
         {"description": "load", "command": "uptime", "stdout": "load average"},
@@ -83,7 +83,7 @@ def test_supplement_skips_when_evidence_already_present():
 
 
 def test_supplement_records_close_coverage():
-    spec = FaultSpec(scope="host", blade_target="cpu")
+    spec = FaultSpec(scope="host", fault_target="cpu")
     profile = EvidenceProfile.for_fault(spec, "host")
     existing = [{"description": "CPU", "command": "vmstat 1 2", "stdout": "us 80 cpu"}]
     pre = profile.coverage(existing)
@@ -106,7 +106,7 @@ def test_supplement_records_close_coverage():
 
 
 def test_supplement_best_effort_on_probe_failure():
-    spec = FaultSpec(scope="host", blade_target="cpu")
+    spec = FaultSpec(scope="host", fault_target="cpu")
     existing = [{"description": "CPU", "command": "vmstat 1 2", "stdout": "us 80 cpu"}]
 
     async def fake_exec(cmd, target, **kw):

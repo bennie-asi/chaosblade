@@ -10,7 +10,7 @@ from chaos_agent.agent.node_names import MEMORY_NODE
 from chaos_agent.agent.nodes.store._store_sync import sync_to_store, sync_node_status_to_session
 from chaos_agent.persistence.task_identity import is_real_task_id
 from chaos_agent.agent.result.operation_outcome import read_inject_verification, read_operation_outcome
-from chaos_agent.agent.state import AgentState
+from chaos_agent.agent.state import AgentState, has_active_fault
 from chaos_agent.config.settings import settings
 from chaos_agent.memory.operational_memory import OperationalMemory
 from chaos_agent.observability.status_tracker import (
@@ -85,8 +85,7 @@ async def load_memory(state: AgentState) -> dict:
     # entry points on every invocation (TUI first turn, TUI continuing
     # turn, CLI NL re-invocation). Falls through to FaultSpec's
     # ``user_description`` (NL placeholder seed) and finally to the
-    # structured synthetic prompt for direct mode (no input, complete
-    # spec).
+    # structured synthetic prompt (no input, complete spec).
     nl_description = state.get("input") or (_spec.user_description if _spec else "")
     if nl_description:
         # Assign an explicit id BEFORE the early session-store append below.
@@ -96,9 +95,9 @@ async def load_memory(state: AgentState) -> dict:
         # message is recorded twice in the task JSONL.
         updates["messages"] = [HumanMessage(content=nl_description, id=str(uuid4()))]
     elif _spec and _spec.is_complete:
-        # Direct mode (no NL input, structured spec) — synthesise a
+        # Structured entry (no NL input, structured spec) — synthesise a
         # HumanMessage from the spec so the agent has a clear request.
-        parts = [f"Execute fault injection: {_spec.scope}-{_spec.blade_target}-{_spec.blade_action}"]
+        parts = [f"Execute fault injection: {_spec.scope}-{_spec.fault_target}-{_spec.fault_action}"]
         if _spec.namespace:
             parts.append(f"Target namespace: {_spec.namespace}")
         if _spec.names:
@@ -113,7 +112,7 @@ async def load_memory(state: AgentState) -> dict:
         updates["messages"] = [HumanMessage(content="\n".join(parts), id=str(uuid4()))]
 
     # Record HumanMessages to session store immediately so they appear
-    # in correct chronological order (before direct_execute's ToolMessages).
+    # in correct chronological order (before execute_loop's ToolMessages).
     # Without this, finalize_session appends them after all already-recorded
     # messages, causing ordering mismatch.
     msgs = updates.get("messages")
@@ -132,7 +131,7 @@ async def pipeline_init(state: AgentState) -> dict:
     """Entry node for Pipeline Graph — load operational context.
 
     Equivalent to load_memory but without intent routing. Used by
-    CLI (direct + NL) and TUI after Intent Graph confirms inject.
+    CLI (structured + NL) and TUI after Intent Graph confirms inject.
     """
     task_id = state.get("task_id", "") or ""
     memory_dir = settings.resolved_memory_dir
@@ -171,7 +170,7 @@ async def pipeline_init(state: AgentState) -> dict:
         # Explicit id — same dedup-key rationale as load_memory above.
         updates["messages"] = [HumanMessage(content=nl_description, id=str(uuid4()))]
     elif _spec and _spec.is_complete:
-        parts = [f"Execute fault injection: {_spec.scope}-{_spec.blade_target}-{_spec.blade_action}"]
+        parts = [f"Execute fault injection: {_spec.scope}-{_spec.fault_target}-{_spec.fault_action}"]
         if _spec.namespace:
             parts.append(f"Target namespace: {_spec.namespace}")
         if _spec.names:
@@ -330,7 +329,7 @@ def _infer_failure_detail(state: AgentState) -> dict:
                 msgs,
                 alternatives=planning_alternatives,
             )
-    if _any_replan and replan_context and not state.get("blade_uid") and not verification:
+    if _any_replan and replan_context and not has_active_fault(state) and not verification:
         return fail_state(
             FailureCategory.REPLAN_EXHAUSTED,
             f"attempts={replan_count + verify_replan_count}, injection never succeeded",
@@ -371,10 +370,10 @@ async def _finalize_session_store(
             # projection the defensive finalize uses (task-ff057e7f):
             # ``build_inject_data_from_state`` applies the fail-closed
             # ``terminal_task_state`` and ``inject_session_status`` maps
-            # it to a status. A blade_uid proves a creation request was
+            # it to a status. A experiment_uid proves a creation request was
             # accepted, not that the fault took effect, so it must never
             # upgrade a run without a verdict to "completed" — the old
-            # blade_uid-leniency here contradicted the result_summary
+            # experiment_uid-leniency here contradicted the result_summary
             # written by this very function.
             from chaos_agent.memory.session_finalizer import inject_session_status
             if confirmed_intent in ("chat", "recover"):

@@ -49,7 +49,7 @@ class TestInjectionAttemptedThisContract:
             {"messages": [], "injection_method": "host_blade"}
         ) is True
         assert _injection_attempted_this_contract(
-            {"messages": [], "blade_uid": "abc123"}
+            {"messages": [], "experiment_uid": "abc123"}
         ) is True
 
     def test_issued_blade_create_is_an_attempt_even_without_result(self):

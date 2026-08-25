@@ -29,8 +29,8 @@ def _make_spec(**kwargs) -> FaultSpec:
         "namespace": "cms-demo",
         "scope": "pod",
         "names": ("accounting-6fbdb464c7-qn2vr",),
-        "blade_target": "mem",
-        "blade_action": "load",
+        "fault_target": "mem",
+        "fault_action": "load",
         "params": {"mem-percent": "98"},
     }
     defaults.update(kwargs)
@@ -163,8 +163,8 @@ class TestCpuFeasibilityChecker:
     @pytest.mark.asyncio
     async def test_impossible_when_cpu_at_capacity(self):
         spec = _make_spec(
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_target="cpu",
+            fault_action="fullload",
             params={"cpu-percent": "100"},
             scope="pod",
         )
@@ -183,8 +183,8 @@ class TestCpuFeasibilityChecker:
     @pytest.mark.asyncio
     async def test_ok_when_headroom_sufficient(self):
         spec = _make_spec(
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_target="cpu",
+            fault_action="fullload",
             params={"cpu-percent": "80"},
             scope="pod",
         )
@@ -204,8 +204,8 @@ class TestCpuFeasibilityChecker:
     @pytest.mark.asyncio
     async def test_node_scope_uses_capacity(self):
         spec = _make_spec(
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_target="cpu",
+            fault_action="fullload",
             params={"cpu-percent": "90"},
             scope="node",
             names=("worker-01",),
@@ -227,8 +227,8 @@ class TestCpuFeasibilityChecker:
     @pytest.mark.asyncio
     async def test_fullload_defaults_to_100_percent(self):
         spec = _make_spec(
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_target="cpu",
+            fault_action="fullload",
             params={},
             scope="pod",
         )
@@ -246,7 +246,7 @@ class TestCpuFeasibilityChecker:
 
     @pytest.mark.asyncio
     async def test_returns_none_without_names(self):
-        spec = _make_spec(blade_target="cpu", names=())
+        spec = _make_spec(fault_target="cpu", names=())
         report = await assess_feasibility(spec, "/fake/kubeconfig")
         assert report is None
 
@@ -255,8 +255,8 @@ class TestAssessFeasibility:
     """Entry point dispatch + error handling tests."""
 
     @pytest.mark.asyncio
-    async def test_unknown_blade_target_returns_none(self):
-        spec = _make_spec(blade_target="jvm")
+    async def test_unknown_fault_target_returns_none(self):
+        spec = _make_spec(fault_target="jvm")
         report = await assess_feasibility(spec, "/fake/kubeconfig")
         assert report is None
 
@@ -308,7 +308,7 @@ class TestMetricsServerProbe:
 
     @pytest.mark.asyncio
     async def test_skipped_for_cpu_target_too(self):
-        spec = _make_spec(blade_target="cpu", blade_action="fullload", params={"cpu-percent": "80"})
+        spec = _make_spec(fault_target="cpu", fault_action="fullload", params={"cpu-percent": "80"})
         with patch(
             "chaos_agent.agent.spec._feasibility_checkers.is_metrics_server_available",
             new_callable=AsyncMock, return_value=False,
@@ -319,8 +319,8 @@ class TestMetricsServerProbe:
         assert report.severity == FeasibilitySeverity.SKIPPED
 
     @pytest.mark.asyncio
-    async def test_no_skip_for_unknown_blade_target(self):
-        spec = _make_spec(blade_target="jvm")
+    async def test_no_skip_for_unknown_fault_target(self):
+        spec = _make_spec(fault_target="jvm")
         with patch(
             "chaos_agent.agent.spec._feasibility_checkers.is_metrics_server_available",
             new_callable=AsyncMock, return_value=False,
@@ -367,8 +367,8 @@ class TestLabelBasedPodResolution:
     @pytest.mark.asyncio
     async def test_cpu_checker_resolves_pod_via_labels(self):
         spec = _make_spec(
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_target="cpu",
+            fault_action="fullload",
             names=("accounting",),
             labels={"app": "accounting"},
             params={},
@@ -410,8 +410,8 @@ class TestNetworkFeasibilityChecker:
     @pytest.mark.asyncio
     async def test_network_checker_resolves_pod_via_labels(self):
         spec = _make_spec(
-            blade_target="network",
-            blade_action="delay",
+            fault_target="network",
+            fault_action="delay",
             names=("accounting",),
             labels={"app": "accounting"},
             params={"time": "3000", "interface": "eth0"},
@@ -449,8 +449,8 @@ class TestNetworkFeasibilityChecker:
         fallback — blade/debug-container paths carry their own binaries,
         so this is advisory (TIGHT), not a blocker (task-e9bae269)."""
         spec = _make_spec(
-            blade_target="network",
-            blade_action="drop",
+            fault_target="network",
+            fault_action="drop",
             names=("accounting-6fbdb464c7-qn2vr",),
             params={},
         )
@@ -486,8 +486,8 @@ class TestNetworkFeasibilityChecker:
     @pytest.mark.asyncio
     async def test_network_warns_when_iptables_indeterminate(self):
         spec = _make_spec(
-            blade_target="network",
-            blade_action="drop",
+            fault_target="network",
+            fault_action="drop",
             names=("accounting-6fbdb464c7-qn2vr",),
             params={},
         )
@@ -522,8 +522,8 @@ class TestNetworkFeasibilityChecker:
     @pytest.mark.asyncio
     async def test_network_resolve_fails_returns_none(self):
         spec = _make_spec(
-            blade_target="network",
-            blade_action="delay",
+            fault_target="network",
+            fault_action="delay",
             names=("accounting",),
             labels={"app": "accounting"},
             params={"time": "3000"},
@@ -549,8 +549,8 @@ class TestBladeToolPodFeasibility:
     @staticmethod
     def _spec():
         return _make_spec(
-            blade_target="network",
-            blade_action="drop",
+            fault_target="network",
+            fault_action="drop",
             names=("accounting-6fbdb464c7-qn2vr",),
             params={},
         )
@@ -748,7 +748,7 @@ class TestHostFeasibilityProbes:
             "chaos_agent.agent.spec._host_feasibility_checkers._run_host",
             side_effect=fake_run,
         ):
-            m = await HostCpuProbe().measure(_make_spec(scope="host", blade_target="cpu"), "")
+            m = await HostCpuProbe().measure(_make_spec(scope="host", fault_target="cpu"), "")
         assert m is not None
         assert m.current == 1500  # int(1.5 * 1000)
         assert m.limit == 4000    # 4 cores * 1000
@@ -757,7 +757,7 @@ class TestHostFeasibilityProbes:
     async def test_host_disk_probe_uses_df(self):
         from chaos_agent.agent.spec._host_feasibility_checkers import HostDiskProbe
 
-        spec = _make_spec(scope="host", blade_target="disk", params={"path": "/data"})
+        spec = _make_spec(scope="host", fault_target="disk", params={"path": "/data"})
         with patch(
             "chaos_agent.agent.spec._host_feasibility_checkers.fetch_host_disk_usage",
             new_callable=AsyncMock, return_value=(72, 100),

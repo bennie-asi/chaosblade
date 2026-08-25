@@ -341,8 +341,8 @@ class TestEmptyToolSetIsNotTreatedAsAGateRefusal:
         await node({
             "task_id": "task-no-tools", "operation": "inject",
             "agent_loop_count": 0, "messages": [],
-            "fault_spec": {"scope": "node", "blade_target": "cpu",
-                           "blade_action": "fullload", "names": ["node-1"]},
+            "fault_spec": {"scope": "node", "fault_target": "cpu",
+                           "fault_action": "fullload", "names": ["node-1"]},
             "kube_connection_mode": "kubeconfig",
         })
 
@@ -371,8 +371,8 @@ class TestAccidentReplay:
     def _accident_state(args, call_id):
         return {
             "fault_spec": {
-                "scope": "node", "blade_target": "cpu",
-                "blade_action": "fullload",
+                "scope": "node", "fault_target": "cpu",
+                "fault_action": "fullload",
                 "names": ["cn-shanghai-cloudspe.25.209.68.1"],
             },
             "kube_connection_mode": "kubewiz_k8s",

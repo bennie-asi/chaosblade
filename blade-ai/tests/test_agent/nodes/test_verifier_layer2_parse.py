@@ -200,23 +200,25 @@ class TestDetectChecklistConclusionInconsistency:
         assert warning is None
         assert downgrade is False
 
-    def test_impact_failed_does_not_trigger_inconsistency(self):
-        # Two-tier verdict: IMPACT items are drill findings and never gate
-        # the verdict — even 'failed' with absence evidence.
+    def test_residual_category_key_no_longer_exempts(self):
+        # Single-tier contract: a residual 'category' key (from historical
+        # checkpoints) is inert — the 'impact' exemption is gone, so a
+        # failed step with absence evidence triggers the downgrade like
+        # any other failed step (verifier-core-only D3, accepted risk).
         items = [
-            {"step": 1, "status": "passed", "category": "core"},
+            {"step": 1, "status": "passed"},
             {"step": 2, "status": "failed", "category": "impact",
              "evidence": "no OOMKilled events, no change observed"},
         ]
         warning, downgrade = _detect_checklist_conclusion_inconsistency(
             items, "passed", "no OOMKilled events, no change observed",
         )
-        assert warning is None
-        assert downgrade is False
+        assert warning is not None
+        assert downgrade is True
 
-    def test_core_failed_still_triggers_downgrade(self):
+    def test_failed_step_still_triggers_downgrade(self):
         items = [
-            {"step": 1, "status": "failed", "category": "core",
+            {"step": 1, "status": "failed",
              "evidence": "memory at 2%, no increase observed"},
         ]
         warning, downgrade = _detect_checklist_conclusion_inconsistency(
@@ -226,43 +228,44 @@ class TestDetectChecklistConclusionInconsistency:
         assert downgrade is True
 
 
-class TestTwoTierChecklistParsing:
-    """Core/Impact two-tier checklist format (Mode 1 rewrite)."""
+class TestSingleTierChecklistParsing:
+    """Single-tier checklist format; residual CORE/IMPACT tags tolerated."""
 
     _TEXT = (
         "VERIFICATION_CHECKLIST:\n"
-        "- Step 1: [CORE] passed — kubectl top node shows 81% memory\n"
-        "- Step 2: [IMPACT] expected — checked events, no OOMKilled in window\n"
-        "- Step 3: [IMPACT] not_applicable — '应用 A' matches no workload\n"
+        "- Step 1: passed — kubectl top node shows 81% memory\n"
+        "- Step 2: expected — checked events, no OOMKilled in window\n"
+        "- Step 3: not_applicable — '应用 A' matches no workload\n"
         "VERIFICATION_RESULT:\n"
     )
 
-    def test_category_status_evidence_parsed(self):
+    def test_status_evidence_parsed(self):
         items = _parse_checklist_items(self._TEXT)
         assert len(items) == 3
         assert items[0]["step"] == 1
         assert items[0]["status"] == "passed"
-        assert items[0]["category"] == "core"
         assert "81%" in items[0]["evidence"]
         assert items[1]["status"] == "expected"
-        assert items[1]["category"] == "impact"
         assert items[2]["status"] == "not_applicable"
-        assert items[2]["category"] == "impact"
+        assert all("category" not in item for item in items)
 
-    def test_bare_category_without_brackets_parses(self):
-        # The model may drop the brackets around the category tag.
+    def test_residual_tag_lines_parse_without_category(self):
+        # A residual [CORE]/[IMPACT] tag (older prompts, bracketed or bare)
+        # must not break parsing and must not surface as a 'category' key.
         text = (
             "VERIFICATION_CHECKLIST:\n"
-            "- Step 1: CORE passed — memory elevated to 81%\n"
-            "- Step 2: IMPACT expected — no OOMKilled in events\n"
+            "- Step 1: [CORE] passed — memory elevated to 81%\n"
+            "- Step 2: [IMPACT] expected — no OOMKilled in events\n"
+            "- Step 3: IMPACT not_applicable — '应用 A' matches nothing\n"
             "VERIFICATION_RESULT:\n"
         )
         items = _parse_checklist_items(text)
-        assert len(items) == 2
-        assert items[0]["category"] == "core"
+        assert len(items) == 3
         assert items[0]["status"] == "passed"
-        assert items[1]["category"] == "impact"
+        assert "81%" in items[0]["evidence"]
         assert items[1]["status"] == "expected"
+        assert items[2]["status"] == "not_applicable"
+        assert all("category" not in item for item in items)
 
     def test_legacy_format_without_category_still_parses(self):
         text = (
@@ -277,13 +280,16 @@ class TestTwoTierChecklistParsing:
         assert "category" not in items[0]
         assert items[1]["status"] == "skipped"
 
-    def test_impact_findings_do_not_downgrade_overall(self):
+    def test_propagated_effect_expected_steps_do_not_downgrade_overall(self):
+        # New contract's protection for propagated-effect steps: they are
+        # recorded as 'expected'/'not_applicable' (never 'failed'), so they
+        # never enter the inconsistency scan at all.
         text = (
             "Layer1: passed\n"
             "Layer2: passed — memory at 81%\n"
             "VERIFICATION_CHECKLIST:\n"
-            "- Step 1: [CORE] passed — memory 81% via kubectl top\n"
-            "- Step 2: [IMPACT] failed — no OOMKilled events, no change observed\n"
+            "- Step 1: passed — memory 81% via kubectl top\n"
+            "- Step 2: expected — no OOMKilled events (mem-percent below eviction threshold)\n"
             "VERIFICATION_RESULT:\n"
             "Overall: verified\n"
             "PrimaryEvidenceObserved: true\n"

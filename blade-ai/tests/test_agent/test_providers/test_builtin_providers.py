@@ -12,9 +12,9 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from chaos_agent.agent.providers import FaultProvider, FaultProviderRegistry
-from chaos_agent.agent.providers.chaosblade import ChaosbladeProvider
-from chaos_agent.agent.providers.host_shell import HostShellProvider
-from chaos_agent.agent.providers.k8s_native import K8sNativeProvider
+from chaos_agent.agent.providers.chaosblade.provider import ChaosbladeProvider
+from chaos_agent.agent.providers.host_shell.provider import HostShellProvider
+from chaos_agent.agent.providers.k8s_native.provider import K8sNativeProvider
 
 
 @pytest.fixture(autouse=True)
@@ -36,12 +36,26 @@ def _blade_ok(uid: str = "uid-123") -> ToolMessage:
     )
 
 
-def _kubectl_blade_ok(uid: str = "uid-xyz") -> ToolMessage:
-    return ToolMessage(
-        content='{"code":200,"success":true,"result":"%s"}' % uid,
-        name="kubectl",
-        tool_call_id="k1",
-    )
+def _kubectl_blade_ok(uid: str = "uid-xyz") -> list:
+    """A kubectl-exec blade delivery as it appears in a real conversation:
+    the owning AIMessage tool_call (``exec`` + ``blade`` + ``create`` in
+    ``v_args``) followed by the success-JSON ToolMessage. The blade-evidence
+    scan cross-checks this pair (task-51193464) — the ToolMessage alone
+    proves nothing."""
+    return [
+        AIMessage(content="", tool_calls=[
+            {"name": "kubectl", "args": {
+                "subcommand": "exec",
+                "v_args": "chaosblade-tool-2l2gj -n chaosblade -- blade create "
+                          "k8s pod-cpu fullload --cpu-percent 80",
+             }, "id": "k1"},
+        ]),
+        ToolMessage(
+            content='{"code":200,"success":true,"result":"%s"}' % uid,
+            name="kubectl",
+            tool_call_id="k1",
+        ),
+    ]
 
 
 def _host_ok(name: str = "exec_host_command") -> ToolMessage:
@@ -141,21 +155,83 @@ def test_required_params_namespace_gating():
 def test_detect_host_blade():
     FaultProviderRegistry.register_builtins()
     assert FaultProviderRegistry.detect_method(
-        [_blade_ok()], "uid-123", is_host=False
+        [_blade_ok()], is_host=False
     ) == "host_blade"
 
 
 def test_detect_kubectl_exec():
     FaultProviderRegistry.register_builtins()
     assert FaultProviderRegistry.detect_method(
-        [_kubectl_blade_ok()], None, is_host=False
+        _kubectl_blade_ok(), is_host=False
     ) == "kubectl_exec"
+
+
+def test_detect_kubectl_exec_requires_blade_delivery_cross_check():
+    """task-51193464 regression: a kubectl ToolMessage alone is NOT blade
+    evidence. Only the blade-exec delivery (``exec`` + ``blade`` + ``create``)
+    attests a ChaosBlade experiment — every other kubectl output is outside
+    the blade domain, no matter how UUID-shaped its embedded ids are."""
+    FaultProviderRegistry.register_builtins()
+    # A `kubectl debug` result embeds the debug pod's K8s OBJECT uid in a
+    # ``[debug-pod-meta: {...}]`` block — shape-identical to a blade UID and
+    # reachable by the loose regex fallback, but never a ChaosBlade
+    # experiment. The mis-read once attributed the method to kubectl_exec
+    # four minutes before the real native injection ran.
+    debug_pod_meta = [
+        AIMessage(content="", tool_calls=[
+            {"name": "kubectl", "args": {
+                "subcommand": "debug",
+                "v_args": "node/node-1 --profile=sysadmin -- sleep 3600",
+             }, "id": "d1"},
+        ]),
+        ToolMessage(
+            content=(
+                "Creating debugging pod node-debugger-node-1-7s997.\n"
+                '[debug-pod-meta: {"name":"node-debugger-node-1-7s997",'
+                '"namespace":"default",'
+                '"uid":"3fbb468c-5ac2-4d05-b25c-17454df09ade",'
+                '"phase":"Running"}]'
+            ),
+            name="kubectl",
+            tool_call_id="d1",
+        ),
+    ]
+    assert FaultProviderRegistry.detect_method(debug_pod_meta, is_host=False) is None
+
+    # An exec whose inner command is NOT a blade create (e.g. an iptables
+    # native injection) is kubectl_native evidence, never kubectl_exec —
+    # even though the scan shape (exec + UUID in output) is near-identical.
+    native_exec = [
+        AIMessage(content="", tool_calls=[
+            {"name": "kubectl", "args": {
+                "subcommand": "exec",
+                "v_args": "dbg -n default -- chroot /host "
+                          "sh -c 'iptables -I OUTPUT -p tcp --dport 6443 -j DROP'",
+             }, "id": "n1"},
+        ]),
+        ToolMessage(
+            content='rule inserted (uid "3fbb468c-5ac2-4d05-b25c-17454df09ade")',
+            name="kubectl",
+            tool_call_id="n1",
+        ),
+    ]
+    assert FaultProviderRegistry.detect_method(native_exec, is_host=False) == "kubectl_native"
+
+    # A blade-JSON ToolMessage whose owning tool_call cannot be resolved is
+    # skipped fail-closed: an unattributable kubectl output must not license
+    # a blade attribution.
+    orphan = [ToolMessage(
+        content='{"code":200,"success":true,"result":"uid-orphan"}',
+        name="kubectl",
+        tool_call_id="missing",
+    )]
+    assert FaultProviderRegistry.detect_method(orphan, is_host=False) is None
 
 
 def test_detect_kubectl_native():
     FaultProviderRegistry.register_builtins()
     assert FaultProviderRegistry.detect_method(
-        _kubectl_native_after_failed_blade(), None, is_host=False
+        _kubectl_native_after_failed_blade(), is_host=False
     ) == "kubectl_native"
 
 
@@ -182,7 +258,7 @@ def test_detect_kubectl_native_host_command():
     ]
     for v in cases:
         assert FaultProviderRegistry.detect_method(
-            _kubectl_exec_msgs(v), None, is_host=False
+            _kubectl_exec_msgs(v), is_host=False
         ) == "kubectl_native", v
 
 
@@ -210,7 +286,7 @@ def test_detect_kubectl_native_non_fault_binary_injections():
     ]
     for v in cases:
         assert FaultProviderRegistry.detect_method(
-            _kubectl_exec_msgs(v), None, is_host=False
+            _kubectl_exec_msgs(v), is_host=False
         ) == "kubectl_native", v
 
 
@@ -227,7 +303,7 @@ def test_detect_readonly_subcommand_not_injection():
             ToolMessage(content="NAME READY", name="kubectl", tool_call_id="r1"),
         ]
         assert FaultProviderRegistry.detect_method(
-            msgs, None, is_host=False
+            msgs, is_host=False
         ) is None, sub
 
 
@@ -254,7 +330,7 @@ def test_detect_readonly_exec_not_injection():
     ]
     for v in readonly:
         assert FaultProviderRegistry.detect_method(
-            _kubectl_exec_msgs(v), None, is_host=False
+            _kubectl_exec_msgs(v), is_host=False
         ) is None, v
 
 
@@ -275,7 +351,7 @@ def test_detect_kubectl_native_on_severed_exec():
                     tool_call_id="k9", status="error"),
     ]
     assert FaultProviderRegistry.detect_method(
-        msgs, None, is_host=False
+        msgs, is_host=False
     ) == "kubectl_native"
 
 
@@ -286,27 +362,27 @@ def test_detect_channel_scopes_out_cross_domain_provider():
     FaultProviderRegistry.register_builtins()
     # host carrier on a k8s channel → host_shell not a candidate → None
     assert FaultProviderRegistry.detect_method(
-        [_host_ok()], None, is_host=False
+        [_host_ok()], is_host=False
     ) is None
     # kubectl exec on a host channel → k8s_native not a candidate → None
     assert FaultProviderRegistry.detect_method(
         _kubectl_exec_msgs("pod-x -- chroot /host iptables -I OUTPUT -j DROP"),
-        None, is_host=True,
+        is_host=True,
     ) is None
 
 
 def test_detect_host_native_only_when_is_host():
     FaultProviderRegistry.register_builtins()
     msgs = [_host_ok()]
-    assert FaultProviderRegistry.detect_method(msgs, None, is_host=False) is None
-    assert FaultProviderRegistry.detect_method(msgs, None, is_host=True) == "host_native"
+    assert FaultProviderRegistry.detect_method(msgs, is_host=False) is None
+    assert FaultProviderRegistry.detect_method(msgs, is_host=True) == "host_native"
 
 
 def test_detect_blade_uid_wins_over_host_native():
     FaultProviderRegistry.register_builtins()
     # A real blade experiment must not be downgraded even on a host channel.
     assert FaultProviderRegistry.detect_method(
-        [_blade_ok()], "uid-123", is_host=True
+        [_blade_ok()], is_host=True
     ) == "host_blade"
 
 
@@ -314,7 +390,7 @@ def test_detect_method_self_bootstraps_on_empty_registry():
     # No explicit register_builtins() — detect_method must lazily bootstrap.
     assert FaultProviderRegistry.all_providers() == ()
     assert FaultProviderRegistry.detect_method(
-        [_blade_ok()], "uid-123", is_host=False
+        [_blade_ok()], is_host=False
     ) == "host_blade"
     assert [p.carrier for p in FaultProviderRegistry.all_providers()] == [
         "chaosblade", "k8s_native", "host_shell", "chaosblade_python",
@@ -324,7 +400,7 @@ def test_detect_method_self_bootstraps_on_empty_registry():
 def test_detect_method_no_injection_returns_none():
     FaultProviderRegistry.register_builtins()
     unrelated = [ToolMessage(content="ok", name="kubectl_read", tool_call_id="v1")]
-    assert FaultProviderRegistry.detect_method(unrelated, None, is_host=True) is None
+    assert FaultProviderRegistry.detect_method(unrelated, is_host=True) is None
 
 
 # -- recency-based attribution (task-76c59364) -------------------------------
@@ -359,7 +435,7 @@ def test_destroyed_blade_uid_not_claimed_native_wins():
     # partition. The destroyed UID must be ignored → kubectl_native.
     FaultProviderRegistry.register_builtins()
     assert FaultProviderRegistry.detect_method(
-        _destroyed_blade_then_native(), None, is_host=False,
+        _destroyed_blade_then_native(), is_host=False,
     ) == "kubectl_native"
 
 
@@ -369,7 +445,7 @@ def test_stale_blade_uid_in_state_does_not_force_blade():
     # the mere presence of a UID.
     FaultProviderRegistry.register_builtins()
     assert FaultProviderRegistry.detect_method(
-        _destroyed_blade_then_native("uid-dead"), "uid-dead", is_host=False,
+        _destroyed_blade_then_native("uid-dead"), is_host=False,
     ) == "kubectl_native"
 
 
@@ -390,7 +466,7 @@ def test_later_native_wins_over_earlier_live_blade():
         ToolMessage(content="", name="kubectl", tool_call_id="k9"),
     ]
     assert FaultProviderRegistry.detect_method(
-        msgs, None, is_host=False,
+        msgs, is_host=False,
     ) == "kubectl_native"
 
 
@@ -410,7 +486,7 @@ def test_later_live_blade_wins_over_earlier_native():
         _blade_ok("uid-late"),
     ]
     assert FaultProviderRegistry.detect_method(
-        msgs, None, is_host=False,
+        msgs, is_host=False,
     ) == "host_blade"
 
 
@@ -447,6 +523,30 @@ async def test_layer1_seam_unknown_method_falls_back_to_direct():
     assert result.status == "skipped"
 
 
+# -- Layer1Result storage-shape parity (phase-5 unified mode="json") ---------
+
+
+def test_layer1_to_dict_renders_plain_storage_shape():
+    # Phase-7 T1 unified address: the recover-side and verify-side
+    # serializers merged into result/verdict.py ``layer1_to_dict`` beside
+    # the data class. mode="json" guarantees the str-Enum status surfaces
+    # as a plain string (recover cache and verification.layer1 share the
+    # storage shape by construction now).
+    from chaos_agent.agent.result.verdict import Layer1Result, layer1_to_dict
+
+    result = Layer1Result(
+        status="failed",
+        details="blade_destroy failed",
+        raw_output="destroy: err",
+        resource_statuses=[{"name": "pod-1", "status": "failed"}],
+        affected_count=1,
+    )
+
+    recover_dict = layer1_to_dict(result)
+    # Plain string, not a Layer1Status enum member (mode="json" guarantee).
+    assert recover_dict["status"] == "failed"
+    assert type(recover_dict["status"]) is str
+
 
 # -- recover() delegation (Phase 1e) -----------------------------------------
 
@@ -459,7 +559,7 @@ async def test_host_shell_recover_no_llm_unrecovered():
     result = await HostShellProvider().recover({"execution_artifacts": []}, None, task_id="t1")
     assert result.recovered is False
     assert result.level == "unrecovered"
-    assert result.blade_uid == ""
+    assert result.experiment_uid == ""
     assert result.layer1["status"] == "skipped"
     assert result.layer2["status"] == "skipped"
     assert result.failure is not None
@@ -478,11 +578,12 @@ async def test_chaosblade_recover_kubectl_exec_unreachable():
         tool_call_id="",
     )
     result = await ChaosbladeProvider().recover(
-        {}, None, blade_uid="uid-k8s", kubeconfig="", messages=[kubectl_success],
+        {}, {"kind": "blade_uid", "value": "uid-k8s"},
+        kubeconfig="", messages=[kubectl_success],
     )
     assert result.recovered is False
     assert result.level == "unrecovered"
-    assert result.blade_uid == "uid-k8s"
+    assert result.experiment_uid == "uid-k8s"
     assert result.layer1["status"] == "skipped"
     assert any("kubectl exec" in w for w in result.warnings)
     assert result.failure is not None
@@ -494,13 +595,14 @@ async def test_chaosblade_recover_local_blade_destroy_passed():
     from chaos_agent.agent.result.verdict import Layer1Result, Layer1Status
 
     with patch(
-        "chaos_agent.agent.nodes.recover._recover_layer1._run_recover_layer1"
+        "chaos_agent.agent.providers.chaosblade.recover.run_layer1_destroy"
     ) as mock_l1:
         mock_l1.return_value = Layer1Result(
             status=Layer1Status.PASSED, details="blade_destroy: success",
         )
         result = await ChaosbladeProvider().recover(
-            {}, None, blade_uid="uid-host", kubeconfig="", messages=[],
+            {}, {"kind": "blade_uid", "value": "uid-host"},
+            kubeconfig="", messages=[],
         )
     assert result.recovered is True
     assert result.level == "recovered"
@@ -517,14 +619,14 @@ async def test_chaosblade_recover_combo_never_recovered_no_llm():
     from chaos_agent.agent.result.verdict import Layer1Result, Layer1Status
 
     with patch(
-        "chaos_agent.agent.nodes.recover._recover_layer1._run_recover_layer1"
+        "chaos_agent.agent.providers.chaosblade.recover.run_layer1_destroy"
     ) as mock_l1:
         mock_l1.return_value = Layer1Result(
             status=Layer1Status.PASSED, details="blade_destroy: success",
         )
         result = await ChaosbladeProvider().recover(
-            {"combo_native_issued": True}, None,
-            blade_uid="uid-host", kubeconfig="", messages=[],
+            {"combo_native_issued": True}, {"kind": "blade_uid", "value": "uid-host"},
+            kubeconfig="", messages=[],
         )
     assert result.recovered is False
     assert result.level == "unrecovered"
@@ -536,12 +638,12 @@ async def test_chaosblade_recover_combo_kubectl_exec_warning_no_llm():
     """kubectl_exec delivery + combo in the no-LLM path: the early-return
     branch must ALSO surface the native-component leak (not only the
     experiment-destroy guidance)."""
-    from chaos_agent.agent.providers.chaosblade import ChaosbladeProvider
+    from chaos_agent.agent.providers.chaosblade.provider import ChaosbladeProvider
 
     result = await ChaosbladeProvider().recover(
         {"injection_method": "kubectl_exec", "combo_native_issued": True},
-        None,
-        blade_uid="uid-exec", kubeconfig="", messages=[],
+        {"kind": "blade_uid", "value": "uid-exec"},
+        kubeconfig="", messages=[],
     )
     assert result.recovered is False
     assert result.level == "unrecovered"
@@ -555,20 +657,20 @@ async def test_chaosblade_python_recover_combo_never_recovered_no_llm():
     no-LLM path must never report recovered for a combo."""
     from unittest.mock import patch
 
-    from chaos_agent.agent.providers.chaosblade_python import (
+    from chaos_agent.agent.providers.chaosblade.python_provider import (
         ChaosbladePythonProvider,
     )
     from chaos_agent.agent.result.verdict import Layer1Result, Layer1Status
 
     with patch(
-        "chaos_agent.agent.nodes.recover._recover_layer1._run_recover_layer1"
+        "chaos_agent.agent.providers.chaosblade.recover.run_layer1_destroy"
     ) as mock_l1:
         mock_l1.return_value = Layer1Result(
             status=Layer1Status.PASSED, details="blade_destroy: success",
         )
         result = await ChaosbladePythonProvider().recover(
-            {"combo_native_issued": True}, None,
-            blade_uid="uid-py", kubeconfig="", messages=[],
+            {"combo_native_issued": True}, {"kind": "blade_uid", "value": "uid-py"},
+            kubeconfig="", messages=[],
         )
     assert result.recovered is False
     assert result.level == "unrecovered"
@@ -611,7 +713,7 @@ def test_provider_capability_matrix_pins_combo_criteria():
 
 
 async def test_k8s_native_recover_non_chaosblade_unrecovered():
-    result = await K8sNativeProvider().recover({}, None, blade_uid="")
+    result = await K8sNativeProvider().recover({}, None)
     assert result.recovered is False
     assert result.level == "unrecovered"
     assert result.layer1["status"] == "skipped"

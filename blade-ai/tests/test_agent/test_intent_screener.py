@@ -16,7 +16,7 @@ def _tool_call(name: str) -> AIMessage:
 def test_rejects_host_probe_on_k8s_transport_without_rejecting_host_semantics():
     result = intent_screener({
         "kube_connection_mode": "kubeconfig",
-        "fault_spec": {"scope": "host", "blade_target": "cpu", "blade_action": "fullload"},
+        "fault_spec": {"scope": "host", "fault_target": "cpu", "fault_action": "fullload"},
         "messages": [_tool_call("host_read")],
     })
 
@@ -32,7 +32,7 @@ def test_refusal_names_the_transport_in_force():
     # execute-phase screener follows), so the message must name it.
     result = intent_screener({
         "kube_connection_mode": "kubeconfig",
-        "fault_spec": {"scope": "host", "blade_target": "cpu", "blade_action": "fullload"},
+        "fault_spec": {"scope": "host", "fault_target": "cpu", "fault_action": "fullload"},
         "messages": [_tool_call("host_read")],
     })
 
@@ -50,7 +50,7 @@ def test_refusal_names_the_transport_in_force():
 def test_allows_k8s_probe_even_when_semantic_intent_is_host():
     result = intent_screener({
         "kube_connection_mode": "kubeconfig",
-        "fault_spec": {"scope": "host", "blade_target": "cpu", "blade_action": "fullload"},
+        "fault_spec": {"scope": "host", "fault_target": "cpu", "fault_action": "fullload"},
         "messages": [_tool_call("kubectl_read")],
     })
 
@@ -79,7 +79,7 @@ def test_plan_builder_rejects_stale_host_tool_on_k8s_transport():
     )
     state = {
         "kube_connection_mode": "kubeconfig",
-        "fault_spec": {"scope": "pod", "blade_target": "cpu", "blade_action": "fullload"},
+        "fault_spec": {"scope": "pod", "fault_target": "cpu", "fault_action": "fullload"},
         "messages": [AIMessage(content="", tool_calls=[
             {"name": "host_read", "id": "probe-1", "args": {"command": "df -h"}},
             {"name": "kubectl_read", "id": "probe-2",

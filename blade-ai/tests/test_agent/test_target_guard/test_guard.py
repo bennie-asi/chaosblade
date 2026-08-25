@@ -73,7 +73,8 @@ class TestEscapeReasonPassthrough:
 
     def test_escape_detail_surfaced_verbatim(self):
         eff = EffectiveTarget(
-            scope=SCOPE_ESCAPE, namespace="",
+            scope=SCOPE_ESCAPE,
+            namespace="",
             confidence=ConfidenceLevel.UNKNOWN,
             raw_command="kubectl(exec chaosblade-tool-x -- chroot /host iptables)",
             reject_detail=self._DETAIL,
@@ -102,7 +103,8 @@ class TestEscapeReasonPassthrough:
             "expires on its own"
         )
         eff = EffectiveTarget(
-            scope=SCOPE_ESCAPE, namespace="",
+            scope=SCOPE_ESCAPE,
+            namespace="",
             confidence=ConfidenceLevel.UNKNOWN,
             raw_command="kubectl(exec debugger-1 -- chroot /host tc qdisc add)",
             reject_detail="the host mutation carries no paired reversal",
@@ -123,7 +125,8 @@ class TestEscapeReasonPassthrough:
         actively steers the model at the wrong subsystem.
         """
         eff = EffectiveTarget(
-            scope=SCOPE_ESCAPE, namespace="",
+            scope=SCOPE_ESCAPE,
+            namespace="",
             confidence=ConfidenceLevel.UNKNOWN,
             raw_command="chroot /host iptables",
         )
@@ -136,7 +139,8 @@ class TestEscapeReasonPassthrough:
     def test_banned_detail_surfaced_verbatim(self):
         detail = "kubectl subcommand 'delete' is explicitly banned (too dangerous to classify)"
         eff = EffectiveTarget(
-            scope=SCOPE_BANNED, namespace="",
+            scope=SCOPE_BANNED,
+            namespace="",
             confidence=ConfidenceLevel.HIGH,
             raw_command="kubectl(delete pods --all)",
             reject_detail=detail,
@@ -148,7 +152,8 @@ class TestEscapeReasonPassthrough:
 
     def test_banned_fallback_generic_reason_when_no_detail(self):
         eff = EffectiveTarget(
-            scope=SCOPE_BANNED, namespace="",
+            scope=SCOPE_BANNED,
+            namespace="",
             confidence=ConfidenceLevel.HIGH,
             raw_command="kubectl(proxy)",
         )
@@ -169,7 +174,8 @@ class TestSentinelScopes:
     def test_readonly_passes_through(self):
         approved = ApprovedTarget(scope="pod", namespace="ns", names=("a",))
         effective = EffectiveTarget(
-            scope=SCOPE_READONLY, namespace="",
+            scope=SCOPE_READONLY,
+            namespace="",
             raw_command="kubectl(get pods)",
         )
         d = target_drift_guard(effective, approved)
@@ -179,7 +185,8 @@ class TestSentinelScopes:
     def test_banned_rejects(self):
         approved = ApprovedTarget(scope="pod", namespace="ns", names=("a",))
         effective = EffectiveTarget(
-            scope=SCOPE_BANNED, namespace="",
+            scope=SCOPE_BANNED,
+            namespace="",
             raw_command="kubectl(apply -f x.yaml)",
         )
         d = target_drift_guard(effective, approved)
@@ -189,7 +196,8 @@ class TestSentinelScopes:
     def test_unknown_scope_rejects(self):
         approved = ApprovedTarget(scope="pod", namespace="ns", names=("a",))
         effective = EffectiveTarget(
-            scope=SCOPE_UNKNOWN, namespace="",
+            scope=SCOPE_UNKNOWN,
+            namespace="",
             raw_command="weird_tool(...)",
             confidence=ConfidenceLevel.UNKNOWN,
         )
@@ -200,7 +208,9 @@ class TestSentinelScopes:
         approved = ApprovedTarget(scope="pod", namespace="ns", names=("a",))
         # scope parsed but confidence=UNKNOWN — refuse defensively.
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", names=("a",),
+            scope="pod",
+            namespace="ns",
+            names=("a",),
             confidence=ConfidenceLevel.UNKNOWN,
             raw_command="x()",
         )
@@ -213,7 +223,9 @@ class TestApprovedNoneDefence:
         # Defence-in-depth: if the screener calls guard without an
         # approval (wiring bug), we must NOT default-allow.
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", names=("a",),
+            scope="pod",
+            namespace="ns",
+            names=("a",),
             raw_command="kubectl(delete pod/a)",
         )
         d = target_drift_guard(effective, approved=None)
@@ -233,16 +245,19 @@ class TestZoneLabelNameBatchDrift:
 
     def _approved(self):
         return ApprovedTarget(
-            scope="node", namespace="",
+            scope="node",
+            namespace="",
             labels=dict(self._ZONE),
             resolved_names=("node-1", "node-2", "node-3"),
-            blade_target="network", blade_action="drop",
+            fault_target="network",
+            fault_action="drop",
             lock_fault_type=False,
         )
 
     def test_in_zone_name_batch_not_drift(self):
         effective = EffectiveTarget(
-            scope="node", namespace="",
+            scope="node",
+            namespace="",
             names=("node-1", "node-2"),
             raw_command="kubectl(debug node/node-1)",
         )
@@ -251,7 +266,8 @@ class TestZoneLabelNameBatchDrift:
 
     def test_out_of_zone_name_rejected(self):
         effective = EffectiveTarget(
-            scope="node", namespace="",
+            scope="node",
+            namespace="",
             names=("node-99",),
             raw_command="kubectl(debug node/node-99)",
         )
@@ -262,13 +278,16 @@ class TestZoneLabelNameBatchDrift:
         # No resolved_names frozen (e.g. resolution failed) → the labels↔names
         # cross is still rejected, preserving the pre-fix safe default.
         approved = ApprovedTarget(
-            scope="node", namespace="",
+            scope="node",
+            namespace="",
             labels=dict(self._ZONE),
-            blade_target="network", blade_action="drop",
+            fault_target="network",
+            fault_action="drop",
             lock_fault_type=False,
         )
         effective = EffectiveTarget(
-            scope="node", namespace="",
+            scope="node",
+            namespace="",
             names=("node-1",),
             raw_command="kubectl(debug node/node-1)",
         )
@@ -277,15 +296,24 @@ class TestZoneLabelNameBatchDrift:
 
     def test_unit_names_subset_uses_resolved_names(self):
         from chaos_agent.agent.target_guard.drift_policy import _check_names_subset
+
         approved = self._approved()
-        assert _check_names_subset(
-            approved,
-            EffectiveTarget(scope="node", namespace="", names=("node-2",)),
-        ) is True
-        assert _check_names_subset(
-            approved,
-            EffectiveTarget(scope="node", namespace="", names=("node-2", "node-99")),
-        ) is False
+        assert (
+            _check_names_subset(
+                approved,
+                EffectiveTarget(scope="node", namespace="", names=("node-2",)),
+            )
+            is True
+        )
+        assert (
+            _check_names_subset(
+                approved,
+                EffectiveTarget(
+                    scope="node", namespace="", names=("node-2", "node-99")
+                ),
+            )
+            is False
+        )
 
 
 class TestPodLabelNameBatchDrift:
@@ -298,16 +326,19 @@ class TestPodLabelNameBatchDrift:
 
     def _approved(self):
         return ApprovedTarget(
-            scope="pod", namespace="prod",
+            scope="pod",
+            namespace="prod",
             labels={"app": "checkout"},
             resolved_names=("checkout-abc", "checkout-def", "checkout-ghi"),
-            blade_target="network", blade_action="loss",
+            fault_target="network",
+            fault_action="loss",
             lock_fault_type=False,
         )
 
     def test_in_selector_pod_batch_not_drift(self):
         effective = EffectiveTarget(
-            scope="pod", namespace="prod",
+            scope="pod",
+            namespace="prod",
             names=("checkout-abc", "checkout-def"),
             raw_command="kubectl(delete pod checkout-abc -n prod)",
         )
@@ -316,7 +347,8 @@ class TestPodLabelNameBatchDrift:
 
     def test_out_of_selector_pod_rejected(self):
         effective = EffectiveTarget(
-            scope="pod", namespace="prod",
+            scope="pod",
+            namespace="prod",
             names=("other-app-xyz",),
             raw_command="kubectl(delete pod other-app-xyz -n prod)",
         )
@@ -397,11 +429,13 @@ class TestCrossResourceDrift:
 class TestLabelsSelector:
     def test_exact_match_labels(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="ns",
+            scope="pod",
+            namespace="ns",
             labels={"app": "demo"},
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns",
+            scope="pod",
+            namespace="ns",
             labels={"app": "demo"},
         )
         d = target_drift_guard(effective, approved)
@@ -411,11 +445,13 @@ class TestLabelsSelector:
         # approved selects app=demo; effective adds env=prod to narrow.
         # Effective's resource set is a SUBSET of approved's → safe.
         approved = ApprovedTarget(
-            scope="pod", namespace="ns",
+            scope="pod",
+            namespace="ns",
             labels={"app": "demo"},
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns",
+            scope="pod",
+            namespace="ns",
             labels={"app": "demo", "env": "prod"},
         )
         d = target_drift_guard(effective, approved)
@@ -423,11 +459,13 @@ class TestLabelsSelector:
 
     def test_different_value_rejected(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="ns",
+            scope="pod",
+            namespace="ns",
             labels={"app": "demo"},
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns",
+            scope="pod",
+            namespace="ns",
             labels={"app": "other"},
         )
         d = target_drift_guard(effective, approved)
@@ -436,11 +474,13 @@ class TestLabelsSelector:
     def test_missing_required_key_rejected(self):
         # approved requires app=demo AND env=prod; effective only has app
         approved = ApprovedTarget(
-            scope="pod", namespace="ns",
+            scope="pod",
+            namespace="ns",
             labels={"app": "demo", "env": "prod"},
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns",
+            scope="pod",
+            namespace="ns",
             labels={"app": "demo"},
         )
         d = target_drift_guard(effective, approved)
@@ -450,20 +490,28 @@ class TestLabelsSelector:
         # Without cluster lookup we can't prove labels resolve to
         # approved names — reject.
         approved = ApprovedTarget(
-            scope="pod", namespace="ns", names=("a",),
+            scope="pod",
+            namespace="ns",
+            names=("a",),
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", labels={"app": "demo"},
+            scope="pod",
+            namespace="ns",
+            labels={"app": "demo"},
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.REJECT_DRIFT
 
     def test_approved_labels_effective_names_rejected(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="ns", labels={"app": "demo"},
+            scope="pod",
+            namespace="ns",
+            labels={"app": "demo"},
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", names=("a",),
+            scope="pod",
+            namespace="ns",
+            names=("a",),
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.REJECT_DRIFT
@@ -477,23 +525,29 @@ class TestLabelsSelector:
 class TestNamespaceWide:
     def test_namespace_wide_allows_any_name(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="ns",
+            scope="pod",
+            namespace="ns",
             is_namespace_wide=True,
         )
         # Effective picks an arbitrary pod in the same ns — OK.
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", names=("random-pod",),
+            scope="pod",
+            namespace="ns",
+            names=("random-pod",),
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.ALLOW
 
     def test_namespace_wide_still_blocks_cross_namespace(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="prod",
+            scope="pod",
+            namespace="prod",
             is_namespace_wide=True,
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="staging", names=("p1",),
+            scope="pod",
+            namespace="staging",
+            names=("p1",),
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.REJECT_DRIFT
@@ -502,10 +556,14 @@ class TestNamespaceWide:
         """namespace_wide allows any resource within the scope — but a
         non-owner scope (service vs pod) is still drift."""
         approved = ApprovedTarget(
-            scope="pod", namespace="ns", is_namespace_wide=True,
+            scope="pod",
+            namespace="ns",
+            is_namespace_wide=True,
         )
         effective = EffectiveTarget(
-            scope="service", namespace="ns", names=("svc1",),
+            scope="service",
+            namespace="ns",
+            names=("svc1",),
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.REJECT_DRIFT
@@ -513,10 +571,14 @@ class TestNamespaceWide:
     def test_namespace_wide_allows_owner_cross_scope(self):
         """namespace_wide + owner scope (deployment vs pod) → allowed."""
         approved = ApprovedTarget(
-            scope="pod", namespace="ns", is_namespace_wide=True,
+            scope="pod",
+            namespace="ns",
+            is_namespace_wide=True,
         )
         effective = EffectiveTarget(
-            scope="deployment", namespace="ns", names=("d1",),
+            scope="deployment",
+            namespace="ns",
+            names=("d1",),
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.ALLOW
@@ -579,26 +641,37 @@ class TestBladeTargetLock:
     def test_lock_on_diff_blade_target_rejected(self):
         # User approved CPU burn; LLM tries memory burn — TYPE drift.
         approved = ApprovedTarget(
-            scope="pod", namespace="ns", names=("a",),
-            blade_target="cpu", blade_action="fullload",
+            scope="pod",
+            namespace="ns",
+            names=("a",),
+            fault_target="cpu",
+            fault_action="fullload",
             lock_fault_type=True,
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", names=("a",),
-            blade_target="mem", blade_action="ram",
+            scope="pod",
+            namespace="ns",
+            names=("a",),
+            fault_target="mem",
+            fault_action="ram",
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.REJECT_DRIFT
-        assert "blade_target drift" in d.reason
+        assert "fault_target drift" in d.reason
 
     def test_unlock_allows_blade_target_change(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="ns", names=("a",),
-            blade_target="cpu", lock_fault_type=False,
+            scope="pod",
+            namespace="ns",
+            names=("a",),
+            fault_target="cpu",
+            lock_fault_type=False,
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", names=("a",),
-            blade_target="mem",
+            scope="pod",
+            namespace="ns",
+            names=("a",),
+            fault_target="mem",
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.ALLOW
@@ -608,12 +681,17 @@ class TestBladeTargetLock:
         # pod (effective has NO blade_target). That's method autonomy,
         # not type drift — must ALLOW.
         approved = ApprovedTarget(
-            scope="pod", namespace="ns", names=("a",),
-            blade_target="cpu", lock_fault_type=True,
+            scope="pod",
+            namespace="ns",
+            names=("a",),
+            fault_target="cpu",
+            lock_fault_type=True,
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", names=("a",),
-            blade_target="",  # kubectl scale doesn't carry blade target
+            scope="pod",
+            namespace="ns",
+            names=("a",),
+            fault_target="",  # kubectl scale doesn't carry blade target
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.ALLOW
@@ -623,12 +701,17 @@ class TestBladeTargetLock:
         # switches to blade. We allow — narrowing a non-fault approval
         # into a typed fault is in-scope autonomy.
         approved = ApprovedTarget(
-            scope="pod", namespace="ns", names=("a",),
-            blade_target="", lock_fault_type=True,
+            scope="pod",
+            namespace="ns",
+            names=("a",),
+            fault_target="",
+            lock_fault_type=True,
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", names=("a",),
-            blade_target="cpu",
+            scope="pod",
+            namespace="ns",
+            names=("a",),
+            fault_target="cpu",
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.ALLOW
@@ -638,13 +721,19 @@ class TestBladeTargetLock:
         # TYPE, different ACTION. Always allowed (action is not locked
         # by lock_fault_type).
         approved = ApprovedTarget(
-            scope="pod", namespace="ns", names=("a",),
-            blade_target="cpu", blade_action="fullload",
+            scope="pod",
+            namespace="ns",
+            names=("a",),
+            fault_target="cpu",
+            fault_action="fullload",
             lock_fault_type=True,
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", names=("a",),
-            blade_target="cpu", blade_action="high",
+            scope="pod",
+            namespace="ns",
+            names=("a",),
+            fault_target="cpu",
+            fault_action="high",
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.ALLOW
@@ -662,7 +751,9 @@ class TestLowConfidence:
         # not reject.
         approved = ApprovedTarget(scope="pod", namespace="ns", names=("a",))
         effective = EffectiveTarget(
-            scope="pod", namespace="ns", names=("a",),
+            scope="pod",
+            namespace="ns",
+            names=("a",),
             confidence=ConfidenceLevel.LOW,
             raw_command="kubectl(exec a -- kubectl get pods)",
         )
@@ -678,11 +769,15 @@ class TestLowConfidence:
 class TestSuggestionFormatting:
     def test_suggestion_includes_approved_summary(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="prod", names=("a", "b"),
-            blade_target="cpu",
+            scope="pod",
+            namespace="prod",
+            names=("a", "b"),
+            fault_target="cpu",
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="prod", names=("c",),
+            scope="pod",
+            namespace="prod",
+            names=("c",),
         )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.REJECT_DRIFT
@@ -690,7 +785,7 @@ class TestSuggestionFormatting:
         assert "scope=pod" in d.suggestion
         assert "ns=prod" in d.suggestion
         assert "['a', 'b']" in d.suggestion
-        assert "blade_target=cpu" in d.suggestion
+        assert "fault_target=cpu" in d.suggestion
 
     def test_cluster_scoped_suggestion(self):
         approved = ApprovedTarget(scope="node", namespace="", names=("n1",))
@@ -719,26 +814,47 @@ class TestBannedRejectionSeparatesCauseFromWayForward:
     def _decide(self, tool, args):
         return target_drift_guard(infer_effective_target(tool, args), self.APPROVED)
 
-    @pytest.mark.parametrize("tool,args,expected", [
-        # kubeconfig write → per-call flags (same answer the ToolGuard layer gives)
-        ("kubectl", {"subcommand": "config", "v_args": "use-context other"},
-         "--context / --kubeconfig"),
-        # proxy → the subcommands already carry the connection
-        ("kubectl", {"subcommand": "proxy", "v_args": "--port=8080"},
-         "No tunnel is needed"),
-        # -f file → stdin_data
-        ("kubectl", {"subcommand": "apply", "v_args": "-f /tmp/x.yaml"},
-         "stdin_data"),
-        # manifest without kind → declare one
-        ("kubectl", {"subcommand": "apply", "v_args": "-f -", "stdin_data": "foo: bar"},
-         "Declare an explicit 'kind:'"),
-        # non-whitelisted kind → why workloads are refused
-        ("kubectl", {"subcommand": "apply", "v_args": "-f -",
-                     "stdin_data": "kind: Deployment"},
-         "blast radius"),
-        # skill script → use the classifiable tools
-        ("_execute_skill_script", {"script": "x.sh"}, "kubectl / blade tools"),
-    ])
+    @pytest.mark.parametrize(
+        "tool,args,expected",
+        [
+            # kubeconfig write → per-call flags (same answer the ToolGuard layer gives)
+            (
+                "kubectl",
+                {"subcommand": "config", "v_args": "use-context other"},
+                "--context / --kubeconfig",
+            ),
+            # proxy → the subcommands already carry the connection
+            (
+                "kubectl",
+                {"subcommand": "proxy", "v_args": "--port=8080"},
+                "No tunnel is needed",
+            ),
+            # -f file → stdin_data
+            (
+                "kubectl",
+                {"subcommand": "apply", "v_args": "-f /tmp/x.yaml"},
+                "stdin_data",
+            ),
+            # manifest without kind → declare one
+            (
+                "kubectl",
+                {"subcommand": "apply", "v_args": "-f -", "stdin_data": "foo: bar"},
+                "Declare an explicit 'kind:'",
+            ),
+            # non-whitelisted kind → why workloads are refused
+            (
+                "kubectl",
+                {
+                    "subcommand": "apply",
+                    "v_args": "-f -",
+                    "stdin_data": "kind: Deployment",
+                },
+                "blast radius",
+            ),
+            # skill script → use the classifiable tools
+            ("_execute_skill_script", {"script": "x.sh"}, "kubectl / blade tools"),
+        ],
+    )
     def test_ban_with_an_alternative_states_it(self, tool, args, expected):
         d = self._decide(tool, args)
         assert d.verdict == GuardVerdict.REJECT_BANNED
@@ -747,19 +863,31 @@ class TestBannedRejectionSeparatesCauseFromWayForward:
         assert d.reason
         assert expected not in d.reason
 
-    @pytest.mark.parametrize("tool,args", [
-        ("kubectl", {"subcommand": "apply", "v_args": "-f /tmp/x.yaml"}),
-        ("kubectl", {"subcommand": "apply", "v_args": "-f -", "stdin_data": "foo: bar"}),
-        ("kubectl", {"subcommand": "apply", "v_args": "-f -",
-                     "stdin_data": "kind: Deployment"}),
-    ])
+    @pytest.mark.parametrize(
+        "tool,args",
+        [
+            ("kubectl", {"subcommand": "apply", "v_args": "-f /tmp/x.yaml"}),
+            (
+                "kubectl",
+                {"subcommand": "apply", "v_args": "-f -", "stdin_data": "foo: bar"},
+            ),
+            (
+                "kubectl",
+                {
+                    "subcommand": "apply",
+                    "v_args": "-f -",
+                    "stdin_data": "kind: Deployment",
+                },
+            ),
+        ],
+    )
     def test_manifest_bans_name_the_accepted_kinds(self, tool, args):
         """Never say "only whitelisted kinds" without listing them.
 
         The list is rendered from ``ALLOWED_MANIFEST_KINDS`` so it cannot go
         stale relative to the check that enforces it.
         """
-        from chaos_agent.agent.target_guard.classifier import ALLOWED_MANIFEST_KINDS
+        from chaos_agent.agent.providers.k8s_native.classifier import ALLOWED_MANIFEST_KINDS
 
         d = self._decide(tool, args)
         for kind in ALLOWED_MANIFEST_KINDS:
@@ -774,7 +902,9 @@ class TestBannedRejectionSeparatesCauseFromWayForward:
         """
         from chaos_agent.tools.guard_gateway import decision_to_feedback
 
-        d = self._decide("kubectl", {"subcommand": "certificate", "v_args": "approve c"})
+        d = self._decide(
+            "kubectl", {"subcommand": "certificate", "v_args": "approve c"}
+        )
         assert d.verdict == GuardVerdict.REJECT_BANNED
         assert d.suggestion == ""
         assert decision_to_feedback(d).is_hard_floor is True
@@ -796,8 +926,10 @@ class TestBannedRejectionSeparatesCauseFromWayForward:
         """
         from chaos_agent.tools.guard_gateway import decision_to_feedback
 
-        d = self._decide("kubectl", {"subcommand": "apply", "v_args": "-f -",
-                                     "stdin_data": f"kind: {kind}"})
+        d = self._decide(
+            "kubectl",
+            {"subcommand": "apply", "v_args": "-f -", "stdin_data": f"kind: {kind}"},
+        )
         assert d.verdict == GuardVerdict.REJECT_BANNED
         assert d.effective is not None
         assert d.effective.mechanism_banned is True
@@ -815,19 +947,24 @@ class TestBannedRejectionSeparatesCauseFromWayForward:
         """
         from chaos_agent.tools.guard_gateway import decision_to_feedback
 
-        d = self._decide("kubectl", {"subcommand": "apply", "v_args": "-f -",
-                                     "stdin_data": "foo: bar"})
+        d = self._decide(
+            "kubectl",
+            {"subcommand": "apply", "v_args": "-f -", "stdin_data": "foo: bar"},
+        )
         assert d.verdict == GuardVerdict.REJECT_BANNED
         assert d.effective is not None
         assert d.effective.mechanism_banned is False
         assert decision_to_feedback(d).is_hard_floor is False
 
-    @pytest.mark.parametrize("tool,args", [
-        ("kubectl", {"subcommand": "config", "v_args": "use-context other"}),
-        ("kubectl", {"subcommand": "proxy", "v_args": "--port=8080"}),
-        ("kubectl", {"subcommand": "apply", "v_args": "-f /tmp/x.yaml"}),
-        ("_execute_skill_script", {"script": "x.sh"}),
-    ])
+    @pytest.mark.parametrize(
+        "tool,args",
+        [
+            ("kubectl", {"subcommand": "config", "v_args": "use-context other"}),
+            ("kubectl", {"subcommand": "proxy", "v_args": "--port=8080"}),
+            ("kubectl", {"subcommand": "apply", "v_args": "-f /tmp/x.yaml"}),
+            ("_execute_skill_script", {"script": "x.sh"}),
+        ],
+    )
     def test_ban_with_an_alternative_is_not_a_dead_end(self, tool, args):
         """The mirror of the case above: a stated alternative must reach the
         model as "reshapeable", or the suggestion contradicts the verdict."""
@@ -859,10 +996,12 @@ class TestApplyWithoutFileInputNamesTheRealCause:
         )
 
     def test_stdin_manifest_without_f_flag_names_the_missing_flag(self):
-        d = self._decide({
-            "subcommand": "apply",
-            "stdin_data": "kind: PersistentVolume",
-        })
+        d = self._decide(
+            {
+                "subcommand": "apply",
+                "stdin_data": "kind: PersistentVolume",
+            }
+        )
         assert d.verdict == GuardVerdict.REJECT_UNKNOWN
         assert "stdin_data" in d.reason
         assert "'-f -'" in d.suggestion
@@ -883,10 +1022,13 @@ class TestApplyWithoutFileInputNamesTheRealCause:
 
     def test_apply_with_f_and_stdin_still_classifies_the_manifest(self):
         """The compliant form must stay green after the diagnosis split."""
-        d = self._decide({
-            "subcommand": "apply", "v_args": "-f -",
-            "stdin_data": "kind: PersistentVolume",
-        })
+        d = self._decide(
+            {
+                "subcommand": "apply",
+                "v_args": "-f -",
+                "stdin_data": "kind: PersistentVolume",
+            }
+        )
         assert d.verdict != GuardVerdict.REJECT_UNKNOWN
 
 
@@ -906,15 +1048,21 @@ class TestUnparseableCallNamesTheMissingArgument:
     """
 
     APPROVED = ApprovedTarget(
-        scope="host", namespace="", names=("h1",), blade_target="network",
+        scope="host",
+        namespace="",
+        names=("h1",),
+        fault_target="network",
     )
 
-    @pytest.mark.parametrize("tool,args,expected", [
-        ("host_inject", {"command": ""}, "empty 'command'"),
-        ("blade_python_create", {"target": "redis"}, "missing action"),
-        ("blade_python_create", {"action": "delay"}, "missing target"),
-        ("blade_python_create", {}, "missing target and action"),
-    ])
+    @pytest.mark.parametrize(
+        "tool,args,expected",
+        [
+            ("host_inject", {"command": ""}, "empty 'command'"),
+            ("blade_python_create", {"target": "redis"}, "missing action"),
+            ("blade_python_create", {"action": "delay"}, "missing target"),
+            ("blade_python_create", {}, "missing target and action"),
+        ],
+    )
     def test_reason_names_the_missing_argument(self, tool, args, expected):
         effective = infer_effective_target(tool, args)
         d = target_drift_guard(effective, self.APPROVED)
@@ -924,10 +1072,13 @@ class TestUnparseableCallNamesTheMissingArgument:
         assert d.suggestion
         assert "form issue" in d.suggestion
 
-    @pytest.mark.parametrize("tool,args", [
-        ("host_inject", {"command": "iptables -A INPUT -j DROP"}),
-        ("blade_python_create", {"target": "redis", "action": "delay"}),
-    ])
+    @pytest.mark.parametrize(
+        "tool,args",
+        [
+            ("host_inject", {"command": "iptables -A INPUT -j DROP"}),
+            ("blade_python_create", {"target": "redis", "action": "delay"}),
+        ],
+    )
     def test_complete_call_still_classifies_high(self, tool, args):
         """The added detail must not leak into a successful classification."""
         effective = infer_effective_target(tool, args)
@@ -956,24 +1107,43 @@ class TestEveryRejectionOffersAWayForward:
     (``kubectl certificate`` stays empty; the other six must state theirs).
     """
 
-    @pytest.mark.parametrize("effective,approved", [
-        # scope drift across profiles
-        (EffectiveTarget(scope="pod", namespace="ns", names=("p",)),
-         ApprovedTarget(scope="host", namespace="", names=("h",))),
-        # same-profile name drift
-        (EffectiveTarget(scope="pod", namespace="ns", names=("other",)),
-         ApprovedTarget(scope="pod", namespace="ns", names=("p",))),
-        # namespace drift
-        (EffectiveTarget(scope="pod", namespace="other", names=("p",)),
-         ApprovedTarget(scope="pod", namespace="ns", names=("p",))),
-        # unclassifiable call
-        (EffectiveTarget(scope=SCOPE_UNKNOWN, namespace="", raw_command="mystery"),
-         ApprovedTarget(scope="pod", namespace="ns", names=("p",))),
-        # unknown confidence on a real scope
-        (EffectiveTarget(scope="host", namespace="", raw_command="host_inject()",
-                         confidence=ConfidenceLevel.UNKNOWN),
-         ApprovedTarget(scope="host", namespace="", names=("h",))),
-    ])
+    @pytest.mark.parametrize(
+        "effective,approved",
+        [
+            # scope drift across profiles
+            (
+                EffectiveTarget(scope="pod", namespace="ns", names=("p",)),
+                ApprovedTarget(scope="host", namespace="", names=("h",)),
+            ),
+            # same-profile name drift
+            (
+                EffectiveTarget(scope="pod", namespace="ns", names=("other",)),
+                ApprovedTarget(scope="pod", namespace="ns", names=("p",)),
+            ),
+            # namespace drift
+            (
+                EffectiveTarget(scope="pod", namespace="other", names=("p",)),
+                ApprovedTarget(scope="pod", namespace="ns", names=("p",)),
+            ),
+            # unclassifiable call
+            (
+                EffectiveTarget(
+                    scope=SCOPE_UNKNOWN, namespace="", raw_command="mystery"
+                ),
+                ApprovedTarget(scope="pod", namespace="ns", names=("p",)),
+            ),
+            # unknown confidence on a real scope
+            (
+                EffectiveTarget(
+                    scope="host",
+                    namespace="",
+                    raw_command="host_inject()",
+                    confidence=ConfidenceLevel.UNKNOWN,
+                ),
+                ApprovedTarget(scope="host", namespace="", names=("h",)),
+            ),
+        ],
+    )
     def test_rejection_carries_a_suggestion(self, effective, approved):
         d = target_drift_guard(effective, approved)
         assert d.is_reject, d.verdict
@@ -1006,10 +1176,14 @@ class TestVerdictPredicates:
             (SCOPE_BANNED, GuardVerdict.REJECT_BANNED),
             (SCOPE_UNKNOWN, GuardVerdict.REJECT_UNKNOWN),
         ]:
-            confidence = (ConfidenceLevel.UNKNOWN
-                          if scope == SCOPE_UNKNOWN else ConfidenceLevel.HIGH)
+            confidence = (
+                ConfidenceLevel.UNKNOWN
+                if scope == SCOPE_UNKNOWN
+                else ConfidenceLevel.HIGH
+            )
             eff = EffectiveTarget(
-                scope=scope, namespace="ns",
+                scope=scope,
+                namespace="ns",
                 confidence=confidence,
             )
             d = target_drift_guard(eff, approved)
@@ -1033,15 +1207,17 @@ class TestTier1ToolPodExec:
 
     def test_tier1_skips_namespace_check(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="cms-demo",
+            scope="pod",
+            namespace="cms-demo",
             names=("accounting-6fbdb464c7-qn2vr",),
-            blade_target="network",
+            fault_target="network",
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="",
+            scope="pod",
+            namespace="",
             names=("accounting-6fbdb464c7-qn2vr",),
-            blade_target="network",
-            blade_action="drop",
+            fault_target="network",
+            fault_action="drop",
             is_tier1_exec=True,
         )
         d = target_drift_guard(effective, approved)
@@ -1049,15 +1225,17 @@ class TestTier1ToolPodExec:
 
     def test_tier1_still_checks_names(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="cms-demo",
+            scope="pod",
+            namespace="cms-demo",
             names=("accounting-6fbdb464c7-qn2vr",),
-            blade_target="network",
+            fault_target="network",
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="",
+            scope="pod",
+            namespace="",
             names=("OTHER-pod-xyz",),
-            blade_target="network",
-            blade_action="drop",
+            fault_target="network",
+            fault_action="drop",
             is_tier1_exec=True,
         )
         d = target_drift_guard(effective, approved)
@@ -1065,11 +1243,13 @@ class TestTier1ToolPodExec:
 
     def test_tier1_still_checks_scope(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="cms-demo",
+            scope="pod",
+            namespace="cms-demo",
             names=("accounting-6fbdb464c7-qn2vr",),
         )
         effective = EffectiveTarget(
-            scope="node", namespace="",
+            scope="node",
+            namespace="",
             names=("some-node",),
             is_tier1_exec=True,
         )
@@ -1077,30 +1257,34 @@ class TestTier1ToolPodExec:
         assert d.verdict == GuardVerdict.REJECT_DRIFT
 
     def test_owner_scope_daemonset_vs_pod_allowed(self):
-        approved = ApprovedTarget(scope="pod", namespace="kube-system",
-                                  labels={"k8s-app": "kube-dns"})
-        effective = EffectiveTarget(scope="daemonset", namespace="kube-system",
-                                    names=("coredns",))
+        approved = ApprovedTarget(
+            scope="pod", namespace="kube-system", labels={"k8s-app": "kube-dns"}
+        )
+        effective = EffectiveTarget(
+            scope="daemonset", namespace="kube-system", names=("coredns",)
+        )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.ALLOW
 
     def test_owner_scope_statefulset_vs_pod_allowed(self):
-        approved = ApprovedTarget(scope="pod", namespace="ns",
-                                  labels={"app": "mysql"})
-        effective = EffectiveTarget(scope="statefulset", namespace="ns",
-                                    names=("mysql",))
+        approved = ApprovedTarget(scope="pod", namespace="ns", labels={"app": "mysql"})
+        effective = EffectiveTarget(
+            scope="statefulset", namespace="ns", names=("mysql",)
+        )
         d = target_drift_guard(effective, approved)
         assert d.verdict == GuardVerdict.ALLOW
 
     def test_owner_scope_with_owner_names_allows_correct_deployment(self):
         """When owner_names is populated, effective name must be in the set."""
         approved = ApprovedTarget(
-            scope="pod", namespace="kube-system",
+            scope="pod",
+            namespace="kube-system",
             labels={"k8s-app": "kube-dns"},
             owner_names=("coredns",),
         )
         effective = EffectiveTarget(
-            scope="deployment", namespace="kube-system",
+            scope="deployment",
+            namespace="kube-system",
             names=("coredns",),
         )
         d = target_drift_guard(effective, approved)
@@ -1109,12 +1293,14 @@ class TestTier1ToolPodExec:
     def test_owner_scope_with_owner_names_rejects_wrong_deployment(self):
         """When owner_names is populated, wrong deployment name is REJECTED."""
         approved = ApprovedTarget(
-            scope="pod", namespace="cms-demo",
+            scope="pod",
+            namespace="cms-demo",
             labels={"opentelemetry.io/name": "cart"},
             owner_names=("cart",),
         )
         effective = EffectiveTarget(
-            scope="deployment", namespace="cms-demo",
+            scope="deployment",
+            namespace="cms-demo",
             names=("coredns",),  # wrong!
         )
         d = target_drift_guard(effective, approved)
@@ -1137,11 +1323,13 @@ class TestTier1ToolPodExec:
 
     def test_non_tier1_still_rejects_namespace_drift(self):
         approved = ApprovedTarget(
-            scope="pod", namespace="cms-demo",
+            scope="pod",
+            namespace="cms-demo",
             names=("accounting-6fbdb464c7-qn2vr",),
         )
         effective = EffectiveTarget(
-            scope="pod", namespace="default",
+            scope="pod",
+            namespace="default",
             names=("accounting-6fbdb464c7-qn2vr",),
             is_tier1_exec=False,
         )
@@ -1155,17 +1343,24 @@ class TestHostScope:
 
     def _approved(self, **kw):
         base = dict(
-            scope="host", namespace="", names=("node-1",),
-            host_name="node-1", blade_target="network",
-            blade_action="loss", lock_fault_type=True,
+            scope="host",
+            namespace="",
+            names=("node-1",),
+            host_name="node-1",
+            fault_target="network",
+            fault_action="loss",
+            lock_fault_type=True,
         )
         base.update(kw)
         return ApprovedTarget(**base)
 
     def _effective(self, **kw):
         base = dict(
-            scope="host", namespace="", host_name="",
-            blade_target="network", confidence=ConfidenceLevel.HIGH,
+            scope="host",
+            namespace="",
+            host_name="",
+            fault_target="network",
+            confidence=ConfidenceLevel.HIGH,
             raw_command="host_inject(...)",
         )
         base.update(kw)
@@ -1178,14 +1373,16 @@ class TestHostScope:
     def test_fault_family_drift_rejected(self):
         # approved=network, effective=process → blade_target lock trips.
         d = target_drift_guard(
-            self._effective(blade_target="process"), self._approved(),
+            self._effective(fault_target="process"),
+            self._approved(),
         )
         assert d.verdict == GuardVerdict.REJECT_DRIFT
-        assert "blade_target drift" in d.reason
+        assert "fault_target drift" in d.reason
 
     def test_host_name_drift_rejected(self):
         d = target_drift_guard(
-            self._effective(host_name="node-2"), self._approved(),
+            self._effective(host_name="node-2"),
+            self._approved(),
         )
         assert d.verdict == GuardVerdict.REJECT_DRIFT
         assert "host drift" in d.reason
@@ -1207,8 +1404,11 @@ class TestHostScope:
         # legitimise a k8s-resource call. Dispatched before either
         # per-carrier DriftPolicy sees the pair.
         effective = EffectiveTarget(
-            scope="pod", namespace="prod", names=("p1",),
-            confidence=ConfidenceLevel.HIGH, raw_command="kubectl(...)",
+            scope="pod",
+            namespace="prod",
+            names=("p1",),
+            confidence=ConfidenceLevel.HIGH,
+            raw_command="kubectl(...)",
         )
         d = target_drift_guard(effective, self._approved())
         assert d.verdict == GuardVerdict.REJECT_DRIFT
@@ -1235,7 +1435,8 @@ class TestCrossFamilyScopeChange:
 
     def _host_call(self) -> EffectiveTarget:
         return infer_effective_target(
-            "host_inject", {"command": "iptables -A INPUT -j DROP"},
+            "host_inject",
+            {"command": "iptables -A INPUT -j DROP"},
         )
 
     def test_host_approval_rejects_python_call_without_fault_type(self):
@@ -1254,12 +1455,15 @@ class TestCrossFamilyScopeChange:
         """When both sides carry a blade_target the existing lock renders the
         verdict — the new check must not shadow its clearer message."""
         approved = ApprovedTarget(
-            scope="host", namespace="", names=("h1",),
-            blade_target="network", blade_action="loss",
+            scope="host",
+            namespace="",
+            names=("h1",),
+            fault_target="network",
+            fault_action="loss",
         )
         d = target_drift_guard(self._python_call(), approved)
         assert d.verdict == GuardVerdict.REJECT_DRIFT
-        assert "blade_target drift" in d.reason
+        assert "fault_target drift" in d.reason
 
     def test_same_scope_is_untouched_even_without_fault_type(self):
         """The check must key on a scope CHANGE, not on a missing blade_target:
@@ -1270,8 +1474,11 @@ class TestCrossFamilyScopeChange:
 
     def test_matching_python_drill_is_allowed(self):
         approved = ApprovedTarget(
-            scope="python", namespace="", names=(),
-            blade_target="redis", blade_action="delay",
+            scope="python",
+            namespace="",
+            names=(),
+            fault_target="redis",
+            fault_action="delay",
         )
         d = target_drift_guard(self._python_call(), approved)
         assert d.verdict == GuardVerdict.ALLOW

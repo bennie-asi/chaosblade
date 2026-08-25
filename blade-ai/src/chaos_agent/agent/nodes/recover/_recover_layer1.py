@@ -1,36 +1,30 @@
-"""Layer 1 domain for recover verifier: blade_destroy execution and non-ChaosBlade recovery.
+"""Layer 1 domain for recover verifier: the GENERIC recovery plumbing.
 
 Extracted from recover_verifier.py to isolate the "execute recovery" layer
-from the "verify recovery" layer (Layer 2).
+from the "verify recovery" layer (Layer 2). The ChaosBlade execution domain
+(blade_destroy + blade_status and their parsers) physically lives in
+``providers/chaosblade/recover.py`` since phase-3 T2; the transitional
+aliases this module used to re-export were retired with phase-5.
 
-Symbols:
-  Constants: _DESTROYED_STATES, _RECOVER_BASELINE_TOOL_CALL_ID,
+Symbols (owned here — generic):
+  Constants: _RECOVER_BASELINE_TOOL_CALL_ID,
              _RECOVER_SYNTHETIC_TOOL_CALL_IDS, _RECOVER_CONTEXT_KWARGS_KEY
   Dataclass: RecoverLayer1Result
-  Functions: _layer1_to_dict, _parse_blade_destroy_output,
-             _parse_blade_status_destroyed,
-             _build_recover_baseline_tool_messages,
+  Functions: _build_recover_baseline_tool_messages,
              _build_layer1_recovery_prompt, _parse_layer1_recovery_result
-  Async:     _run_recover_layer1
 """
 
-import json
 import logging
 import re
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from chaos_agent.agent.nodes.execute._injection_detection import (
-    _was_blade_create_attempted,
-)
 from chaos_agent.agent.prompts.reminder import SYSTEM_REMINDER_DECLARATION
 from chaos_agent.agent.result.verdict import Layer1Result
 from chaos_agent.transports import PROFILE_K8S
 
 logger = logging.getLogger(__name__)
-
-_DESTROYED_STATES = frozenset({"Destroyed", "destroyed"})
 
 
 # ---------------------------------------------------------------------------
@@ -39,74 +33,6 @@ _DESTROYED_STATES = frozenset({"Destroyed", "destroyed"})
 
 # Backward-compat alias so existing imports don't break.
 RecoverLayer1Result = Layer1Result
-
-
-def _recover_layer1_to_dict(result: Layer1Result) -> dict:
-    """Convert Layer1Result to dict for state storage."""
-    return result.model_dump()
-
-
-# ---------------------------------------------------------------------------
-# blade_destroy result parsing
-# ---------------------------------------------------------------------------
-
-def _parse_blade_destroy_output(raw: str) -> tuple[str, str]:
-    """Parse blade_destroy JSON output into (status, details)."""
-    if not raw or raw.startswith("Error"):
-        return "failed", f"blade_destroy returned error: {raw[:200]}"
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        if "success" in raw.lower() or "destroy" in raw.lower():
-            return "passed", "blade_destroy completed (non-JSON output)"
-        return "failed", raw[:200]
-
-    if data.get("success") or data.get("code") == 200:
-        return "passed", "blade_destroy: success"
-    return "failed", f"blade_destroy failed: {data.get('error', raw[:200])}"
-
-
-# ---------------------------------------------------------------------------
-# blade_status check for Destroyed state
-# ---------------------------------------------------------------------------
-
-def _parse_blade_status_destroyed(raw: str) -> tuple[str, str]:
-    """Check blade_status output confirms experiment is Destroyed."""
-    if not raw or not raw.strip():
-        return "passed", "blade_status: empty response (experiment not found)"
-
-    # Quick check for NotFound before JSON parsing — kubewiz mode returns
-    # error JSON with "not found" when CRD is already deleted.
-    if "not found" in raw.lower() or "notfound" in raw.lower():
-        return "passed", "blade_status: experiment CRD not found (already destroyed)"
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        if any(s in raw for s in _DESTROYED_STATES):
-            return "passed", "blade_status confirms: Destroyed"
-        return "unknown", "Could not parse blade_status output"
-
-    if not (data.get("success") or data.get("code") == 200):
-        if data.get("code") == 406:
-            return "passed", "blade_status: experiment data not found (already destroyed)"
-        # kubewiz mode: blade query k8s returns code 63061 with NotFound error
-        error_msg = data.get("error", "")
-        if "not found" in error_msg.lower() or "notfound" in error_msg.lower():
-            return "passed", "blade_status: experiment CRD not found (already destroyed)"
-        return "failed", f"blade_status check failed: {raw[:200]}"
-
-    res = data.get("result", {})
-    if not isinstance(res, dict):
-        return "passed", "blade_status: Destroyed"
-
-    exp_status = res.get("Status", res.get("status", "")) or res.get("phase", "")
-    if exp_status in _DESTROYED_STATES:
-        return "passed", "blade_status confirms: Destroyed"
-    if exp_status in ("Running", "running"):
-        return "failed", "blade_status: experiment still Running (destroy may have failed)"
-    return "failed", f"blade_status: unexpected status '{exp_status}'"
 
 
 _RECOVER_BASELINE_TOOL_CALL_ID = "recover_baseline_collector"
@@ -352,7 +278,7 @@ RECOVERY_EXECUTION_RESULT:
 
     return f"""You are executing recovery actions for a chaos engineering fault.
 
-This is a non-ChaosBlade fault. EXECUTE the recovery actions to remove the fault
+This fault has no experiment carrier. EXECUTE the recovery actions to remove the fault
 effect using ONLY the tools bound in the current environment. You are NOT
 verifying — Layer 2 owns outcome verification.
 
@@ -360,8 +286,8 @@ verifying — Layer 2 owns outcome verification.
 
 ## Important Constraints
 - Do NOT verify the fault has been removed — that is Layer 2's job, not yours.
-- Do NOT invoke tools that are not currently bound (there is no ChaosBlade
-  experiment to destroy here).
+- Do NOT invoke tools that are not currently bound (there is no experiment carrier
+  to destroy here).
 - Do NOT use interactive commands that require a TTY — translate them into
   programmatic equivalents.
 - Treat the configured target authority and current tool observations as the
@@ -433,109 +359,3 @@ def _parse_layer1_recovery_result(text: str) -> RecoverLayer1Result:
         details=details.rstrip("; ") if details else "Recovery execution completed",
         raw_output=raw_output,
     )
-
-
-# ---------------------------------------------------------------------------
-# Layer 1: Execute blade_destroy + verify destroyed
-# ---------------------------------------------------------------------------
-
-
-async def _run_recover_layer1(
-    blade_uid: str, kubeconfig: str, *, messages: list | None = None,
-    injection_method: str | None = None,
-) -> RecoverLayer1Result:
-    """Execute blade_destroy and verify the experiment is destroyed.
-
-    Step 1: Call blade_destroy
-    Step 2: Call blade_status to confirm Destroyed state
-
-    ``injection_method`` is the durable attribution record from state; see
-    :func:`_was_blade_create_attempted` for why it takes priority over the
-    (possibly compacted) message history.
-    """
-    if not blade_uid:
-        # Distinguish two scenarios when blade_uid is empty during recovery:
-        # 1. ChaosBlade injection was done but UID unavailable → "failed" (terminal)
-        # 2. Non-ChaosBlade fault (kubectl-based) → "skipped" (not terminal, Layer 2 proceeds)
-        if messages and _was_blade_create_attempted(messages, injection_method):
-            return RecoverLayer1Result(
-                status="failed",
-                details="blade_create was called during injection but no UID available for recovery",
-            )
-        return RecoverLayer1Result(
-            status="skipped",
-            details="Non-ChaosBlade fault (no blade_uid), Layer 1 recovery not applicable",
-        )
-
-    try:
-        from chaos_agent.tools.blade import blade_destroy, blade_status
-
-        # Step 1: Execute blade_destroy
-        destroy_output = await blade_destroy.ainvoke(
-            {"uid": blade_uid, "kubeconfig": kubeconfig}
-        )
-        destroy_raw = destroy_output if isinstance(destroy_output, str) else str(destroy_output)
-        destroy_status, destroy_details = _parse_blade_destroy_output(destroy_raw)
-
-        if destroy_status == "failed":
-            # Fallback: destroy failed (e.g. kubewiz guard blocked the delete),
-            # but the experiment may already be gone (timeout auto-expiry).
-            # Check via blade_status — if CRD is not found, treat as recovered.
-            try:
-                status_output = await blade_status.ainvoke(
-                    {"uid": blade_uid, "kubeconfig": kubeconfig}
-                )
-                status_raw = status_output if isinstance(status_output, str) else str(status_output)
-                if "not found" in status_raw.lower() or "notfound" in status_raw.lower():
-                    return RecoverLayer1Result(
-                        status="passed",
-                        details="blade_destroy failed but experiment CRD already removed (timeout auto-expiry)",
-                        raw_output=f"destroy: {destroy_raw}\nstatus: {status_raw}",
-                    )
-                check_status, check_details = _parse_blade_status_destroyed(status_raw)
-                if check_status == "passed":
-                    return RecoverLayer1Result(
-                        status="passed",
-                        details=f"blade_destroy failed but {check_details}",
-                        raw_output=f"destroy: {destroy_raw}\nstatus: {status_raw}",
-                    )
-            except Exception as fallback_err:
-                logger.debug(f"destroy-failed fallback status check also failed: {fallback_err}")
-            return RecoverLayer1Result(
-                status="failed",
-                details=destroy_details,
-                raw_output=destroy_raw,
-            )
-
-        # Step 2: Verify via blade_status that experiment is Destroyed
-        try:
-            status_output = await blade_status.ainvoke(
-                {"uid": blade_uid, "kubeconfig": kubeconfig}
-            )
-            status_raw = status_output if isinstance(status_output, str) else str(status_output)
-            check_status, check_details = _parse_blade_status_destroyed(status_raw)
-
-            if check_status == "failed":
-                return RecoverLayer1Result(
-                    status="failed",
-                    details=f"{destroy_details}, but {check_details}",
-                    raw_output=f"destroy: {destroy_raw}\nstatus: {status_raw}",
-                )
-
-            combined_details = f"{destroy_details}, {check_details}"
-            return RecoverLayer1Result(
-                status="passed",
-                details=combined_details,
-                raw_output=f"destroy: {destroy_raw}\nstatus: {status_raw}",
-            )
-        except Exception as se:
-            logger.debug(f"blade_status check failed (non-critical): {se}")
-            return RecoverLayer1Result(
-                status="passed",
-                details=f"{destroy_details} (status check unavailable)",
-                raw_output=destroy_raw,
-            )
-
-    except Exception as e:
-        logger.error(f"Recover Layer 1 failed: {e}")
-        return RecoverLayer1Result(status="error", details=str(e), raw_output=str(e))

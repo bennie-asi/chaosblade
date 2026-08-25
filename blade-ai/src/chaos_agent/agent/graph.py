@@ -17,10 +17,9 @@ from chaos_agent.agent.nodes.batch.batch_next import batch_next
 from chaos_agent.agent.nodes.batch.batch_setup import batch_setup
 from chaos_agent.agent.nodes.gates.confirmation_gate import confirmation_gate
 from chaos_agent.agent.nodes.gates.preplan_probe import preplan_probe
-from chaos_agent.agent.nodes.execute.direct_execute import direct_execute
-from chaos_agent.agent.nodes.execute.direct_setup import make_direct_setup
 from chaos_agent.agent.nodes.execute.execute_loop import make_execute_loop
 from chaos_agent.agent.nodes.planning.extract_planning_metadata import extract_planning_metadata
+from chaos_agent.agent.nodes.planning.handoff_strip import planning_handoff
 from chaos_agent.agent.nodes.planning.intent_clarification import make_intent_clarification
 from chaos_agent.agent.nodes.planning.intent_confirm import intent_confirm
 from chaos_agent.agent.nodes.store.memory_nodes import load_memory, save_memory
@@ -55,8 +54,6 @@ from chaos_agent.agent.router import (
     route_after_phase1_tools,
     route_after_safety,
     route_after_confirmation,
-    route_after_baseline,
-    route_after_direct_execute,
     route_after_intent_clarification,
     route_after_verifier_tools,
     route_after_finalize,
@@ -423,13 +420,12 @@ def build_pipeline_graph(
 ) -> StateGraph:
     """Build the Pipeline Graph for fault injection execution.
 
-    Three entry paths via pipeline_init:
-      - agent_loop: CLI NL / TUI inject (after Intent Graph confirms)
-      - direct_setup: CLI direct mode
+    Entry paths via pipeline_init:
+      - agent_loop: CLI structured / NL / TUI inject (after Intent Graph confirms)
       - plan_builder: TUI /plan dry-run
 
     Shared pipeline: safety_check → confirmation_gate → baseline_capture
-    → execute_loop → verifier_loop → terminal_reports → save_memory → END
+    → se_snapshot → execute_loop → verifier_loop → terminal_reports → save_memory → END
     """
     from chaos_agent.agent.nodes.store.memory_nodes import pipeline_init
     from chaos_agent.agent.router import route_pipeline_start
@@ -440,7 +436,6 @@ def build_pipeline_graph(
     execute_loop_node = make_execute_loop(hook=pre_reason_hook, llm=llm, tools=phase2_tools, registry=registry)
     verifier_node = make_verifier(hook=pre_reason_hook, llm=llm, tools=verifier_tools, registry=registry)
     finalize_verification_node = make_finalize_verification(registry=registry)
-    direct_setup_node = make_direct_setup(registry=registry)
     baseline_capture_node = make_baseline_capture(llm=llm, registry=registry)
     plan_builder_node = make_plan_builder(llm=llm, tools=clarification_tools, hook=pre_reason_hook, registry=registry)
 
@@ -486,10 +481,13 @@ def build_pipeline_graph(
         handle_tool_errors=_phase1_handle_tool_error,
     ))
     graph.add_node("extract_planning_metadata", extract_planning_metadata)
+    # Planning → execution handoff strip: the deterministic slimming point
+    # on the edge every finalized plan crosses (first pass AND every replan
+    # round). Sits AFTER extract_planning_metadata (which reverse-scans
+    # AIMessage tool_calls the strip would remove) and BEFORE the safety
+    # gates (deterministic nodes that do not consume the stripped context).
+    graph.add_node("planning_handoff", planning_handoff)
     graph.add_node("plan_change_confirm", plan_change_confirm)
-
-    # Direct
-    graph.add_node("direct_setup", direct_setup_node)
 
     # Safety + confirm
     graph.add_node("safety_check", with_phase_events("safety_check", "safety", safety_check))
@@ -499,7 +497,6 @@ def build_pipeline_graph(
 
     # Phase 2 (execution)
     graph.add_node("execute_loop", with_phase_events("execute_loop", "inject", execute_loop_node))
-    graph.add_node("direct_execute", with_phase_events("direct_execute", "inject", direct_execute))
     graph.add_node("tool_screener", tool_screener)
     graph.add_node("phase2_tools", ToolNode(phase2_tools, handle_tool_errors=_phase2_handle_tool_error))
 
@@ -535,8 +532,8 @@ def build_pipeline_graph(
 
     # End
     # terminal_reports produces the postmortem / issue-report artifacts on
-    # EVERY experiment terminal path (se_detect, direct_execute
-    # pre-injection-end, reject) ahead of persistence; wrapped with
+    # EVERY experiment terminal path (se_detect, reject) ahead of
+    # persistence; wrapped with
     # phase="postmortem" so the TUI stepper ignores it (unknown phase) while
     # L4 still surfaces it via _PHASE_STEP_MAP ("postmortem" step).
     graph.add_node("terminal_reports", with_phase_events("terminal_reports", "postmortem", terminal_reports_node))
@@ -544,9 +541,9 @@ def build_pipeline_graph(
     graph.add_node("reject", reject)
 
     # --- Entry routing ---
-    # pipeline_init → preplan_probe → the four-way pipeline routing. The
+    # pipeline_init → preplan_probe → the three-way pipeline routing. The
     # probe node sits on EVERY entry path but skips itself when there is
-    # nothing to probe for (direct mode / no spec); replan re-entries into
+    # nothing to probe for (no spec); replan re-entries into
     # agent_loop deliberately bypass it — probes run once at task start.
     graph.set_entry_point("pipeline_init")
     graph.add_edge("pipeline_init", "preplan_probe")
@@ -555,7 +552,6 @@ def build_pipeline_graph(
         route_pipeline_start,
         {
             "agent_loop": "agent_loop",
-            "direct_setup": "direct_setup",
             "plan_builder": "plan_builder",
             "batch_setup": "batch_setup",
         },
@@ -580,9 +576,6 @@ def build_pipeline_graph(
 
     # batch_setup → agent_loop (full per-fault planning)
     graph.add_edge("batch_setup", "agent_loop")
-
-    # --- Direct path ---
-    graph.add_edge("direct_setup", "safety_check")
 
     # --- Agent loop ⇄ phase1 tools ---
     graph.add_conditional_edges(
@@ -612,9 +605,10 @@ def build_pipeline_graph(
 
     graph.add_conditional_edges(
         "extract_planning_metadata",
-        lambda s: "reject" if s.get("error") else ("agent_loop" if s.get("planning_rejected") else "safety_check"),
-        {"agent_loop": "agent_loop", "safety_check": "safety_check", "reject": "reject"},
+        lambda s: "reject" if s.get("error") else ("agent_loop" if s.get("planning_rejected") else "planning_handoff"),
+        {"agent_loop": "agent_loop", "planning_handoff": "planning_handoff", "reject": "reject"},
     )
+    graph.add_edge("planning_handoff", "safety_check")
 
     # --- Safety + confirmation ---
     graph.add_conditional_edges(
@@ -635,11 +629,7 @@ def build_pipeline_graph(
 
     # --- Baseline + execution ---
     graph.add_edge("baseline_capture", "se_snapshot")
-    graph.add_conditional_edges(
-        "se_snapshot",
-        route_after_baseline,
-        {"direct_execute": "direct_execute", "execute_loop": "execute_loop"},
-    )
+    graph.add_edge("se_snapshot", "execute_loop")
     graph.add_conditional_edges(
         "execute_loop",
         should_continue_execute_loop,
@@ -655,15 +645,6 @@ def build_pipeline_graph(
         {"pass": "phase2_tools", "replan": "agent_loop", "retry": "execute_loop"},
     )
     graph.add_edge("phase2_tools", "execute_loop")
-
-    graph.add_conditional_edges(
-        "direct_execute",
-        route_after_direct_execute,
-        # "end" exists ONLY for pre-injection safety rejection (nothing was
-        # ever issued). Execution errors still go through verification —
-        # error is a signal, not a verdict (task-ff057e7f policy).
-        {"verifier": "verifier_loop", "end": "terminal_reports"},
-    )
 
     # --- Verification ---
     if verifier_tools:

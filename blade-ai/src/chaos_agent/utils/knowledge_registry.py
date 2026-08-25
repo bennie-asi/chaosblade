@@ -15,6 +15,11 @@ from chaos_agent.skills.loader import parse_frontmatter
 
 KNOWLEDGE_DIR = Path(__file__).resolve().parent.parent / "knowledge"
 
+# Canonical phase names accepted by the knowledge index filter
+# (get_knowledge_summary_section). A typo'd phase value would otherwise
+# silently exclude the doc from every phase index.
+_VALID_PHASES = frozenset({"plan", "execute", "verify", "recover"})
+
 
 def _build_registry() -> list[dict]:
     """Scan knowledge/ directory, parse frontmatter from each .md file.
@@ -65,12 +70,29 @@ def _build_registry() -> list[dict]:
         if fault_types == ["all"]:
             fault_types = ["all fault types"]
 
+        # Optional phase relevance: which prompt phases (plan / execute /
+        # verify / recover) the doc serves. Absent → relevant everywhere.
+        phases = frontmatter.get("phases")
+        if phases is not None:
+            if not isinstance(phases, list):
+                phases = [phases]
+            invalid = sorted(set(phases) - _VALID_PHASES)
+            if invalid:
+                warnings.warn(
+                    f"Knowledge file '{md_file.name}' frontmatter has invalid "
+                    f"phases {invalid} (valid: {sorted(_VALID_PHASES)}) — "
+                    f"doc would be hidden from those phase indexes.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
         registry.append({
             "filename": md_file.name,
             "title": frontmatter["title"],
             "topics": frontmatter["topics"],
             "fault_types": fault_types,
             "summary": frontmatter["summary"],
+            "phases": phases,
             "size_chars": len(content),
         })
 

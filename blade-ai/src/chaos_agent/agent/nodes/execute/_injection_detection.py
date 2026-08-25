@@ -1,55 +1,20 @@
-"""Shared injection detection utilities for verifier and recover_verifier.
+"""Generic orchestration for injection detection shared by the execute loop.
 
-Provides precise detection of kubectl-exec-based ChaosBlade injection by
-cross-referencing ToolMessage responses with the original AIMessage tool_calls,
-verifying subcommand='exec' and blade command in v_args.
-
-Also detects kubectl-native injection methods used as alternatives when
-blade_create fails on the host — both object-write verbs (scale, patch,
-cordon, taint, set) and command-mode exec/debug injections whose inner
-command mutates (e.g. the python/stress-ng memory fallback).
+This module is the GENERIC half of injection detection: issue-time method
+attribution (registry-dispatched), drill-step text extraction /
+observation-step filtering, and the high-tolerance step self-check
+assembly. Every carrier VOCABULARY (kubectl write verbs, host injection
+binaries, blade success shapes) lives on the providers — consumed via the
+registry-dispatched hooks (``scan_step_actions`` / ``was_injection_attempted``,
+phase-8 Form B).
+This module must not import a concrete provider module (AST-audited by
+``tests/test_agent/test_generic_layer_import_audit.py``).
 """
 
-import json
 import logging
 import re
 
-from langchain_core.messages import AIMessage, ToolMessage
-
-from chaos_agent.agent.providers._detection import (
-    build_tool_call_args_lookup as _build_tool_call_args_lookup,
-)
-from chaos_agent.agent.providers._detection import (
-    scan_kubectl_blade_success as _scan_kubectl_blade_success,
-)
-from chaos_agent.agent.providers._detection import (
-    scan_kubectl_injection_after_blade as _scan_kubectl_injection_after_blade,
-)
-from chaos_agent.agent.providers.chaosblade_python import (
-    ChaosbladePythonProvider as _ChaosbladePythonProvider,
-)
-from chaos_agent.agent.providers.host_shell import (
-    HostShellProvider as _HostShellProvider,
-)
-from chaos_agent.agent.providers.k8s_native import (
-    K8sNativeProvider as _K8sNativeProvider,
-)
-
 logger = logging.getLogger(__name__)
-
-# kubectl subcommands that can perform fault injection (non-ChaosBlade methods).
-# Single source of truth is ``K8sNativeProvider.inject_kubectl_subcommands`` —
-# this read-through alias keeps the module-level name for existing callers
-# while the provider owns the vocabulary.
-_KUBECTL_INJECT_SUBCOMMANDS = _K8sNativeProvider.inject_kubectl_subcommands
-
-# Raw-shell injection tool names (host-native carrier). Single source of truth
-# is ``HostShellProvider.inject_tool_names``.
-_HOST_NATIVE_INJECT_TOOLS = _HostShellProvider.inject_tool_names
-
-# Host injection binaries (action vocabulary for the host step self-check).
-# Single source of truth is ``HostShellProvider.injection_binaries``.
-_HOST_NATIVE_INJECT_BINARIES = _HostShellProvider.injection_binaries
 
 
 def classify_issue_time_method(
@@ -59,11 +24,11 @@ def classify_issue_time_method(
 
     Direction B: ``injection_method`` is recorded at the moment the injection is
     ISSUED (from the AIMessage tool_call), not reverse-reconstructed from the
-    (possibly severed / truncated) message history later. Every shape is
-    deterministic from the tool name + subcommand + channel EXCEPT a
-    ``kubectl exec``/``debug`` inner command, whose read/mutate judgement is
-    delegated to the same fail-safe classifier the reverse scan uses
-    (:func:`~chaos_agent.agent.providers.k8s_native._exec_inner_command_mutates`).
+    (possibly severed / truncated) message history later. The carrier shapes
+    are owned by the backend providers — dispatched through
+    :meth:`FaultProviderRegistry.issue_time_method` (phase-7 T4) so this
+    generic layer never names a carrier-specific tool, subcommand vocabulary,
+    or method string.
 
     Returns the method, or ``None`` when the call is not an injection (read-only
     probe, verification, or an unrelated tool). The caller decides the
@@ -71,490 +36,36 @@ def classify_issue_time_method(
     experiment UID so the attempt IS the injection and can be recorded at issue
     time; the experiment methods (``host_blade`` / ``kubectl_exec``) are
     classified here for completeness but the execute node defers committing them
-    to the ``blade_uid`` path (proof the ChaosBlade experiment succeeded), so a
+    to the ``experiment_uid`` path (proof the ChaosBlade experiment succeeded), so a
     failed blade attempt followed by a kubectl-native fallback is not
     mis-recorded.
     """
-    from chaos_agent.agent.providers.k8s_native import _exec_inner_command_mutates
+    from chaos_agent.agent.providers.registry import FaultProviderRegistry
 
     if not isinstance(tool_args, dict):
         return None
-
-    # ChaosBlade experiment carrier via the dedicated blade tool.
-    if tool_name == "blade_create":
-        return "host_blade"
-
-    # ChaosBlade Python-agent carrier: an in-process application fault issued
-    # through its own tool. Like the blade methods above it produces an
-    # experiment UID, so the execute node still defers the COMMIT to the
-    # ``blade_uid`` path; classifying it here keeps issue-time attribution
-    # complete (and stops the method reading as "no injection issued").
-    if tool_name in _ChaosbladePythonProvider.inject_tool_names:
-        return "python_agent"
-
-    if tool_name == "kubectl":
-        subcommand = tool_args.get("subcommand", "")
-        v_args = tool_args.get("v_args", "") or ""
-        # kubectl exec ... blade create → ChaosBlade delivered through a pod.
-        if (
-            subcommand in _K8sNativeProvider.inject_command_subcommands
-            and isinstance(v_args, str)
-            and "blade" in v_args
-            and "create" in v_args
-        ):
-            return "kubectl_exec"
-        # Object-write verb — the verb itself IS the mutation.
-        if subcommand in _KUBECTL_INJECT_SUBCOMMANDS:
-            return "kubectl_native"
-        # Command-mode exec/debug — injection only when the inner command mutates.
-        if (
-            subcommand in _K8sNativeProvider.inject_command_subcommands
-            and isinstance(v_args, str)
-            and _exec_inner_command_mutates(v_args)
-        ):
-            return "kubectl_native"
-        return None
-
-    # Host raw-shell carrier (only meaningful on a resolved host channel).
-    if is_host and tool_name in _HOST_NATIVE_INJECT_TOOLS:
-        return "host_native"
-
-    return None
-
-# Label selector for ChaosBlade tool pods
-_TOOL_POD_LABEL_SELECTOR = "app=otel-c-tool"
-_TOOL_POD_NAMESPACE = "chaosblade"
-
-# Known tool pod label selectors (tried in order)
-_TOOL_POD_LABEL_CANDIDATES = ["app=chaosblade-tool", "app=otel-c-tool"]
-
-
-def _was_kubectl_blade_injection_successful(messages: list) -> bool:
-    """Check if kubectl exec was used to successfully inject a ChaosBlade experiment.
-
-    Thin wrapper over
-    :func:`chaos_agent.agent.providers._detection.scan_kubectl_blade_success`
-    (the single source of the scan logic). Kept as a module-level name for
-    existing callers (verifier layers, ``_was_blade_create_attempted``).
-    """
-    return _scan_kubectl_blade_success(messages)
-
-
-def was_kubectl_exec_delivery(
-    state: dict, messages: list | None = None,
-) -> bool:
-    """Whether the LIVE experiment was created via ``kubectl exec``.
-
-    Two evidence sources, unioned — the same pattern as the blade_destroy
-    provenance fix (SC1):
-
-    1. ``state["injection_method"] == "kubectl_exec"`` — the framework's
-       DURABLE record. It is committed in the same iteration the
-       ``blade_uid`` appears (channel A/B), is ``durable=True`` in the
-       state lifecycle and is inherited by the recover graph, so it
-       survives anything that happens to the message list.
-    2. The message scan (:func:`scan_kubectl_blade_success`) — kept as a
-       fallback for state-less paths (sessions restored without the
-       method recorded). ``messages`` overrides ``state["messages"]``
-       for callers that receive the history separately (the provider
-       ``recover()`` contract passes it through kwargs).
-
-    The scan alone is NOT durable: recovery runs LATE in the task, and
-    compaction removes the injection evidence pair (the kubectl-exec
-    AIMessage + its ChaosBlade-success ToolMessage are among the oldest
-    messages) BY DESIGN. Losing it mis-routes a CRD-created experiment
-    into the deterministic HOST ``blade_destroy`` — which cannot reach it
-    ("record not found") — and withholds the kubectl-exec recovery
-    instructions from the LLM flow. The verify side already routes on the
-    durable record (``ChaosbladeProvider.layer1_verify``); recovery must
-    agree with it.
-    """
-    if state.get("injection_method") == "kubectl_exec":
-        return True
-    msgs = messages if messages is not None else (state.get("messages") or [])
-    return _scan_kubectl_blade_success(msgs)
+    return FaultProviderRegistry.issue_time_method(
+        tool_name, tool_args, is_host=is_host
+    )
 
 
 def _was_kubectl_injection_attempted(messages: list) -> bool:
     """Check if kubectl write operations were used for fault injection.
 
-    Thin wrapper over
-    :func:`chaos_agent.agent.providers._detection.scan_kubectl_injection_after_blade`,
-    passing the provider-owned vocabulary: :data:`_KUBECTL_INJECT_SUBCOMMANDS`
-    for object-write verbs, plus ``inject_command_subcommands`` + the shared
-    read/mutate classifier for exec/debug command-mode injections (a
-    ``kubectl exec`` fallback like the python memory stressor IS a
-    kubectl-native injection — without it a failed blade_create followed by a
-    successful exec fallback mis-routes recover Layer 1 into "blade_create was
-    called but no UID available"). Kept as a module-level name for existing
-    callers.
+    Thin compatibility wrapper kept for the tests' import path (the 13-case
+    suite in ``test_verifier.py``; no src caller remains — the verify /
+    recover chains read the attempt state off the durable attribution).
+    Dispatches through the registry to the owning backend's
+    ``was_injection_attempted`` hook (phase-8 T3) — the kubectl write-op
+    vocabulary is the backend's, not this generic module's. Returns
+    ``False`` when the owning backend is not registered.
     """
-    from chaos_agent.agent.providers.k8s_native import _exec_inner_command_mutates
+    from chaos_agent.agent.providers.registry import FaultProviderRegistry
 
-    return _scan_kubectl_injection_after_blade(
-        messages,
-        _KUBECTL_INJECT_SUBCOMMANDS,
-        command_subcommands=_K8sNativeProvider.inject_command_subcommands,
-        is_mutating_command=_exec_inner_command_mutates,
-    )
-
-
-def _was_blade_create_attempted(
-    messages: list, injection_method: str | None = None,
-) -> bool:
-    """Check if ChaosBlade injection was attempted but ultimately failed.
-
-    Returns False (not "attempted-and-failed") if:
-      - a committed ``injection_method`` durable record exists (see below)
-      - kubectl exec successfully injected a blade experiment (bypassing blade_create)
-      - kubectl-native injection was used as an alternative after blade_create failed
-    Returns True only if blade_create was called AND no successful injection
-    was detected via any method.
-
-    This distinguishes two scenarios when blade_uid is empty:
-      - True:  ChaosBlade injection was attempted but failed → Layer 1 returns "failed"
-      - False: Non-ChaosBlade fault, OR kubectl-based injection succeeded → Layer 1 returns "skipped"
-
-    Durable record first: ``injection_method`` is committed when the
-    injection is ISSUED/succeeds (Direction B) and survives compaction — the
-    same rationale as :func:`was_kubectl_exec_delivery`. ANY committed
-    attribution is positive proof that some injection succeeded, so the
-    "blade attempted but nothing injected" branch cannot apply, regardless
-    of what the (possibly compacted) message history still shows. Without
-    this, a replan/compaction that removes the kubectl-native fallback
-    evidence while leaving a failed ``blade_create`` ToolMessage mis-routes
-    a live, recoverable fault into the terminal "no UID" failure. The
-    message scan below stays as the fallback for state-less restored
-    sessions that have no durable record.
-    """
-    if injection_method:
+    provider = FaultProviderRegistry.resolve_by_method("kubectl_native")
+    if provider is None:
         return False
-
-    # If kubectl-based blade injection succeeded, injection was NOT "attempted and failed"
-    if _was_kubectl_blade_injection_successful(messages):
-        return False
-
-    # If kubectl-native injection was used as alternative after blade_create
-    # failed, treat as non-ChaosBlade fault (Layer 1 = "skipped")
-    if _was_kubectl_injection_attempted(messages):
-        return False
-
-    for msg in messages:
-        if isinstance(msg, ToolMessage) and getattr(msg, "name", "") == "blade_create":
-            return True
-    return False
-
-
-def _parse_all_ns_pods(output: str) -> list[tuple[str, str]]:
-    """Parse kubectl get pods -A --no-headers output.
-
-    Format: NAMESPACE  NAME  READY  STATUS  RESTARTS  AGE
-
-    Returns:
-        List of (pod_name, namespace) tuples for Running pods.
-    """
-    if not output or not isinstance(output, str):
-        return []
-
-    result: list[tuple[str, str]] = []
-    for line in output.strip().splitlines():
-        parts = line.split()
-        if len(parts) >= 4:
-            namespace = parts[0]
-            pod_name = parts[1]
-            status = parts[3]
-            if status == "Running":
-                result.append((pod_name, namespace))
-    return result
-
-
-# Explicit-field jsonpath for tool-pod listing. NEVER use ``-o wide`` +
-# positional column parsing here: RESTARTS may carry an annotation like
-# ``1 (14d ago)`` whose spaces shift every column after it — a wide parse
-# then reads the AGE token as the node name (observed live: pods with
-# restarts attributed to node ``123d``, and the target-node carrier went
-# unreported by the preplan probe).
-_TOOL_POD_JSONPATH = (
-    "jsonpath={range .items[*]}{.metadata.namespace}|{.metadata.name}"
-    "|{.status.phase}|{.spec.nodeName}{'\\n'}{end}"
-)
-
-
-def _parse_tool_pod_rows(output: str) -> list[tuple[str, str, str]]:
-    """Parse explicit-field jsonpath rows: ``ns|name|phase|node`` per line.
-
-    Fields are delimiter-separated (not column positions), so restart
-    annotations or any whitespace in unrelated columns cannot shift them.
-    Returns: List of (pod_name, namespace, node_name) tuples for Running pods.
-    """
-    if not output or not isinstance(output, str):
-        return []
-    result: list[tuple[str, str, str]] = []
-    for line in output.strip().splitlines():
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 4:
-            continue
-        ns, name, phase, node = parts[0], parts[1], parts[2], parts[3]
-        if phase == "Running" and name:
-            result.append((name, ns, node))
-    return result
-
-
-async def discover_tool_pod_on_node(
-    node_name: str, kubeconfig: str, task_id: str = "",
-) -> tuple[str, str] | None:
-    """Find a Running ChaosBlade tool pod on the specified node (cluster-wide).
-
-    Tries known label selectors in order with -A (all-namespaces) and an
-    explicit-field jsonpath (restart annotations cannot shift columns).
-
-    Returns:
-        (pod_name, namespace) tuple if found, None otherwise.
-    """
-    from chaos_agent.transports import (
-        PROFILE_K8S,
-        TransportTarget,
-        execute_via_transport,
-    )
-    from chaos_agent.tools.kubectl import build_kubectl_cmd
-    from chaos_agent.config.settings import settings
-
-    _target = TransportTarget.from_state({})
-    for label in _TOOL_POD_LABEL_CANDIDATES:
-        cmd = build_kubectl_cmd("get", [
-            "pods", "-A", "-l", label, "--no-headers", "-o", _TOOL_POD_JSONPATH,
-        ], kubeconfig=kubeconfig)
-        try:
-            result = await execute_via_transport(
-                cmd, _target,
-                timeout=settings.timeout_kubectl,
-                task_id=task_id,
-                source="baseline-capture",
-                expect_profile=PROFILE_K8S,
-            )
-        except Exception as e:
-            logger.warning(
-                "Failed to discover tool pods on node %s with label %s: %s",
-                node_name, label, e,
-            )
-            continue
-        pods = _parse_tool_pod_rows(result.stdout)
-        for pod_name, ns, node in pods:
-            if node == node_name:
-                return (pod_name, ns)
-    return None
-
-
-async def discover_tool_pods_cluster_wide(
-    kubeconfig: str, task_id: str = "",
-) -> list[tuple[str, str]]:
-    """Discover ChaosBlade tool pods across all namespaces.
-
-    Tries known label selectors in order, returns on first success.
-    Uses -A (all-namespaces) to avoid hardcoding the namespace.
-
-    Returns:
-        List of (pod_name, namespace) tuples for Running pods.
-    """
-    from chaos_agent.transports import (
-        PROFILE_K8S,
-        TransportTarget,
-        execute_via_transport,
-    )
-    from chaos_agent.tools.kubectl import build_kubectl_cmd
-    from chaos_agent.config.settings import settings
-
-    _target = TransportTarget.from_state({})
-    for label in _TOOL_POD_LABEL_CANDIDATES:
-        cmd = build_kubectl_cmd("get", [
-            "pods", "-A", "-l", label, "--no-headers",
-        ], kubeconfig=kubeconfig)
-        result = await execute_via_transport(
-            cmd, _target,
-            timeout=settings.timeout_kubectl,
-            task_id=task_id,
-            source="conflict-check",
-            expect_profile=PROFILE_K8S,
-        )
-        pods = _parse_all_ns_pods(result.stdout)
-        if pods:
-            return pods
-    return []
-
-
-async def discover_tool_pods_cluster_wide_with_nodes(
-    kubeconfig: str, task_id: str = "",
-) -> list[tuple[str, str, str]]:
-    """Discover ChaosBlade tool pods across all namespaces with node info.
-
-    Tries known label selectors in order, returns on first success.
-    Uses -A (all-namespaces) and an explicit-field jsonpath so restart
-    annotations cannot shift the node column (see ``_TOOL_POD_JSONPATH``).
-
-    Returns:
-        List of (pod_name, namespace, node_name) tuples for Running pods.
-    """
-    from chaos_agent.transports import (
-        PROFILE_K8S,
-        TransportTarget,
-        execute_via_transport,
-    )
-    from chaos_agent.tools.kubectl import build_kubectl_cmd
-    from chaos_agent.config.settings import settings
-
-    _target = TransportTarget.from_state({})
-    for label in _TOOL_POD_LABEL_CANDIDATES:
-        cmd = build_kubectl_cmd("get", [
-            "pods", "-A", "-l", label, "--no-headers", "-o", _TOOL_POD_JSONPATH,
-        ], kubeconfig=kubeconfig)
-        try:
-            result = await execute_via_transport(
-                cmd, _target,
-                timeout=settings.timeout_kubectl,
-                task_id=task_id,
-                source="tool-pod-discovery",
-                expect_profile=PROFILE_K8S,
-            )
-        except Exception as e:
-            logger.warning("Failed to discover tool pods with label %s: %s", label, e)
-            continue
-        pods = _parse_tool_pod_rows(result.stdout)
-        if pods:
-            return pods
-    return []
-
-
-def _extract_kubectl_exec_pod_name(messages: list) -> str | None:
-    """Extract the tool pod name used for kubectl exec blade injection.
-
-    When the LLM injects a fault via `kubectl exec <pod> -n chaosblade -- blade create ...`,
-    the pod name is the first token in the v_args field of the AIMessage's tool_calls.
-
-    This function scans messages in reverse to find the most recent kubectl exec
-    blade create call that succeeded (ChaosBlade success JSON in ToolMessage),
-    then extracts the pod name from the corresponding AIMessage's v_args.
-
-    Returns:
-        Pod name string if found, None otherwise.
-    """
-    lookup = _build_tool_call_args_lookup(messages)
-
-    for msg in reversed(messages):
-        if not isinstance(msg, ToolMessage):
-            continue
-        if getattr(msg, "name", "") != "kubectl":
-            continue
-        content = msg.content
-        if not isinstance(content, str):
-            continue
-        try:
-            data = json.loads(content)
-        except (json.JSONDecodeError, TypeError):
-            continue
-
-        # Must be a successful ChaosBlade injection
-        if not (isinstance(data, dict)
-                and data.get("success") is True
-                and data.get("code") == 200
-                and isinstance(data.get("result"), str)
-                and data["result"]):
-            continue
-
-        tc_id = getattr(msg, "tool_call_id", "")
-        if tc_id and tc_id in lookup:
-            args = lookup[tc_id]
-            subcommand = args.get("subcommand", "")
-            v_args = args.get("v_args", "") or ""
-            if subcommand == "exec" and "blade" in v_args and "create" in v_args:
-                pod_name = _parse_pod_name_from_v_args(v_args)
-                if pod_name:
-                    return pod_name
-            continue
-        elif tc_id:
-            continue
-
-        # No tool_call_id (older session format) — scan AIMessages directly
-        pod_name = _find_pod_name_from_aimessages(messages, v_args_hint="blade")
-        if pod_name:
-            return pod_name
-
-    return None
-
-
-# Pod name pattern: lowercase alphanumeric with hyphens (Kubernetes naming)
-_POD_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-
-# kubectl exec flags that consume a following value. Anything else starting
-# with '-' is treated as a boolean flag (-i/-t/-q/--stdin/--tty/...).
-_EXEC_FLAGS_WITH_VALUE = frozenset({
-    "-n", "--namespace", "-c", "--container", "--profile", "--context",
-    "--kubeconfig", "--pod-running-timeout",
-})
-
-
-def _parse_pod_name_from_v_args(v_args: str) -> str | None:
-    """Extract the pod name from kubectl exec v_args.
-
-    kubectl accepts the pod name either before or after exec flags —
-    ``<pod> -n <ns> -- cmd`` and ``-n <ns> <pod> -- cmd`` are both valid —
-    so scan for the first positional token before the ``--`` separator
-    instead of assuming it comes first. Task-2d612caa: an ``-n``-prefixed
-    call escaped extraction, Layer 1 lost the original injection pod and
-    read an unrelated tool pod's empty local DB as experiment failure.
-
-    Returns:
-        Pod name if valid, None if v_args is empty or no positional pod
-        token appears before ``--``.
-    """
-    if not v_args:
-        return None
-    tokens = v_args.strip().split()
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok == "--":
-            break
-        if tok.startswith("-"):
-            # --flag=value carries its own value; the flags in
-            # _EXEC_FLAGS_WITH_VALUE consume the following token.
-            if "=" not in tok and tok in _EXEC_FLAGS_WITH_VALUE:
-                i += 1
-            i += 1
-            continue
-        # First positional token is the pod slot — accept it only if it
-        # looks like a pod name.
-        if _POD_NAME_RE.match(tok):
-            return tok
-        return None
-    return None
-
-
-def _find_pod_name_from_aimessages(messages: list, *, v_args_hint: str = "") -> str | None:
-    """Fallback: scan AIMessages for kubectl exec blade create tool calls.
-
-    Used when ToolMessage lacks tool_call_id (older session format).
-    Returns the pod name from the most recent matching AIMessage.
-    """
-    for msg in reversed(messages):
-        if not isinstance(msg, AIMessage):
-            continue
-        tool_calls = getattr(msg, "tool_calls", None) or []
-        for tc in reversed(tool_calls):
-            if isinstance(tc, dict):
-                name = tc.get("name", "")
-                args = tc.get("args", {})
-            else:
-                name = getattr(tc, "name", "")
-                args = getattr(tc, "args", {})
-            if name != "kubectl":
-                continue
-            subcommand = args.get("subcommand", "")
-            v_args = args.get("v_args", "") or ""
-            if subcommand == "exec" and v_args_hint in v_args and "create" in v_args:
-                pod_name = _parse_pod_name_from_v_args(v_args)
-                if pod_name:
-                    return pod_name
-    return None
+    return bool(provider.was_injection_attempted(messages))
 
 
 # ---------------------------------------------------------------------------
@@ -582,25 +93,8 @@ def _extract_drill_steps(skill_case: str) -> list[str]:
 
 
 # Markers that mean a command NEVER reached the target (pre-execution
-# rejection): guard reject, phase-1 read-only enforcement, unknown subcommand,
-# arg validation error. Everything else — success, timeout, non-zero exit —
-# counts as an ATTEMPTED action. This is the HIGH-TOLERANCE rule: a mutation
-# that reached the cluster/host (even if it timed out or failed) is treated as
-# "done" for step-skip detection, so an ambiguous timeout no longer produces a
-# false "missing step" (the original INCOMPLETE-INJECTION false-positive).
-_PRE_EXEC_REJECTION_MARKERS = (
-    "[target_guard]",
-    "phase1_readonly_violation",
-    "does not accept subcommand",
-    "validationerror",
-    "validation error",
-)
-
-
-def _reached_target(content: object) -> bool:
-    """True unless the ToolMessage content is a pre-execution rejection."""
-    low = (content if isinstance(content, str) else "").lower()
-    return not any(m in low for m in _PRE_EXEC_REJECTION_MARKERS)
+# rejection) now live in ``providers/chaosblade/detection.py`` (``PRE_EXEC_REJECTION_MARKERS``
+# / ``reached_target``) — shared by the per-provider executed-action scans.
 
 
 # Leading-intent markers for a BASELINE / OBSERVATION step, which merely NAMES
@@ -651,127 +145,6 @@ def _injection_intent_steps(steps: list[str]) -> list[str]:
     return kept
 
 
-def _required_kubectl_verbs(steps: list[str]) -> dict[str, str]:
-    """REQUIRED kubectl write verbs mentioned in the drill steps (token -> step)."""
-    verbs = _K8sNativeProvider.step_kubectl_verbs
-    cmap = _K8sNativeProvider.chinese_verb_map
-    required: dict[str, str] = {}
-    for step in steps:
-        first = step.split('\n')[0].strip()
-        lower = step.lower()
-        for v in verbs:
-            if re.search(rf"\b{re.escape(v)}\b", lower):
-                required.setdefault(v, first)
-        for cn, en in cmap.items():
-            if cn in step:
-                required.setdefault(en, first)
-    return required
-
-
-def _patch_equivalent_verbs(v_args: str) -> set[str]:
-    """Dedicated verbs a ``kubectl patch`` is semantically equivalent to.
-
-    A drill step may name the dedicated verb (``kubectl label node ...``) while
-    the agent achieves the identical mutation via
-    ``kubectl patch node -p '{"metadata":{"labels":{...}}}'``. Crediting both
-    keeps the self-check from flagging an action that WAS performed. Loose
-    field-name match by design: over-crediting only shrinks the missing set,
-    matching this module's high-tolerance / under-report bias.
-    """
-    lower = v_args.lower()
-    return {
-        verb
-        for field, verbs in _K8sNativeProvider.patch_equivalent_verbs.items()
-        if field in lower
-        for verb in verbs
-    }
-
-
-def _patch_expressible_verbs() -> frozenset[str]:
-    """Dedicated verbs that ARE a field patch — executing one credits ``patch``.
-
-    The mirror of :func:`_patch_equivalent_verbs`: a step may be spelled
-    ``kubectl patch ...`` while the agent reaches the same state with the
-    dedicated verb. Derived from the SAME provider table so both directions
-    stay in sync from one source of truth.
-    """
-    return frozenset(
-        verb
-        for verbs in _K8sNativeProvider.patch_equivalent_verbs.values()
-        for verb in verbs
-    )
-
-
-def _executed_kubectl_verbs(messages: list) -> set[str]:
-    """kubectl inject verbs ATTEMPTED (high tolerance: reached-cluster counts,
-    incl. timeout / non-zero exit; only pre-exec rejections are excluded).
-
-    Credits ``patch`` ↔ dedicated verb in both directions, so a step documented
-    as ``label`` / ``taint`` / ``scale`` is not reported missing when carried out
-    via ``patch`` (and a step documented as ``patch`` is not reported missing
-    when carried out with the dedicated verb).
-    """
-    lookup = _build_tool_call_args_lookup(messages)
-    executed: set[str] = set()
-    for msg in messages:
-        if not isinstance(msg, ToolMessage):
-            continue
-        if getattr(msg, "name", "") != "kubectl":
-            continue
-        if not _reached_target(msg.content):
-            continue
-        tc_id = getattr(msg, "tool_call_id", "")
-        args = lookup.get(tc_id) or {}
-        sub = args.get("subcommand", "")
-        if sub in _KUBECTL_INJECT_SUBCOMMANDS:
-            executed.add(sub)
-            if sub == "patch":
-                executed |= _patch_equivalent_verbs(
-                    str(args.get("v_args", "") or "")
-                )
-            elif sub in _patch_expressible_verbs():
-                executed.add("patch")
-    return executed
-
-
-def _required_host_binaries(steps: list[str]) -> dict[str, str]:
-    """REQUIRED host injection binaries mentioned in the drill steps.
-
-    Word-boundary match against ``HostShellProvider.injection_binaries`` so a
-    short binary (``dd`` / ``ip`` / ``cp``) does not false-match inside another
-    word (``add`` / ``script``). High tolerance = avoid false requirements.
-    """
-    bins = _HOST_NATIVE_INJECT_BINARIES
-    required: dict[str, str] = {}
-    for step in steps:
-        first = step.split('\n')[0].strip()
-        lower = step.lower()
-        for b in bins:
-            if re.search(rf"\b{re.escape(b)}\b", lower):
-                required.setdefault(b, first)
-    return required
-
-
-def _executed_host_binaries(messages: list) -> set[str]:
-    """host_inject command binaries ATTEMPTED (high tolerance, same rule)."""
-    lookup = _build_tool_call_args_lookup(messages)
-    bins = _HOST_NATIVE_INJECT_BINARIES
-    executed: set[str] = set()
-    for msg in messages:
-        if not isinstance(msg, ToolMessage):
-            continue
-        if getattr(msg, "name", "") not in _HOST_NATIVE_INJECT_TOOLS:
-            continue
-        if not _reached_target(msg.content):
-            continue
-        tc_id = getattr(msg, "tool_call_id", "")
-        cmd = str((lookup.get(tc_id) or {}).get("command", "") or "").lower()
-        for b in bins:
-            if re.search(rf"\b{re.escape(b)}\b", cmd):
-                executed.add(b)
-    return executed
-
-
 def build_injection_step_selfcheck(
     skill_case: str,
     messages: list,
@@ -787,11 +160,15 @@ def build_injection_step_selfcheck(
     genuinely-absent actions are flagged) and the returned message is a soft
     heuristic asking the LLM to RECONSIDER — the LLM may still conclude if it
     judges the injection complete. Returns ``None`` (no reminder) when the
-    scenario is single-step, no required action is recognised, or nothing looks
-    missing.
+    scenario is single-step, the backend does not claim the step self-check,
+    no required action is recognised, or nothing looks missing.
 
-    Backend-aware token vocabulary: kubectl write verbs for kubectl_native, host
-    injection binaries for host_native.
+    Backend-aware vocabulary dispatch (phase-8 Form B): the backend resolved
+    from ``injection_method`` owns the token vocabulary via its optional
+    ``scan_step_actions`` hook — kubectl write verbs for kubectl_native,
+    host injection binaries for host_native; experiment-UID carriers do not
+    claim the hook (completion is judged by the experiment evidence chain,
+    the UID — the D4 narrowing, pinned by golden tests).
     """
     if not skill_case:
         return None
@@ -803,12 +180,26 @@ def build_injection_step_selfcheck(
     # step that merely names a verb or binary is not an injection action. The
     # full step list is still shown to the LLM below for context.
     action_steps = _injection_intent_steps(steps)
-    if injection_method == "host_native":
-        required = _required_host_binaries(action_steps)
-        executed = _executed_host_binaries(messages)
-    else:  # kubectl_native (and any other multi-step no-UID k8s backend)
-        required = _required_kubectl_verbs(action_steps)
-        executed = _executed_kubectl_verbs(messages)
+
+    # Vocabulary dispatch: the resolved backend owns the token vocabulary.
+    # Optional hook — a backend that does not claim the step self-check
+    # contributes nothing, so the check is skipped (getattr-skip also covers
+    # third parties that omit the hook entirely).
+    from chaos_agent.agent.providers.registry import FaultProviderRegistry
+
+    provider = (
+        FaultProviderRegistry.resolve_by_method(injection_method)
+        if injection_method
+        else None
+    )
+    scan_hook = getattr(provider, "scan_step_actions", None) if provider else None
+    if scan_hook is None:
+        return None
+    scan = scan_hook(action_steps, messages)
+    if scan is None:
+        return None
+    required = scan.required
+    executed = scan.executed
 
     if not required:
         return None

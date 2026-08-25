@@ -9,9 +9,9 @@ import re
 
 from langchain_core.messages import AIMessage
 
+from chaos_agent.agent.spec.fault_registry import command_preview_for
 from chaos_agent.agent.spec.fault_spec import FaultSpec, read_fault_spec
 from chaos_agent.agent.state import AgentState
-from chaos_agent.utils.fault_type import build_blade_create_args
 
 
 def generate_injection_plan(state: AgentState) -> str:
@@ -41,9 +41,9 @@ def _section_target(spec: FaultSpec) -> str:
     if spec.labels:
         labels_str = ", ".join(f"{k}={v}" for k, v in spec.labels.items())
         lines.append(f"- Labels: `{labels_str}`")
-    if spec.scope or spec.blade_target or spec.blade_action:
+    if spec.scope or spec.fault_target or spec.fault_action:
         lines.append(
-            f"- Fault: {spec.scope}-{spec.blade_target} {spec.blade_action}"
+            f"- Fault: {spec.scope}-{spec.fault_target} {spec.fault_action}"
         )
     if not any(x for x in [spec.namespace, spec.names, spec.labels, spec.scope]):
         lines.append("- (target information is incomplete)")
@@ -51,52 +51,43 @@ def _section_target(spec: FaultSpec) -> str:
 
 
 def _section_inject_command(spec: FaultSpec, state: AgentState) -> str:
-    if not (spec.scope and spec.blade_target and spec.blade_action):
+    """Injection Command preview, delegated through the registry seam.
+
+    phase-12 D3: the carrier knowledge (args construction, command prefix,
+    flag formatting, kubewiz gate) lives behind the carrier's registered
+    preview builder — resolved via :func:`command_preview_for` in family
+    carrier-precedence order. This layer only flattens the FaultSpec fields
+    into the builder's parameters. A spec whose family/carriers declare no
+    preview builder gets no section (the pre-phase-12 code rendered a
+    blade-shaped command for ANY complete spec — including a wrong
+    ``blade create k8s python-...`` for python scopes; omitting beats
+    rendering a wrong command).
+    """
+    if not (spec.scope and spec.fault_target and spec.fault_action):
         return ""
 
-    kubeconfig = state.get("kubeconfig") or ""
-    names_str = ",".join(spec.names) if spec.names else ""
-    labels_str = (
-        ",".join(f"{k}={v}" for k, v in spec.labels.items())
-        if spec.labels else ""
-    )
-
-    args = build_blade_create_args(
+    preview = command_preview_for(
         scope=spec.scope,
-        target=spec.blade_target,
-        action=spec.blade_action,
+        target=spec.fault_target,
+        action=spec.fault_action,
         namespace=spec.namespace,
-        names=names_str,
-        labels=labels_str,
-        kubeconfig=kubeconfig,
+        names=",".join(spec.names) if spec.names else "",
+        labels=(
+            ",".join(f"{k}={v}" for k, v in spec.labels.items())
+            if spec.labels else ""
+        ),
+        kubeconfig=state.get("kubeconfig") or "",
         params=dict(spec.params) if spec.params else None,
         params_flags=list(spec.params_flags) if spec.params_flags else None,
         # Preview must match what actually executes: duration translates to
         # the single --timeout flag (params never carry it under the contract).
         duration=spec.duration_seconds,
     )
-
-    # Format as human-readable command
-    parts = [f"blade create k8s {spec.scope}-{spec.blade_target} {spec.blade_action}"]
-    if args.get("namespace"):
-        parts.append(f"  --namespace {args['namespace']}")
-    if args.get("names"):
-        parts.append(f"  --names {args['names']}")
-    if args.get("labels"):
-        parts.append(f"  --labels {args['labels']}")
-    if args.get("flags"):
-        for flag_pair in _split_flags(args["flags"]):
-            parts.append(f"  {flag_pair}")
-    from chaos_agent.transports import is_kubewiz_channel
-    if not is_kubewiz_channel() and kubeconfig:
-        parts.append(f"  --kubeconfig {kubeconfig}")
-
-    cmd_str = " \\\n".join(parts)
-    return f"## Injection Command\n\n```bash\n{cmd_str}\n```"
+    return preview or ""
 
 
 def _section_baseline_preview(spec: FaultSpec) -> str:
-    if not (spec.scope and spec.blade_target):
+    if not (spec.scope and spec.fault_target):
         return ""
 
     from chaos_agent.agent.nodes.baseline.baseline_capture import _lookup_baseline_commands
@@ -106,7 +97,7 @@ def _section_baseline_preview(spec: FaultSpec) -> str:
     # the preview matches what actually runs (k8s = kubectl, host = shell).
     profile = profile_of(resolve_channel_name())
     commands = _lookup_baseline_commands(
-        profile, spec.scope, spec.blade_target, spec.blade_action,
+        profile, spec.scope, spec.fault_target, spec.fault_action,
     )
     if not commands:
         return (
@@ -290,18 +281,4 @@ def _resolve_baseline_template(template: str, spec: FaultSpec) -> str:
     return v_args
 
 
-def _split_flags(flags_str: str) -> list[str]:
-    """Split a flags string into ``--key value`` pairs."""
-    if not flags_str:
-        return []
-    parts = flags_str.split()
-    result = []
-    i = 0
-    while i < len(parts):
-        if parts[i].startswith("--") and i + 1 < len(parts) and not parts[i + 1].startswith("--"):
-            result.append(f"{parts[i]} {parts[i + 1]}")
-            i += 2
-        else:
-            result.append(parts[i])
-            i += 1
-    return result
+

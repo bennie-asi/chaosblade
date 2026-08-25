@@ -26,6 +26,7 @@ from chaos_agent.agent.nodes.execute.llm_step_helpers import (
     persist_replaceable_hint,
     post_invoke_debug,
 )
+from chaos_agent.agent.nodes.planning.handoff_strip import CONTEXT_ANCHOR_FLAG
 from chaos_agent.agent.nodes.execute.react_helpers import (
     detect_action_stagnation,
     detect_repeated_tool_calls,
@@ -105,7 +106,7 @@ def _build_replan_context_message(
             f"Error: {replan_context.get('error_summary', 'Unknown')}",
             "Failed tool calls: "
             f"{json.dumps(replan_context.get('failed_tool_calls', []), ensure_ascii=False)}",
-            f"Existing blade UIDs: {replan_context.get('existing_blade_uids', [])}",
+            f"Existing experiment UIDs: {replan_context.get('existing_experiment_uids', [])}",
         ])
     if replan_history:
         lines.append(
@@ -472,8 +473,8 @@ def make_agent_loop(hook=None, llm=None, tools=None, skill_catalog: str = "", re
                     "",
                     f"Fault type: {_spec.fault_type or '?'}",
                     f"Scope: {_spec.scope or '?'}",
-                    f"Target: {_spec.blade_target or '?'}",
-                    f"Action: {_spec.blade_action or '?'}",
+                    f"Target: {_spec.fault_target or '?'}",
+                    f"Action: {_spec.fault_action or '?'}",
                 ]
                 # Identity fields are emitted purely data-driven: whatever the
                 # FaultSpec carries is shown, with no profile branch. Namespace /
@@ -495,7 +496,7 @@ def make_agent_loop(hook=None, llm=None, tools=None, skill_catalog: str = "", re
                 _all_matches: list[str] = []
                 if registry:
                     _all_matches = registry.match_use_cases(
-                        _spec.scope, _spec.blade_target, _spec.blade_action,
+                        _spec.scope, _spec.fault_target, _spec.fault_action,
                     )
                 _case_path = (_spec.case_resource_path or "").strip()
                 if _case_path:
@@ -544,7 +545,15 @@ def make_agent_loop(hook=None, llm=None, tools=None, skill_catalog: str = "", re
                         "\nIf no match exists after discovery, inform the user "
                         "this scenario is not currently supported and STOP."
                     )
-                fi_msg = HumanMessage(content="\n".join(fi_lines))
+                fi_msg = HumanMessage(
+                    content="\n".join(fi_lines),
+                    # Handoff-retention anchor: planning/handoff_strip
+                    # keys on this flag. The fault intent is the one
+                    # parameter message every downstream phase (execute,
+                    # verify, recover) still consumes after the planning
+                    # round's ReAct turns are stripped.
+                    additional_kwargs={CONTEXT_ANCHOR_FLAG: True},
+                )
                 messages.append(fi_msg)
                 _injections_for_state.append(fi_msg)
 

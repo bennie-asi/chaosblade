@@ -30,7 +30,6 @@ def get_safety_section(level: str = "full") -> str:
 - ALWAYS assess blast radius before multi-target injection
 - ALWAYS confirm when affecting production (non-test) scopes
 - ALWAYS ensure a recovery path is available before execution — the framework captures injection identifiers automatically from tool results
-
 - ALWAYS match the scope of your actions to the user's request — one confirmation does NOT grant permanent authorization
 
 **Caution Rule Compliance**: When a Caution Rule applies: 1) Perform the verification action; 2) If concerns found or the check cannot be performed, report it as a WARNING in your response; 3) If the check passes, proceed normally; 4) NEVER silently skip a Caution Rule — unreported violations are protocol errors."""

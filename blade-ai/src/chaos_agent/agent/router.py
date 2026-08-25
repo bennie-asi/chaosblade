@@ -15,9 +15,6 @@ from chaos_agent.agent.node_names import (
     BASELINE_CAPTURE,
     BATCH_SETUP,
     CONFIRMATION_GATE,
-    DIRECT_EXECUTE,
-    DIRECT_SETUP,
-    EXECUTE_LOOP,
     EXTRACT_PLANNING_METADATA,
     INTENT_CLARIFICATION,
     INTENT_CONFIRM,
@@ -26,7 +23,6 @@ from chaos_agent.agent.node_names import (
     RECOVER_HANDLER,
     RECOVER_VERIFIER_LOOP,
     REJECT,
-    SAFETY_CHECK,
     SAVE_MEMORY,
     SE_DETECT,
     VERIFIER_LOOP,
@@ -43,7 +39,7 @@ from chaos_agent.agent.spec.fault_spec import (
     read_fault_spec,
     strip_timeout_alias,
 )
-from chaos_agent.agent.state import AgentState
+from chaos_agent.agent.state import AgentState, has_active_fault
 from chaos_agent.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -413,7 +409,7 @@ def should_continue_execute_loop(state: AgentState) -> str:
 
     Returns:
         "continue" - more execution iterations needed (LLM output has tool_calls)
-        "verifier" - execution finished OR was cut short (pure text, blade_uid
+        "verifier" - execution finished OR was cut short (pure text, experiment_uid
                      present, tool error, budget exhausted, wall-clock expiry)
         "replan" - error should be fed back to Phase 1 for re-planning
 
@@ -463,7 +459,7 @@ def should_continue_execute_loop(state: AgentState) -> str:
         return "verifier"
 
     # Check the last message for tool_calls (LLM ReAct pattern)
-    # blade_uid alone does NOT mean execution is complete — hybrid injections
+    # experiment_uid alone does NOT mean execution is complete — hybrid injections
     # (blade_create + kubectl steps) need to continue after blade succeeds.
     messages = state.get("messages", [])
     if messages:
@@ -478,11 +474,9 @@ def should_continue_execute_loop(state: AgentState) -> str:
         # If the last message is an AI message without tool_calls,
         # check whether execution actually succeeded before routing to verifier.
         if hasattr(last_msg, "type") and last_msg.type == "ai":
-            if state.get("blade_uid"):
+            if has_active_fault(state):
                 return "verifier"
-            if state.get("injection_method"):
-                return "verifier"
-            # Text-only without blade_uid: the execute_loop node's
+            # Text-only without experiment_uid: the execute_loop node's
             # terminal-conclusion detection normally sets error (caught
             # by the error check above → "end"). This "continue" is a
             # fallback for edge cases (empty content, replan cleared
@@ -544,21 +538,6 @@ def route_after_confirmation(state: AgentState) -> str:
         return "end"
 
     return BASELINE_CAPTURE  # All modes share baseline_capture
-
-
-def route_after_baseline(state: AgentState) -> str:
-    """Decide what happens after baseline_capture.
-
-    baseline_capture is shared across all modes (direct and NL).
-    After baseline is collected, the flow diverges by execution mode:
-
-    Returns:
-        "direct_execute" - direct mode: deterministic skill execution
-        "execute_loop"   - NL mode: LLM ReAct loop for blade_create
-    """
-    if state.get("direct", False):
-        return DIRECT_EXECUTE
-    return EXECUTE_LOOP
 
 
 def should_continue_verifier(state: AgentState) -> str:
@@ -758,16 +737,13 @@ def route_after_recover_finalize(state: AgentState) -> str:
 
 
 def route_pipeline_start(state: AgentState) -> str:
-    """Pipeline Graph entry routing — four paths.
+    """Pipeline Graph entry routing — three paths.
 
     Returns:
-        "direct_setup"  - CLI direct mode
         "plan_builder"  - TUI /plan dry-run
         "batch_setup"   - batch inject (from submit_batch_intent)
-        "agent_loop"    - CLI NL / TUI inject
+        "agent_loop"    - CLI structured / NL / TUI inject
     """
-    if state.get("direct", False):
-        return DIRECT_SETUP
     if state.get("dry_run") and state.get("interaction_mode") == "tui":
         return PLAN_BUILDER
     if state.get("batch_submit_args"):
@@ -847,31 +823,6 @@ def should_continue_plan_builder(state: AgentState) -> str:
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             return "continue"
     return END
-
-
-def route_after_direct_execute(state: AgentState) -> str:
-    """Decide what happens after direct_execute.
-
-    Returns:
-        "verifier" - proceed to verification (the default)
-        "end" - pre-injection rejection only (``safety_status ==
-                "rejected"``), where nothing was ever issued
-
-    An execution error is a signal, not a verdict — the same policy the
-    execute_loop router enforces (task-ff057e7f). The injection command may
-    have failed to RETURN (transport drop, UID parse miss) while the fault
-    actually took effect; only the verifier can tell, and the envelope must
-    carry a verification record instead of ``verification=null`` next to a
-    failure claim. This used to ``return "end"`` on any error, which skipped
-    verification for exactly the uncertain case. The only short-circuit is a
-    pre-injection rejection (capability gate), mirroring
-    ``route_after_safety``'s REJECT.
-    """
-    if state.get("blade_uid"):
-        return "verifier"
-    if state.get("safety_status") == "rejected":
-        return "end"
-    return "verifier"
 
 
 def route_after_save_memory(state: AgentState) -> str:

@@ -6,10 +6,8 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from chaos_agent.agent.router import (
     route_after_confirmation,
-    route_after_direct_execute,
     route_after_phase1_tools,
     route_after_safety,
-    route_after_baseline,
     route_after_save_memory,
     route_after_batch_next,
     should_continue_agent_loop,
@@ -120,7 +118,7 @@ class TestShouldContinueExecuteLoop:
         mock_settings.max_execute_loop = 15
         state = {
             "execute_loop_count": 1,
-            "blade_uid": "abc123",
+            "experiment_uid": "abc123",
             "error": None,
             "messages": [AIMessage(content="done")],
         }
@@ -131,7 +129,7 @@ class TestShouldContinueExecuteLoop:
         """Error from execute_loop must not skip verifier — the verifier
         checks whether the fault actually took effect."""
         mock_settings.max_execute_loop = 15
-        state = {"execute_loop_count": 1, "blade_uid": None, "error": "failed"}
+        state = {"execute_loop_count": 1, "experiment_uid": None, "error": "failed"}
         assert should_continue_execute_loop(state) == "verifier"
 
     @patch("chaos_agent.agent.router.settings")
@@ -149,7 +147,7 @@ class TestShouldContinueExecuteLoop:
         is even less basis for a verdict without checking.
         """
         mock_settings.max_execute_loop = 15
-        state = {"execute_loop_count": 15, "blade_uid": None, "error": None}
+        state = {"execute_loop_count": 15, "experiment_uid": None, "error": None}
         assert should_continue_execute_loop(state) == "verifier"
 
     @patch("chaos_agent.agent.router.settings")
@@ -168,7 +166,7 @@ class TestShouldContinueExecuteLoop:
     @patch("chaos_agent.agent.router.settings")
     def test_normal_continues(self, mock_settings):
         mock_settings.max_execute_loop = 15
-        state = {"execute_loop_count": 1, "blade_uid": None, "error": None}
+        state = {"execute_loop_count": 1, "experiment_uid": None, "error": None}
         assert should_continue_execute_loop(state) == "continue"
 
     @patch("chaos_agent.agent.router.settings")
@@ -182,7 +180,7 @@ class TestShouldContinueExecuteLoop:
         mock_settings.replan_auto_trigger = False
         state = {
             "execute_loop_count": 5,
-            "blade_uid": None,
+            "experiment_uid": None,
             "error": "Replan exhausted after 3 attempt(s)",
             "replan_requested": False,
             "replan_count": 3,
@@ -199,7 +197,7 @@ class TestShouldContinueExecuteLoop:
         })()
         state = {
             "execute_loop_count": 1,
-            "blade_uid": None,
+            "experiment_uid": None,
             "error": None,
             "injection_method": "kubectl_native",
             "messages": [ai_msg],
@@ -213,7 +211,7 @@ class TestShouldContinueExecuteLoop:
         ai_msg = type("AIMsg", (), {"tool_calls": [], "type": "ai", "content": "Injection complete"})()
         state = {
             "execute_loop_count": 1,
-            "blade_uid": None,
+            "experiment_uid": None,
             "error": None,
             "injection_method": "kubectl_native",
             "messages": [ai_msg],
@@ -229,7 +227,7 @@ class TestShouldContinueExecuteLoop:
         mock_settings.replan_auto_trigger = False
         state = {
             "execute_loop_count": 1,
-            "blade_uid": None,
+            "experiment_uid": None,
             "error": None,
             "replan_requested": True,
             "replan_count": 1,
@@ -252,12 +250,8 @@ class TestRouteAfterSafety:
         state = {"safety_status": "safe", "needs_confirmation": True}
         assert route_after_safety(state) == "confirmation_gate"
 
-    def test_safe_without_confirmation_direct(self):
-        state = {"safety_status": "safe", "needs_confirmation": False, "direct": True}
-        assert route_after_safety(state) == "baseline_capture"
-
-    def test_safe_without_confirmation_llm(self):
-        state = {"safety_status": "safe", "needs_confirmation": False, "direct": False}
+    def test_safe_without_confirmation(self):
+        state = {"safety_status": "safe", "needs_confirmation": False}
         assert route_after_safety(state) == "baseline_capture"
 
     def test_warning_goes_to_confirmation(self):
@@ -276,71 +270,13 @@ class TestRouteAfterConfirmation:
         state = {"safety_status": "rejected"}
         assert route_after_confirmation(state) == "reject"
 
-    def test_approved_goes_to_execute_direct(self):
-        state = {"safety_status": "safe", "direct": True}
-        assert route_after_confirmation(state) == "baseline_capture"
-
-    def test_approved_goes_to_execute_llm(self):
-        state = {"safety_status": "safe", "direct": False}
+    def test_approved_goes_to_execute(self):
+        state = {"safety_status": "safe"}
         assert route_after_confirmation(state) == "baseline_capture"
 
     def test_default_goes_to_execute(self):
         state = {"safety_status": "pending"}
         assert route_after_confirmation(state) == "baseline_capture"
-
-
-class TestRouteAfterDirectExecute:
-    """Test route_after_direct_execute routing."""
-
-    def test_has_blade_uid_goes_to_verifier(self):
-        state = {"blade_uid": "abc123"}
-        assert route_after_direct_execute(state) == "verifier"
-
-    def test_error_still_goes_to_verifier(self):
-        """Error is a signal, not a verdict (task-ff057e7f policy).
-
-        The injection command may have failed to RETURN while the fault
-        actually took effect; verification must not be skipped.
-        """
-        state = {"blade_uid": None, "error": "failed"}
-        assert route_after_direct_execute(state) == "verifier"
-
-    def test_failure_detail_error_still_goes_to_verifier(self):
-        state = {
-            "blade_uid": None,
-            "failure_detail": {"category": "execution_failed", "context": "x"},
-        }
-        assert route_after_direct_execute(state) == "verifier"
-
-    def test_pre_injection_rejection_goes_to_end(self):
-        """Capability-gate rejection issued nothing — nothing to verify."""
-        state = {
-            "blade_uid": None,
-            "safety_status": "rejected",
-            "error": "refused",
-        }
-        assert route_after_direct_execute(state) == "end"
-
-    def test_no_result_goes_to_verifier(self):
-        """No blade_uid and no error defaults to verifier for safety."""
-        state = {"blade_uid": None, "error": None}
-        assert route_after_direct_execute(state) == "verifier"
-
-
-class TestRouteAfterBaseline:
-    """Test route_after_baseline routing — dispatches after shared baseline_capture."""
-
-    def test_direct_mode_goes_to_direct_execute(self):
-        state = {"direct": True}
-        assert route_after_baseline(state) == "direct_execute"
-
-    def test_nl_mode_goes_to_execute_loop(self):
-        state = {"direct": False}
-        assert route_after_baseline(state) == "execute_loop"
-
-    def test_default_goes_to_execute_loop(self):
-        state = {}
-        assert route_after_baseline(state) == "execute_loop"
 
 
 class TestRouteAfterPhase1Tools:
@@ -457,8 +393,8 @@ class TestRouteAfterPhase1Tools:
             "revision": 4,
             "objective": "inject packet loss",
             "scope": "pod",
-            "blade_target": "network",
-            "blade_action": "drop",
+            "fault_target": "network",
+            "fault_action": "drop",
             "namespace": "default",
             "names": ["nginx"],
             "labels": {"app": "web"},
@@ -474,7 +410,7 @@ class TestRouteAfterPhase1Tools:
     def _planned_fault(spec: dict) -> dict:
         return {
             "objective": spec["objective"], "scope": spec["scope"],
-            "target": spec["blade_target"], "action": spec["blade_action"],
+            "target": spec["fault_target"], "action": spec["fault_action"],
             "namespace": spec["namespace"], "names": spec["names"],
             "labels": spec["labels"], "params": spec["params"],
             "params_flags": spec["params_flags"],

@@ -93,7 +93,7 @@ class _FragmentProvider:
         return "", ""
 
     async def recover(self, state, handle, **kwargs) -> RecoverResult:
-        return RecoverResult(status="skipped")
+        return RecoverResult(level="skipped")
 
     def prompt_fragments(self) -> ProviderPrompts:
         return self._prompts

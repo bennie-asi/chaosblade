@@ -19,7 +19,6 @@ from chaos_agent.agent.router import (
     should_continue_execute_loop,
     route_after_safety,
     route_after_confirmation,
-    route_after_baseline,
 )
 from chaos_agent.config.settings import settings
 
@@ -91,9 +90,8 @@ class TestInjectGraphFlow:
 
         # Step 6: baseline_capture (shared across all modes)
         # In this test we skip actual baseline_capture execution (it requires kubectl access).
-        # Just verify the routing: baseline_capture → route_after_baseline → execute_loop
-        route = route_after_baseline(state)
-        assert route == "execute_loop"  # NL mode (direct=False)
+        # After baseline_capture the graph follows fixed edges
+        # (baseline_capture → se_snapshot → execute_loop), asserted in test_graph.py.
 
         # Step 7: execute_loop (simulates LLM executing blade commands)
         result = await execute_loop(state)
@@ -101,7 +99,7 @@ class TestInjectGraphFlow:
         assert state["execute_loop_count"] == 1
 
         # Simulate blade returning a UID
-        state["blade_uid"] = "exp-abc123"
+        state["experiment_uid"] = "exp-abc123"
         state["messages"] = [AIMessage(content="Injection complete")]
 
         # Step 8: Route after execute_loop → verifier
@@ -109,7 +107,7 @@ class TestInjectGraphFlow:
         assert route == "verifier"
 
         # Step 9: verifier (with mocked blade_status returning Running)
-        with patch("chaos_agent.tools.blade.execute_via_transport", new_callable=AsyncMock) as mock_exec:
+        with patch("chaos_agent.agent.providers.chaosblade.cli.execute_via_transport", new_callable=AsyncMock) as mock_exec:
             from chaos_agent.tools.shell import CommandResult
             mock_exec.return_value = CommandResult(
                 exit_code=0,
@@ -123,7 +121,7 @@ class TestInjectGraphFlow:
             state.update(result)
         assert state["result"]["verified"] is False  # No LLM → Layer2 skipped → partial verification
         assert state["verification"]["level"] == "partial"
-        assert state["result"]["blade_uid"] == "exp-abc123"
+        assert state["result"]["experiment_uid"] == "exp-abc123"
 
         # Step 10: save_memory
         result = await save_memory(state)
@@ -213,9 +211,8 @@ class TestInjectGraphFlow:
         route = route_after_confirmation(state)
         assert route == "baseline_capture"
 
-        # After baseline_capture, route_after_baseline dispatches by mode
-        route = route_after_baseline(state)
-        assert route == "execute_loop"  # NL mode
+        # After baseline_capture the graph follows fixed edges into the
+        # execute loop (baseline_capture → se_snapshot → execute_loop).
 
     @pytest.mark.asyncio
     async def test_user_rejection_flow(self, sample_agent_state, tmp_memory_dir, monkeypatch):

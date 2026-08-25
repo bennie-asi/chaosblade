@@ -30,8 +30,8 @@ def _fault_spec() -> dict:
         "revision": 4,
         "objective": "inject packet loss",
         "scope": "pod",
-        "blade_target": "network",
-        "blade_action": "drop",
+        "fault_target": "network",
+        "fault_action": "drop",
         "namespace": "default",
         "names": ["nginx"],
         "labels": {"app": "web"},
@@ -47,7 +47,7 @@ def _fault_spec() -> dict:
 def _full_proposal(spec: dict, **overrides) -> dict:
     proposal = {
         "objective": spec["objective"], "scope": spec["scope"],
-        "target": spec["blade_target"], "action": spec["blade_action"],
+        "target": spec["fault_target"], "action": spec["fault_action"],
         "namespace": spec["namespace"], "names": spec["names"],
         "labels": spec["labels"], "params": spec["params"],
         "params_flags": spec["params_flags"],

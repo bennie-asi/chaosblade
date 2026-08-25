@@ -59,14 +59,6 @@ class TestSkipMarkers:
         assert result == {}
         probe.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_direct_mode_skips(self, k8s_state):
-        k8s_state["direct"] = True
-        with patch(f"{_MODULE}._probe_operator") as probe:
-            result = await preplan_probe(k8s_state)
-        assert result == {}
-        probe.assert_not_called()
-
 
 class TestK8sHappyPath:
     @pytest.mark.asyncio
@@ -168,7 +160,7 @@ class TestOperatorFallbackAttribution:
     """
 
     _DETECT = (
-        "chaos_agent.agent.nodes.execute._injection_detection."
+        "chaos_agent.tools.pod_discovery."
         "discover_tool_pods_cluster_wide_with_nodes"
     )
     _PODS = [
@@ -286,7 +278,7 @@ class TestTargetNodePlumbing:
 
         k8s_state["fault_spec"] = FaultSpec(
             scope="node", names=("node-b",),
-            blade_target="mem", blade_action="load",
+            fault_target="mem", fault_action="load",
         ).to_dict()
         mocks, patches = _run_probes(k8s_state)
         try:
@@ -302,7 +294,7 @@ class TestTargetNodePlumbing:
 
         k8s_state["fault_spec"] = FaultSpec(
             scope="pod", namespace="cms-demo", labels={"app": "myapp"},
-            blade_target="cpu", blade_action="fullload",
+            fault_target="cpu", fault_action="fullload",
         ).to_dict()
         mocks, patches = _run_probes(k8s_state)
         try:

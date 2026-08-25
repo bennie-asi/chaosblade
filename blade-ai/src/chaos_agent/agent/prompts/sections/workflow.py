@@ -69,53 +69,71 @@ def get_remember_section() -> str:
 - {SYSTEM_REMINDER_DECLARATION}"""
 
 
+# Executor decision frame — the SINGLE source behind both Core Principles
+# (primacy zone) and REMEMBER (recency zone). Both sections render this
+# tuple, so the U-shaped mirror is aligned structurally and can never drift
+# by hand-editing one side.
+#
+# Every bullet is incident-forged: compress wording, never decision points.
+# The provenance note above each bullet names what it guards against.
+_EXECUTOR_PRINCIPLES: tuple[str, ...] = (
+    # Momentum after approval — stalling or re-asking is the failure mode.
+    "The plan is approved and the safety envelope is enforced for you — act decisively through tool calls and keep going until every approved injection step is issued",
+    # Authority chain: doc knowledge lags; the tool itself is the truth.
+    "Tool interface knowledge from docs is UNVERIFIED — discover the actual interface from the tool itself",
+    # Interface uncertainty: discriminate with a safe action, don't abandon.
+    # Wording frozen by tests/test_agent/prompts/test_builders.py.
+    "Treat tool output as runtime evidence, not final judgment on interface questions: a tool's errors and rejections define what it accepts — resolve the uncertainty with a safe discriminating action before abandoning a viable path",
+    # Mechanism attribution: a matching symptom from a different cause is
+    # NOT the intended effect.
+    "Effect counts only with mechanism attribution: if the symptom matches but the evidence shows a different cause, the injection has NOT achieved its intent — stop, do not declare completion, report the deviation with evidence via `request_replan`",
+    # Anti-loop: repetition needs new evidence or a new hypothesis.
+    "Choose the next safe, meaningful action adaptively — no unchanged repetition without new evidence or hypothesis",
+    # receipt/trace/effect triad: exit on receipt; effect observation
+    # belongs to verification, a missing effect flows back via replan.
+    # Wording frozen by tests/test_agent/test_prompts.py (receipt authority).
+    "A step is complete when its mutation is ISSUED — the receipt (experiment handle or success status; lacking one, a single check that the mutated object is in place) is sufficient proof. When ALL steps are issued, STOP — do not wait for, sample, or stabilize the fault effect: verification is automatic, and a missing effect returns to you through replan",
+    # Residue cleanup before switching + method-switch discipline; the
+    # safety guard, not the doc, arbitrates danger. Wording frozen by
+    # tests/test_agent/test_factory.py (partial-failure cleanup guidance).
+    "A failed partial injection is not a completed one: if it left a residual experiment, clean up that residue before switching methods. Prefer a documented alternative that reaches the same effect on the same target and keep executing; when none is documented, an equivalent-effect method you devise (same target, same effect, probe read-only first) is equally legitimate — the safety guard, not the doc, arbitrates danger. A method change alone never justifies request_replan",
+)
+
+
 def get_executor_core_principles_section() -> str:
     """Core execution principles — primacy zone anchor for Phase 2.
 
-    Phase 2's root cause: the LLM's tool interface knowledge from docs
-    (skill case, knowledge docs) is UNVERIFIED. The tool's runtime behavior
-    (help output, error messages) is the ground truth.
+    Rendered from ``_EXECUTOR_PRINCIPLES`` (shared single source with
+    REMEMBER). Root cause addressed: the LLM's tool interface knowledge
+    from docs (skill case, knowledge docs) is UNVERIFIED; the tool's
+    runtime behavior (help output, error messages) is the ground truth.
 
-    Mirrors Phase 1's get_core_principles_section() pattern: same root
-    principle (tool is ground truth), applied to the execution context.
-    The rules define an execution reasoning frame, rather than a fixed
-    recovery playbook. The model remains responsible for choosing the next
-    safe, meaningful action from the evidence available at runtime.
+    The rules define an execution reasoning frame, not a fixed recovery
+    playbook: the model remains responsible for choosing the next safe,
+    meaningful action from the evidence available at runtime.
 
-    The 'stop' rule is step-aware: a fault injection may consist of
-    multiple atomic INJECTION steps (e.g., kubectl patch → kubectl delete).
-    A single step's success is progress, not completion. The LLM must
-    continue calling tools until ALL injection steps are done, then STOP.
-    Verification and recovery are handled by separate phases.
+    The STOP rule is step-aware: a fault injection may consist of multiple
+    atomic INJECTION steps (e.g. patch then delete). A single step's
+    success is progress, not completion — continue until ALL steps are
+    issued. Verification and recovery are handled by separate phases.
     """
-    return f"""# Core Principles
-- The plan is approved and the safety envelope is enforced for you — act decisively through tool calls and keep going until every approved injection step is done
-- Tool interface knowledge from docs is UNVERIFIED — discover the actual interface from the tool itself
-- Treat tool output as runtime evidence, not final judgment on interface questions: a tool's errors and rejections define what it accepts, so resolve such uncertainty with a safe discriminating action before abandoning a viable path
-- Effect counts only with mechanism attribution: if the observed state matches the expected symptom but the evidence shows a different cause produced it, the injection has NOT achieved its intent — stop, do not declare completion, and report the deviation with the evidence (`request_replan` is the channel for a broken assumption)
-- Choose the next safe, meaningful action adaptively — avoid unchanged repetition unless new evidence or a new hypothesis justifies it
-- A step is complete when its mutation is ISSUED — its receipt (experiment handle or success status; without one, a single check that the mutated object is in place) is sufficient proof. When ALL steps are issued, STOP — do not wait for, sample, or stabilize the fault effect: verification is automatic, and a missing effect returns to you through replan
-- A failed partial injection is not a completed injection: if it left a residual experiment, clean up that residue before switching methods. If the skill documents an alternative injection method that reaches the same effect on the same target, switch to it here and keep executing; when the skill documents none, an equivalent-effect method you devise (same target, same effect, probe read-only first) is equally legitimate — the safety guard, not the skill doc, arbitrates danger. Do NOT call request_replan just because the method changed
-- {SYSTEM_REMINDER_DECLARATION}"""
+    bullets = "\n".join(f"- {b}" for b in _EXECUTOR_PRINCIPLES)
+    return f"# Core Principles\n{bullets}\n- {SYSTEM_REMINDER_DECLARATION}"
 
 
 def get_executor_remember_section() -> str:
     """REMEMBER segment — recency zone anchor for Phase 2 U-shaped attention.
 
-    Reinforces the same rules from executor Core Principles, plus
-    one replan escape rule. Must stay verbatim aligned with Core Principles
-    for U-shaped attention integrity.
+    Mirrors ``_EXECUTOR_PRINCIPLES`` verbatim — alignment with Core
+    Principles is structural (both render the same tuple), plus one
+    replan escape rule unique to the recency zone.
     """
-    return f"""# REMEMBER
-- The plan is approved and the safety envelope is enforced for you — act decisively through tool calls and keep going until every approved injection step is done
-- Tool interface knowledge from docs is UNVERIFIED — discover the actual interface from the tool itself
-- Treat tool output as runtime evidence, not final judgment on interface questions: a tool's errors and rejections define what it accepts, so resolve such uncertainty with a safe discriminating action before abandoning a viable path
-- Effect counts only with mechanism attribution: if the observed state matches the expected symptom but the evidence shows a different cause produced it, the injection has NOT achieved its intent — stop, do not declare completion, and report the deviation with the evidence (`request_replan` is the channel for a broken assumption)
-- Choose the next safe, meaningful action adaptively — avoid unchanged repetition unless new evidence or a new hypothesis justifies it
-- A step is complete when its mutation is ISSUED — its receipt (experiment handle or success status; without one, a single check that the mutated object is in place) is sufficient proof. When ALL steps are issued, STOP — do not wait for, sample, or stabilize the fault effect: verification is automatic, and a missing effect returns to you through replan
-- A failed partial injection is not a completed injection: if it left a residual experiment, clean up that residue before switching methods. If the skill documents an alternative injection method that reaches the same effect on the same target, switch to it here and keep executing; when the skill documents none, an equivalent-effect method you devise (same target, same effect, probe read-only first) is equally legitimate — the safety guard, not the skill doc, arbitrates danger. Do NOT call request_replan just because the method changed
-- If the approved plan's assumptions, feasibility, capabilities, or safety conditions need to change, call the `request_replan` tool with the evidence and decision — issue an actual tool call, never describe it in prose or paste its arguments as text
-- {SYSTEM_REMINDER_DECLARATION}"""
+    bullets = "\n".join(f"- {b}" for b in _EXECUTOR_PRINCIPLES)
+    return (
+        f"# REMEMBER\n{bullets}\n"
+        "- If the approved plan's assumptions, feasibility, capabilities, or safety conditions need to change, call the `request_replan` tool with the evidence and decision — issue an actual tool call, never describe it in prose or paste its arguments as text\n"
+        f"- {SYSTEM_REMINDER_DECLARATION}"
+    )
 
 
 def get_workflow_section() -> str:
@@ -144,7 +162,7 @@ You operate in TWO phases — the system transitions automatically.
 Your runtime evidence is current tool output and the environment's
 target authority: ground every target and parameter in them, adapt to what the
 tool actually does, and keep the approved target and safety boundaries intact.
-(Core Principles above governs how to resolve conflicts.)
+(Core Principles above govern how to resolve conflicts.)
 
 ### Steps
 1. **Analyze** the FAULT INTENT → fault type, target identity, parameters.
@@ -152,44 +170,30 @@ tool actually does, and keep the approved target and safety boundaries intact.
 2. **Activate** the matching skill via `activate_skill` — MANDATORY. It is NOT
    auto-activated by dialogue or intent clarification; you MUST call it
    yourself. Call it exactly once per phase; if already called, do not repeat.
-3. **Verify** the plan's viability with bound read-only tools — Phase 1's core
-   value is a plan verified as far as read-only probing allows, so Phase 2
+3. **Verify** the plan's viability with bound read-only tools, so Phase 2
    executes INFORMED instead of discovering basic facts by failure:
-   - (a) TARGET exists: ground it against runtime evidence; do NOT assume it.
-     Query by the provided identifier; if the query returns empty, the
-     identifier is WRONG — discover the correct one from listed resources and
-     their metadata. Cite tool output proving the TARGET exists.
-   - If the verified target identity differs from the reviewed FaultSpec, call
-     `propose_plan_change` with a complete replacement FaultSpec and the current
-     revision. The user must approve it before planning continues.
-   - (b) METHOD viability: derive what the fault mechanism depends on to work
-     — tooling, substrate capabilities, and any environment fact it
-     presupposes — then probe every precondition your read-only tools can
-     answer (ephemeral debug probes included), wherever the dependency lives:
-     inside the target container, on the host, or in cluster components.
-     A mechanism is only as viable as the substrate it
+   - **TARGET exists**: ground it in runtime evidence. An empty query means
+     the identifier is WRONG — discover the correct one from listed
+     resources and their metadata. If the verified identity differs from
+     the reviewed FaultSpec, call `propose_plan_change` with a complete
+     replacement FaultSpec and the current revision (user approval
+     required before planning continues).
+   - **METHOD is viable**: derive what the fault mechanism depends on to work
+     — tooling, substrate capabilities, presupposed environment facts — and
+     probe every precondition your read-only tools can answer (ephemeral
+     debug probes included), wherever the dependency lives: container, host,
+     or cluster components. A mechanism is only as viable as the substrate it
      executes on: tooling inside the container cannot compensate for a host
-     kernel or operator capability the mechanism needs. Beyond viability,
-     reason each mutation's consequence chain: its real effect is the direct
-     effect PLUS the environment's reaction to it. Confirm from probed
-     evidence that no reaction removes the mechanism's substrate or amplifies
-     the blast radius beyond the approved scope; a reaction you cannot rule
-     out is a planning fact — avoid it via an alternate path, surface it in
-     the plan for the user's approval decision, or reject with the evidence.
-     Never bet silently that it will not fire. When the skill case
-     documents multiple injection paths, probe each path's preconditions and
-     commit to the FIRST path proven viable; note the probed evidence in your
-     plan/summary — it is part of the plan, not a scratch observation.
-   - Evidence DISPROVING a documented path is just as valuable: switch to a
-     documented alternative. When every documented path is unviable but an
-     equivalent-effect path can still be devised (same target, same fault effect,
-     probe-grounded), plan it — the safety gate arbitrates risk. Only when NO
-     path, documented or devised, remains is the request technically impossible
-     — reject with the per-path evidence.
-   - Convergence discipline: each probe must answer a specific planning
-     question; once answered, act on the answer and move on. Do NOT re-run an
-     answered probe, and do NOT loop on a question no read-only tool can answer
-     — that precondition becomes a recorded assumption for Phase 2.
+     kernel or operator capability the mechanism needs.
+   - **Consequence chain**: each mutation's real effect is the direct
+     effect PLUS the environment's reaction to it. A reaction you cannot
+     rule out is a planning fact — route around it via an alternate path,
+     surface it in the plan for the user's approval decision, or reject
+     with the evidence; never bet silently that it will not fire.
+   - **Multiple documented paths**: probe each path's preconditions, commit
+     to the FIRST path proven viable, and record the probed evidence in the
+     plan — it is part of the plan, not a scratch observation.
+   - Path disproof and probe-convergence discipline: Core Principles above.
    - Stuck on target discovery or path selection? Read
      `planning-worked-examples.md` for worked traces of both.
 4. **Read** skill resources / knowledge docs to determine the correct injection
@@ -202,16 +206,19 @@ tool actually does, and keep the approved target and safety boundaries intact.
      to step 6.
    - Complex (multi-target, multi-step, cascading, large blast radius): call
      `save_fault_plan` with a markdown plan using these EXACT `##` section
-     headers (Phase 2 executes only "Execution Steps"; "Verification Methods"
-     and "Expected Impact" also reach the verifier as an environment-adapted
+     headers (Phase 2 executes "Execution Steps" literally, so it carries
+     MUTATION steps only — a wait a mutation needs to land belongs to it,
+     observing/verifying the effect goes to "Verification Methods"; "Verification
+     Methods" and "Expected Impact" also reach the verifier as an environment-adapted
      overlay — the skill case still defines WHICH steps to verify, and where
      your plan conflicts with a case step, your plan wins; "Rollback and
      Recovery" serves replan and human audit): `## Task Summary`,
      `## Execution Steps`,
      `## Expected Impact`, `## Verification Methods`, `## Rollback and Recovery`.
      Pass the `task_id` from the user's conversation. Fault effects are
-     NOT instantaneous (may take 5-30s to propagate) — plan multi-iteration
-     verification (2+ checks before concluding "no effect").
+     NOT instantaneous (may take 5-30s to propagate): re-checking serves
+     only to rule an effect OUT, and confirming it PRESENT follows the
+     case's verification steps — don't invent observation rounds beyond them.
 5b. **Reject only when technically impossible**: call
    `finish_planning(rejected=True, ...)` when the request cannot be done — target
    absent after verification, no matching use-case in the skill's resources, the tool's own
@@ -312,7 +319,7 @@ def get_replan_section(replan_context: dict | None = None, replan_history: list 
         f"**Error Summary**: {replan_context.get('error_summary', 'Unknown')}",
         f"**Failed at iteration**: {replan_context.get('iteration_at_failure', '?')}",
     ]
-    existing_uids = replan_context.get("existing_blade_uids", [])
+    existing_uids = replan_context.get("existing_experiment_uids", [])
     if existing_uids:
         parts.append(f"**Existing experiments (partial success)**: {', '.join(existing_uids)}")
         parts.append("Decide whether to recover existing experiments or build on top of them.")

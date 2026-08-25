@@ -323,12 +323,13 @@ _CONTRADICTION_INDICATORS = {
 # ---------------------------------------------------------------------------
 
 _CHECKLIST_PATTERNS = [
-    # Primary: Step N: [category] <status> [— evidence]
-    # Captures step number, optional CORE/IMPACT category (bracketed or
-    # bare), status, and optional evidence text after separator.
-    # Group layout: (1)=step, (2)=category tag, (3)=status, (4)=evidence.
+    # Primary: Step N: <status> [— evidence]
+    # Captures step number, status, and optional evidence text after
+    # separator. A residual [CORE]/[IMPACT] tag from older prompts is
+    # tolerated via a non-capturing optional group.
+    # Group layout: (1)=step, (2)=status, (3)=evidence.
     re.compile(
-        r"(?:step|check)\s*(\d+)\s*[:.)]\s*(\[?(?:core|impact)\]?\s*)?"
+        r"(?:step|check)\s*(\d+)\s*[:.)]\s*(?:\[?(?:core|impact)\]?\s*)?"
         r"\[?(passed|failed|skipped|recovered_before_observation|expected|not_applicable)\]?"
         r"(?:\s*[—–-]\s*(.+?))?\s*$",
         re.IGNORECASE | re.MULTILINE,
@@ -337,9 +338,9 @@ _CHECKLIST_PATTERNS = [
     # Negative lookbehind prevents matching [skipped] inside "2. [skipped]"
     # or "Step 1: [skipped]" — those are handled by Pattern 0 and Pattern 2.
     re.compile(r"(?<!\d[.:)]\s)\[SKIPPED\]\s*(?:step\s*)?(\d+)?", re.IGNORECASE),
-    # Bare numbered list: 1. [category] <status> [— evidence]
+    # Bare numbered list: 1. <status> [— evidence]
     re.compile(
-        r"^\s*(\d+)\s*[.:)]\s*(\[?(?:core|impact)\]?\s*)?"
+        r"^\s*(\d+)\s*[.:)]\s*(?:\[?(?:core|impact)\]?\s*)?"
         r"\[?(passed|failed|skipped|recovered_before_observation|expected|not_applicable)\]?"
         r"(?:\s*[—–-]\s*(.+?))?\s*$",
         re.IGNORECASE | re.MULTILINE,
@@ -355,7 +356,6 @@ def _parse_checklist_items(text: str) -> list[dict]:
         end_marker="VERIFICATION_RESULT:",
         patterns=_CHECKLIST_PATTERNS,
         capture_evidence=True,
-        category_group=2,
     )
 
 
@@ -379,12 +379,6 @@ def _detect_checklist_conclusion_inconsistency(
     when below threshold) — they are informational confirmations, not failures,
     and should not trigger inconsistency detection.
 
-    Two-tier verdict (Core/Impact): items categorized 'impact' are drill
-    FINDINGS — propagated effects (OOM, latency, business impact) that never
-    gate the verdict. They are excluded from inconsistency detection entirely,
-    even when marked 'failed' with absence evidence. Only CORE (or
-    uncategorized) items can contradict a 'passed' conclusion.
-
     For transient faults (e.g. disk-burn), steps marked 'recovered_before_observation'
     with no 'failed' or 'partial' steps do NOT trigger inconsistency when Layer2
     is 'passed' — the LLM correctly judged the fault was active despite the
@@ -404,7 +398,6 @@ def _detect_checklist_conclusion_inconsistency(
     non_passed_items = [
         item for item in checklist_items
         if item.get("status") in _non_passed_statuses
-        and item.get("category") != "impact"  # findings never gate the verdict
     ]
     if not non_passed_items:
         return None, False
@@ -626,7 +619,6 @@ def _try_parse_json(content: str) -> dict | None:
             _non_passed_ev = " ".join(
                 c.get("evidence", "") for c in checklist
                 if c.get("status") in ("failed", "partial", "recovered_before_observation")
-                and c.get("category") != "impact"
             )
             inconsistency_warning, should_downgrade = _detect_checklist_conclusion_inconsistency(
                 checklist, l2, _non_passed_ev,
@@ -747,11 +739,9 @@ def _parse_verification_result(text: str) -> dict:
     # Checklist-conclusion inconsistency: checklist says failed but Layer2 says passed
     if checklist_items:
         # Collect evidence text from non-passed items for absence-phrase detection
-        # (IMPACT items excluded — findings never gate the verdict)
         _non_passed_evidence = " ".join(
             item.get("evidence", "") for item in checklist_items
             if item.get("status") in ("failed", "partial", "recovered_before_observation")
-            and item.get("category") != "impact"
         )
         inconsistency_warning, should_downgrade = _detect_checklist_conclusion_inconsistency(
             checklist_items, result["layer2"]["status"], _non_passed_evidence,
@@ -813,13 +803,13 @@ def _parse_verification_result(text: str) -> dict:
     if result["layer2"]["status"] == "skipped":
         result["warnings"].append(
             "Layer 2 (fault-specific) verification was skipped. "
-            "Only general blade_status verification was performed."
+            "Only Layer 1 (programmatic) verification was performed."
         )
     elif result["layer2"]["status"] == "unknown":
         result["warnings"].append(
             "Layer 2 (fault-specific) verification result is unknown. "
             "The LLM did not produce a clear verification conclusion. "
-            "Only general blade_status verification was confirmed."
+            "Only Layer 1 (programmatic) verification was confirmed."
         )
 
     return result
@@ -893,7 +883,6 @@ def dict_to_verification_result(raw: dict) -> VerificationResult:
                         description=item.get("description", ""),
                         status=item.get("status", "passed"),
                         evidence=item.get("evidence", ""),
-                        category=item.get("category", ""),
                     ))
                 except (ValueError, KeyError):
                     pass

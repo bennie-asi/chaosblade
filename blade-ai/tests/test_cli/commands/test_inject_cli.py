@@ -31,7 +31,6 @@ class TestInjectNodeScopeNamespace:
                 "-n", "cn-hongkong.10.0.1.120",
                 "-p", "path=/tmp,read,write",
                 "-d", "120",
-                "--direct",
                 "--kubeconfig", "/nonexistent/kubeconfig",
             ])
         # The CLI should NOT error with "namespace" requirement for node scope.
@@ -49,13 +48,12 @@ class TestInjectNodeScopeNamespace:
             "-n", "app=myapp",
             "-p", "cpu-percent=80",
             "-d", "120",
-            "--direct",
         ])
         # Should error about missing --namespace
         assert "--namespace" in result.output or result.exit_code != 0
 
-    def test_node_scope_direct_without_namespace(self):
-        """--direct with node-scope should not require --namespace."""
+    def test_node_scope_without_namespace(self):
+        """Structured node-scope inject should not require --namespace."""
         # Mock run_command to avoid real preflight network probes hanging
         # on a nonexistent cluster (same rationale as the test above).
         with patch(
@@ -70,7 +68,6 @@ class TestInjectNodeScopeNamespace:
                 "-n", "node-1",
                 "-p", "cpu-percent=90",
                 "-d", "120",
-                "--direct",
                 "--kubeconfig", "/nonexistent/kubeconfig",
             ])
         # Should NOT complain about missing --namespace

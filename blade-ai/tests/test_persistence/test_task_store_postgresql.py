@@ -100,25 +100,32 @@ class TestRecordToDict:
 # ---------------------------------------------------------------------------
 
 class TestSchema:
-    async def test_ensure_schema_runs_full_ddl_and_migrations(self, backend):
+    async def test_ensure_schema_is_pure_ddl(self, backend):
+        """[已翻转] phase-14 G6 后：迁移段整体退役——四表 DDL 齐全，
+        全程零 ALTER / 零回填（fresh-database 裁决，旧库不再原地升级）。"""
         await backend.ensure_schema()
         executed = "\n".join(backend._pool.db.executed)
         for table in ("tasks", "task_details", "task_spans", "sessions"):
             assert f"CREATE TABLE IF NOT EXISTS {table}" in executed
-        # one-shot migration columns all attempted on first run
-        for col in ("fault_spec", "failure_reason", "baseline_data",
-                    "postmortem", "injection_start_time"):
-            assert f"ADD COLUMN {col}" in executed
-        assert "ADD COLUMN IF NOT EXISTS tenant_id" in executed
+        assert "ALTER TABLE" not in executed
 
     async def test_ensure_schema_is_idempotent(self, backend):
-        """Second run must survive DuplicateColumnError from plain ALTERs."""
+        """DDL 幂等（IF NOT EXISTS）；二次运行不再有可炸的 ALTER。"""
         await backend.ensure_schema()
-        await backend.ensure_schema()  # ALTER ADD COLUMN raises → swallowed
+        await backend.ensure_schema()
 
-    async def test_injection_start_time_backfill_is_one_shot(self, backend):
-        """Existing rows are stamped once; later rows are never touched."""
-        # pre-migration legacy row: has intent, no injection_start_time
+    async def test_fresh_ddl_carries_all_migration_columns(self, backend):
+        """phase-14 G6 7.3：只存在于旧迁移段的六列已并入 _DETAILS_DDL
+        ——fresh 库由 DDL 直接建成终态列集。"""
+        from chaos_agent.persistence.task_store_postgresql import _DETAILS_DDL
+        for col in ("baseline_data", "inject_context", "skill_use_case",
+                    "injection_method", "kubectl_exec_pod_name",
+                    "injection_start_time"):
+            assert f"{col}" in _DETAILS_DDL, col
+
+    async def test_no_backfill_on_fresh_database(self, backend):
+        """[已翻转] 一次性回填迁移段 EOL：ensure_schema 不再触碰任何行
+        ——存量行不会被盖上时间戳，新行也不会被意外回填。"""
         await backend.upsert_task(
             "task-legacy",
             ["task_id", "task_state", "gmt_create"],
@@ -131,17 +138,7 @@ class TestSchema:
         )
         await backend.ensure_schema()
         legacy = await backend.select_details("task-legacy")
-        assert legacy["injection_start_time"] is not None  # backfilled
-
-        # new row inserted AFTER the migration ran once
-        await backend.upsert_details(
-            "task-new", ["task_id", "target"], ["task-new", "app=new"]
-        )
-        await backend.ensure_schema()  # ALTER raises → backfill skipped
-        new = await backend.select_details("task-new")
-        # real PG keeps the column with NULL; the fake omits the key — both
-        # mean "never backfilled"
-        assert new.get("injection_start_time") is None
+        assert legacy.get("injection_start_time") is None  # 不再回填
 
 
 # ---------------------------------------------------------------------------
@@ -156,11 +153,11 @@ class TestTasks:
             ["task-1", "pod-kill", "inject",
              "2026-08-13T10:00:00+00:00", "2026-08-13T10:00:00+00:00"],
         )
-        await backend.upsert_task("task-1", ["task_id", "blade_uid"],
+        await backend.upsert_task("task-1", ["task_id", "experiment_uid"],
                                   ["task-1", "uid-abc"])
         row = await backend.select_task("task-1")
         assert row["skill_name"] == "pod-kill"   # preserved by merge
-        assert row["blade_uid"] == "uid-abc"
+        assert row["experiment_uid"] == "uid-abc"
         assert row["gmt_create"] == "2026-08-13T10:00:00+00:00"  # dt → ISO str
 
     async def test_upsert_rejects_uncoerced_string_timestamp(self, backend):

@@ -8,8 +8,8 @@ def test_build_inject_initial_state_from_fault_spec_object():
         scope="pod",
         names=("pod-a",),
         labels={"app": "demo"},
-        blade_target="cpu",
-        blade_action="fullload",
+        fault_target="cpu",
+        fault_action="fullload",
         params={"cpu-percent": "80"},
         source="test",
     )
@@ -25,7 +25,6 @@ def test_build_inject_initial_state_from_fault_spec_object():
         kube_context="ctx-a",
         kubewiz_cluster_uuid="cluster-a",
         kubewiz_profile="profile-a",
-        direct=False,
         dry_run=True,
         created_at="2026-06-18T10:00:00+08:00",
     )
@@ -44,14 +43,14 @@ def test_build_inject_initial_state_from_fault_spec_object():
     assert state["kubewiz_cluster_uuid"] == "cluster-a"
     assert state["kubewiz_profile"] == "profile-a"
     assert state["fault_spec"]["scope"] == "pod"
-    assert state["fault_spec"]["blade_target"] == "cpu"
+    assert state["fault_spec"]["fault_target"] == "cpu"
     assert state["fault_spec"]["params"] == {"cpu-percent": "80"}
 
 
 def test_build_inject_initial_state_copies_mutable_inputs():
     messages = ["handoff"]
     batch_args = {"faults": [{"scope": "pod"}]}
-    fault_spec = {"scope": "pod", "blade_target": "network"}
+    fault_spec = {"scope": "pod", "fault_target": "network"}
 
     state = build_inject_initial_state(
         task_id="task-2",
@@ -67,4 +66,4 @@ def test_build_inject_initial_state_copies_mutable_inputs():
 
     assert state["messages"] == ["handoff"]
     assert state["batch_submit_args"] == {"faults": [{"scope": "pod"}]}
-    assert state["fault_spec"] == {"scope": "pod", "blade_target": "network"}
+    assert state["fault_spec"] == {"scope": "pod", "fault_target": "network"}

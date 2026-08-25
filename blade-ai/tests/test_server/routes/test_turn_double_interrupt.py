@@ -223,7 +223,7 @@ class TestBuildResultPayloadPauseGuard:
         graph.aget_state.return_value = SimpleNamespace(
             values={
                 "confirmed_intent": "inject",
-                "blade_uid": "",  # mid-flow, no real injection yet
+                "experiment_uid": "",  # mid-flow, no real injection yet
                 "fault_intent": {"fault_type": "node-cpu-fullload"},
             },
             next=("intent_confirm",),  # still paused
@@ -238,15 +238,15 @@ class TestBuildResultPayloadPauseGuard:
         graph.aget_state.return_value = SimpleNamespace(
             values={
                 "confirmed_intent": "inject",
-                "blade_uid": "blade-uid-xyz",
+                "experiment_uid": "blade-uid-xyz",
                 "task_id": "task-abc",
                 "fault_spec": {
                     "namespace": "cms-demo",
                     "scope": "node",
                     "names": ["node-a"],
                     "labels": {},
-                    "blade_target": "cpu",
-                    "blade_action": "fullload",
+                    "fault_target": "cpu",
+                    "fault_action": "fullload",
                     "params": {"cpu-percent": "80"},
                     "params_flags": [],
                     "duration_seconds": 0,
@@ -263,7 +263,7 @@ class TestBuildResultPayloadPauseGuard:
         assert result["status"] == "success"
         assert result["data"]["task_id"] == "task-abc"
         assert result["data"]["fault_type"] == "node-cpu-fullload"
-        assert result["data"]["blade_uid"] == "blade-uid-xyz"
+        assert result["data"]["experiment_uid"] == "blade-uid-xyz"
         assert result["data"]["target"]["names"] == ["node-a"]
         assert result["data"]["params"] == {"cpu-percent": "80"}
 
@@ -271,15 +271,15 @@ class TestBuildResultPayloadPauseGuard:
         data = _build_inject_data_from_state(
             {
                 "confirmed_intent": "inject",
-                "blade_uid": "blade-uid-xyz",
+                "experiment_uid": "blade-uid-xyz",
                 "skill_name": "stale-skill-name",
                 "fault_spec": {
                     "namespace": "cms-demo",
                     "scope": "pod",
                     "names": ["pod-a"],
                     "labels": {"app": "demo"},
-                    "blade_target": "network",
-                    "blade_action": "loss",
+                    "fault_target": "network",
+                    "fault_action": "loss",
                     "params": {"percent": "100"},
                     "params_flags": [],
                     "duration_seconds": 0,

@@ -1,11 +1,10 @@
-"""Baseline capture node: pre-injection metric collection for direct mode.
+"""Baseline capture node: pre-injection metric collection.
 
 Collects baseline metrics before fault injection so the verifier can perform
 before/after comparison instead of relying solely on absolute thresholds.
 
-Shared across ALL execution modes (direct and NL) — baseline_capture runs
-after safety_check/confirmation_gate for every fault injection flow, then
-route_after_baseline dispatches to direct_execute or execute_loop.
+Runs for every fault injection flow: baseline_capture runs after
+safety_check/confirmation_gate, then the graph continues to execute_loop.
 
 Strategy priority (matches the actual chain in ``make_baseline_capture``):
   1. LLM-driven (parse full skill_case_content to derive commands)
@@ -30,8 +29,8 @@ from langchain_core.messages import HumanMessage
 from chaos_agent.agent.dispatch import dispatch_node_message
 from chaos_agent.agent.evidence import EvidenceProfile
 from chaos_agent.agent.node_names import BASELINE_CAPTURE
-from chaos_agent.agent.nodes.execute._injection_detection import (
-    _TOOL_POD_NAMESPACE as _TOOL_POD_NAMESPACE,  # re-exported (imported by tests)
+from chaos_agent.tools.pod_discovery import (  # noqa: F401 — re-exported (imported by tests)
+    TOOL_POD_NAMESPACE as _TOOL_POD_NAMESPACE,
 )
 from chaos_agent.agent.nodes.execute._kubeconfig_inject import sync_kubewiz_runtime
 from chaos_agent.agent.nodes.store._store_sync import sync_to_store, sync_node_status_to_session
@@ -211,9 +210,9 @@ def _assemble_baseline_result(
 
     # Merge extracted fields into target_metadata. ``AgentState`` has no reducer
     # for this field, so we MUST do the merge here — returning just
-    # ``extracted_metadata`` would clobber whatever direct_setup wrote earlier
-    # (e.g. ``pod_memory_limit_mb``). Empty-dict short-circuit avoids writing
-    # back an unchanged value for the common case.
+    # ``extracted_metadata`` would clobber whatever an upstream node wrote
+    # earlier (e.g. ``pod_memory_limit_mb``). Empty-dict short-circuit avoids
+    # writing back an unchanged value for the common case.
     if extracted_metadata:
         existing_metadata = state.get("target_metadata") or {}
         merged = {**existing_metadata, **extracted_metadata}
@@ -326,13 +325,13 @@ def _build_baseline_ctx(state: AgentState, llm, task_id: str, tracker) -> _Basel
     Preserves the original ordering: read spec fields → ``sync_kubewiz_runtime``
     → resolve channel/profile (the sync MUST run before channel resolution).
     ``read_fault_spec`` returns a typed FaultSpec so we read
-    scope/blade_target/blade_action directly instead of from 3 state fields.
+    scope/fault_target/fault_action directly instead of from 3 state fields.
     """
     from chaos_agent.agent.spec.fault_spec import read_fault_spec
     spec = read_fault_spec(state)
     scope = spec.scope if spec else ""
-    target = spec.blade_target if spec else ""
-    action = spec.blade_action if spec else ""
+    target = spec.fault_target if spec else ""
+    action = spec.fault_action if spec else ""
     skill_case = state.get("skill_case_content", "")
     kubeconfig = state.get("kubeconfig", "")
     sync_kubewiz_runtime(state)

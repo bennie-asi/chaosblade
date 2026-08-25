@@ -191,13 +191,14 @@ Step 2: Skill was activated
 class TestExtractCriticalContext:
     """Test extract_critical_context extracts key operational state."""
 
-    def test_extracts_blade_uid_from_tool_message(self):
+    def test_extracts_experiment_uid_from_tool_message(self):
+        # phase-14 G5: 单键正则——消息文本只认 experiment_uid 拼写
         msgs = [
-            MagicMock(content='blade_uid: abc123def456'),
+            MagicMock(content='experiment_uid: abc123def456'),
         ]
         state = {}
         result = extract_critical_context(msgs, state)
-        assert result["active_blade_uid"] == "abc123def456"
+        assert result["active_experiment_uid"] == "abc123def456"
 
     def test_extracts_blade_uid_from_json_result(self):
         msgs = [
@@ -205,7 +206,7 @@ class TestExtractCriticalContext:
         ]
         state = {}
         result = extract_critical_context(msgs, state)
-        assert result["active_blade_uid"] == "f00baa123"
+        assert result["active_experiment_uid"] == "f00baa123"
 
     def test_extracts_skill_from_state(self):
         msgs = []
@@ -236,24 +237,44 @@ class TestExtractCriticalContext:
         assert result["plan_path"] == "/tmp/plan.md"
         assert result["plan"] == "# Fault Injection Plan"
 
-    def test_blade_uid_from_state_fallback(self):
+    def test_experiment_uid_from_state_fallback(self):
         msgs = []
-        state = {"blade_uid": "aabb1122ccdd"}
+        state = {"experiment_uid": "aabb1122ccdd"}
         result = extract_critical_context(msgs, state)
-        assert result["active_blade_uid"] == "aabb1122ccdd"
+        assert result["active_experiment_uid"] == "aabb1122ccdd"
 
-    def test_message_blade_uid_takes_priority_over_state(self):
-        msgs = [MagicMock(content='blade_uid: cc1234ab5678')]
-        state = {"blade_uid": "ff9876ba5432"}
+    def test_message_uid_takes_priority_over_state(self):
+        msgs = [MagicMock(content='experiment_uid: cc1234ab5678')]
+        state = {"experiment_uid": "ff9876ba5432"}
         result = extract_critical_context(msgs, state)
         # Message-extracted UID should take priority
-        assert result["active_blade_uid"] == "cc1234ab5678"
+        assert result["active_experiment_uid"] == "cc1234ab5678"
 
     def test_empty_state_returns_empty(self):
         msgs = [MagicMock(content="no relevant content")]
         state = {}
         result = extract_critical_context(msgs, state)
         assert result == {}
+
+    def test_pins_native_fault_handle_from_state(self):
+        """Task A: a UID-less native fault's identity must survive compaction
+        — the handle pin is the only carrier for it."""
+        msgs = []
+        state = {"injection_method": "kubectl_native"}
+        result = extract_critical_context(msgs, state)
+        assert result["active_fault_handle"] == {
+            "kind": "native", "method": "kubectl_native"
+        }
+        assert "active_experiment_uid" not in result
+
+    def test_pins_blade_fault_handle_from_state(self):
+        msgs = []
+        state = {"experiment_uid": "aabb1122ccdd", "injection_method": "host_blade"}
+        result = extract_critical_context(msgs, state)
+        assert result["active_experiment_uid"] == "aabb1122ccdd"
+        assert result["active_fault_handle"] == {
+            "kind": "experiment_uid", "value": "aabb1122ccdd", "method": "host_blade"
+        }
 
 
 class TestBuildPostCompactContextMessage:
@@ -264,10 +285,32 @@ class TestBuildPostCompactContextMessage:
         assert result == ""
 
     def test_includes_blade_uid(self):
-        result = build_post_compact_context_message({"active_blade_uid": "abc123"})
+        result = build_post_compact_context_message({"active_experiment_uid": "abc123"})
         assert "[Context preserved after compaction]" in result
         assert "abc123" in result
-        assert "blade_uid" in result
+        assert "experiment_uid" in result
+
+    def test_renders_native_fault_handle_line(self):
+        """Task A: UID-less carriers surface via the neutral handle line."""
+        result = build_post_compact_context_message(
+            {"active_fault_handle": {"kind": "native", "method": "kubectl_native"}}
+        )
+        assert "Active fault handle" in result
+        assert "kubectl_native" in result
+
+    def test_blade_handle_not_double_rendered(self):
+        """The experiment_uid line already carries an experiment-kind handle
+        (kind renamed to "experiment_uid" in phase-14 G7)."""
+        result = build_post_compact_context_message(
+            {
+                "active_experiment_uid": "abc123",
+                "active_fault_handle": {
+                    "kind": "experiment_uid", "value": "abc123", "method": "host_blade"
+                },
+            }
+        )
+        assert "Active experiment_uid: abc123" in result
+        assert "Active fault handle" not in result
 
     def test_includes_skill(self):
         result = build_post_compact_context_message({"active_skill": "pod-kill"})
@@ -298,7 +341,7 @@ class TestBuildPostCompactContextMessage:
 
     def test_full_context_message(self):
         ctx = {
-            "active_blade_uid": "abc123",
+            "active_experiment_uid": "abc123",
             "active_skill": "pod-kill",
             "target": {"namespace": "default", "resource_type": "pod", "names": ["my-pod"]},
             "plan_path": "/tmp/plan.md",
@@ -341,7 +384,7 @@ class TestCompactMemoryWithModes:
         msgs = [MagicMock(content="test message")]
         state = {
             "skill_name": "pod-kill",
-            "blade_uid": "abc123",
+            "experiment_uid": "abc123",
         }
         result = await compact_memory(msgs, llm=None, state=state)
         assert "[Context preserved after compaction]" in result
@@ -442,13 +485,13 @@ class TestBuildPostCompactContextWithSkillContent:
 
     def test_full_context_with_skill_content(self):
         ctx = {
-            "active_blade_uid": "abc123",
+            "active_experiment_uid": "abc123",
             "active_skill": "pod-kill",
             "active_skill_content": "Kill the target pod",
             "target": {"namespace": "default", "resource_type": "pod", "names": ["my-pod"]},
         }
         result = build_post_compact_context_message(ctx)
-        assert "blade_uid" in result
+        assert "experiment_uid" in result
         assert "pod-kill" in result
         assert "Skill instructions" in result
         assert "Kill the target pod" in result

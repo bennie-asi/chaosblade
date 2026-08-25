@@ -11,7 +11,6 @@ from chaos_agent.skills.catalog_generator import (
     _dir_fingerprint,
     _generate_from_catalogue,
     _parse_llm_json,
-    build_direct_cmd,
     build_nl_cmd,
     generate_skill_catalog,
     infer_blade_params,
@@ -406,22 +405,6 @@ class TestBuildNlCmd:
         assert "目标为<name>" in cmd
 
 
-class TestBuildDirectCmd:
-    def test_node_scope(self):
-        cmd = build_direct_cmd({"scope": "node", "target": "cpu", "action": "fullload"})
-        assert "--scope node" in cmd
-        assert "--target cpu" in cmd
-        assert "--action fullload" in cmd
-        assert "<node-name>" in cmd
-        assert "--namespace" not in cmd
-
-    def test_pod_scope(self):
-        cmd = build_direct_cmd({"scope": "pod", "target": "network", "action": "drop"})
-        assert "--scope pod" in cmd
-        assert "--namespace <namespace>" in cmd
-        assert "-n <name>" in cmd
-
-
 class TestGenerateFromCatalogueIntegration:
     def test_node_category_no_namespace_in_nl(self, tmp_path):
         cat_dir = tmp_path / "Node_CPU使用率过高"
@@ -434,9 +417,6 @@ class TestGenerateFromCatalogueIntegration:
         uc = result[0]
         assert "命名空间" not in uc["example_cmd"]
         assert "<node-name>" in uc["example_cmd"]
-        assert uc["example_cmd_direct"] != ""
-        assert "--scope node" in uc["example_cmd_direct"]
-        assert "--namespace" not in uc["example_cmd_direct"]
 
     def test_pod_category_has_namespace_in_nl(self, tmp_path):
         cat_dir = tmp_path / "Pod_OOM内存异常"
@@ -449,10 +429,8 @@ class TestGenerateFromCatalogueIntegration:
         uc = result[0]
         assert "命名空间为<namespace>" in uc["example_cmd"]
         assert "目标为<name>" in uc["example_cmd"]
-        assert "--scope pod" in uc["example_cmd_direct"]
-        assert "--namespace <namespace>" in uc["example_cmd_direct"]
 
-    def test_symptom_category_no_direct_cmd(self, tmp_path):
+    def test_symptom_category(self, tmp_path):
         cat_dir = tmp_path / "Pod_Pending"
         cat_dir.mkdir()
         (cat_dir / "Pod_Pending_节点资源不足.md").write_text(
@@ -461,5 +439,4 @@ class TestGenerateFromCatalogueIntegration:
         result = _generate_from_catalogue(tmp_path, "test-skill")
         assert result and len(result) == 1
         uc = result[0]
-        assert uc["example_cmd_direct"] == ""
         assert "命名空间为<namespace>" in uc["example_cmd"]

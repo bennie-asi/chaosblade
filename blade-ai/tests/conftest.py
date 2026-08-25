@@ -179,12 +179,13 @@ def mock_run_command(mocker):
         side_effect=_mock_run,
     )
 
-    # Also patch the already-imported references in blade and kubectl modules.
+    # Also patch the already-imported references in the carrier CLI
+    # (providers/chaosblade/cli) and kubectl modules.
     # NOTE: ``import chaos_agent.tools.kubectl`` resolves to the @tool-decorated
     # function (same name as the module), not the module itself.  Use
     # ``sys.modules`` to get the real module object for patch.object().
     import sys
-    import chaos_agent.tools.blade as blade_mod
+    import chaos_agent.agent.providers.chaosblade.cli as blade_mod
     kubectl_mod = sys.modules["chaos_agent.tools.kubectl"]
 
     # Patch execute_via_transport in migrated modules — same mock object
@@ -215,7 +216,7 @@ def mock_run_command_fail(mocker):
     )
 
     import sys
-    import chaos_agent.tools.blade as blade_mod
+    import chaos_agent.agent.providers.chaosblade.cli as blade_mod
     kubectl_mod = sys.modules["chaos_agent.tools.kubectl"]
 
     # Patch execute_via_transport in migrated modules
@@ -241,7 +242,7 @@ def replace_fault_spec(state: dict, **field_updates) -> None:
     Example::
 
         replace_fault_spec(state, namespace="kube-system", names=("coredns",))
-        replace_fault_spec(state, scope="node", blade_target="cpu")
+        replace_fault_spec(state, scope="node", fault_target="cpu")
     """
     from chaos_agent.agent.spec.fault_spec import FaultSpec
     existing = FaultSpec.from_dict(state.get("fault_spec")) or FaultSpec()
@@ -269,7 +270,7 @@ def sample_agent_state():
         "safety_reason": None,
         "needs_confirmation": False,
         "plan": None,
-        "blade_uid": None,
+        "experiment_uid": None,
         "result": None,
         "error": None,
         "nl": None,

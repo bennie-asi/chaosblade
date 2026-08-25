@@ -3,7 +3,7 @@
 Three kubectl subcommand sets live in different modules on purpose, each a
 *distinct* policy:
 
-  - ``classifier.DESTRUCTIVE_KUBECTL_SUBS`` — the target-guard safety
+  - ``_k8s_classifier.DESTRUCTIVE_KUBECTL_SUBS`` — the target-guard safety
     classification (which verbs are destructive).
   - ``K8sNativeProvider.inject_kubectl_subcommands`` — the provider's
     injection-detection vocabulary (which verbs, run after blade_create, mark a
@@ -29,8 +29,8 @@ invariants must hold:
 These tests lock both relations without touching production logic.
 """
 
-from chaos_agent.agent.providers.k8s_native import K8sNativeProvider
-from chaos_agent.agent.target_guard.classifier import DESTRUCTIVE_KUBECTL_SUBS
+from chaos_agent.agent.providers.k8s_native.classifier import DESTRUCTIVE_KUBECTL_SUBS
+from chaos_agent.agent.providers.k8s_native.provider import K8sNativeProvider
 from chaos_agent.tools.guard import ToolGuard
 
 
@@ -40,7 +40,7 @@ def test_inject_subcommands_are_all_destructive():
     missing = inject - DESTRUCTIVE_KUBECTL_SUBS
     assert not missing, (
         "kubectl injection verbs not classified destructive by the guard: "
-        f"{sorted(missing)}. Add them to classifier.DESTRUCTIVE_KUBECTL_SUBS "
+        f"{sorted(missing)}. Add them to _k8s_classifier.DESTRUCTIVE_KUBECTL_SUBS "
         "so no injection carrier bypasses destructive classification."
     )
 

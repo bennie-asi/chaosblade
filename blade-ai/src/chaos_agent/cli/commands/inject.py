@@ -22,7 +22,6 @@ def inject_command(
     confirm: bool = typer.Option(False, "--confirm", help="Require confirmation"),
     labels: Optional[str] = typer.Option(None, "--labels", "-l", help="Custom labels"),
     input: Optional[str] = typer.Option(None, "--input", "-i", help="Natural language description"),
-    direct: bool = typer.Option(False, "--direct", help="Skip LLM, execute blade directly"),
     kubeconfig: Optional[str] = typer.Option(None, "--kubeconfig", help="Path to kubeconfig file"),
     context: Optional[str] = typer.Option(None, "--context", help="Kubeconfig context name"),
     force_override: bool = typer.Option(False, "--force-override", help="Force proceed when confirm_required (P1: same-action overlay)"),
@@ -69,21 +68,6 @@ def inject_command(
         _ns_hint = "" if _namespace_optional else ", --namespace"
         typer.echo(
             f"Error: Provide either --input/-i or all of --scope, --target, --action, "
-            f"(--target-name or --labels){_ns_hint}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    # Validate: --direct not compatible with --input
-    if direct and input:
-        typer.echo("Error: --direct is not compatible with --input/-i", err=True)
-        raise typer.Exit(code=1)
-
-    # Validate: --direct requires complete structured params
-    if direct and not has_structured:
-        _ns_hint = "" if _namespace_optional else ", --namespace"
-        typer.echo(
-            f"Error: --direct requires all of --scope, --target, --action, "
             f"(--target-name or --labels){_ns_hint}",
             err=True,
         )
@@ -139,7 +123,6 @@ def inject_command(
         "params_flags": params_flags or None,
         "confirm": confirm,
         "labels": labels_dict or None,
-        "direct": direct,
         "force_override": force_override,
     }
 

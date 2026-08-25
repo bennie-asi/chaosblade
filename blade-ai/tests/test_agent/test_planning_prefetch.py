@@ -28,7 +28,7 @@ def test_k8s_guided_prefetch_uses_namespace_scoped_resource_listing():
 
 def test_host_guided_prefetch_anchors_the_connected_host_identity():
     prefetch = build_guided_prefetch(
-        FaultSpec(scope="node", blade_target="cpu"), _context("host", "host_read"),
+        FaultSpec(scope="node", fault_target="cpu"), _context("host", "host_read"),
     )
 
     assert prefetch is not None
@@ -45,8 +45,8 @@ def test_complete_fault_spec_uses_expert_mode_when_no_mode_is_explicit():
         scope="pod",
         namespace="prod",
         names=("api-0",),
-        blade_target="cpu",
-        blade_action="fullload",
+        fault_target="cpu",
+        fault_action="fullload",
         duration_seconds=600,
     )
     state = build_inject_initial_state(task_id="task-1", fault_spec=spec)

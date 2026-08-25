@@ -213,7 +213,7 @@ class TestPvcClaimsRoundTrip:
     def test_claims_survive_freeze_and_hydration(self):
         spec = FaultSpec(
             scope="pod", namespace="prod", names=("app-0",),
-            blade_target="disk", blade_action="fill",
+            fault_target="disk", fault_action="fill",
         )
         frozen = freeze_approved_target_from_spec(
             spec, pvc_claims=("data-pvc",),
@@ -226,7 +226,7 @@ class TestPvcClaimsRoundTrip:
     def test_claims_default_empty(self):
         spec = FaultSpec(
             scope="pod", namespace="prod", names=("app-0",),
-            blade_target="cpu", blade_action="fullload",
+            fault_target="cpu", fault_action="fullload",
         )
         frozen = freeze_approved_target_from_spec(spec)
         assert frozen["pvc_claims"] == []
@@ -255,7 +255,7 @@ class TestScreenerLoopVehicleManifest:
         approved = freeze_approved_target(
             target={"namespace": "prod", "names": ["app-0"]},
             params={"scope": "pod"},
-            blade_scope="pod", blade_target="disk", blade_action="fill",
+            fault_scope="pod", fault_target="disk", fault_action="fill",
             pvc_claims=("data-pvc",),
         )
         delta = await tool_screener(self._state(approved))
@@ -275,7 +275,7 @@ class TestScreenerLoopVehicleManifest:
         approved = freeze_approved_target(
             target={"namespace": "prod", "names": ["app-0"]},
             params={"scope": "pod"},
-            blade_scope="pod", blade_target="cpu", blade_action="fullload",
+            fault_scope="pod", fault_target="cpu", fault_action="fullload",
         )  # no pvc_claims → no anchor → mechanism ban
         delta = await tool_screener(self._state(approved))
         assert delta["screener_route"] == SCREENER_ROUTE_RETRY
@@ -301,14 +301,14 @@ class TestDriftCorrectionPvcClaims:
         return {
             "fault_spec": {
                 "namespace": "ns", "scope": "pod", "names": ["pod-a"],
-                "labels": {}, "blade_target": "cpu", "blade_action": "fullload",
+                "labels": {}, "fault_target": "cpu", "fault_action": "fullload",
                 "params": {}, "params_flags": [], "duration_seconds": 0,
                 "source": "test", "user_description": "",
             },
             "approved_target": {
                 "scope": "pod", "namespace": "ns", "names": ["pod-a"],
                 "labels": {}, "is_namespace_wide": False,
-                "blade_target": "cpu", "blade_action": "fullload",
+                "fault_target": "cpu", "fault_action": "fullload",
                 "lock_fault_type": True,
                 "owner_names": ["deploy-a"],
                 "resolved_names": ["pod-a", "pod-b"],

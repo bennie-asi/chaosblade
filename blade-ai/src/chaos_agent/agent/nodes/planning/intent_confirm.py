@@ -27,6 +27,68 @@ from chaos_agent.observability.status_tracker import get_tracker, StatusCategory
 logger = logging.getLogger(__name__)
 
 
+async def _cancel_task_row(task_id: str) -> None:
+    """Reject-path terminal write: stamp the row ``cancelled`` AND clear
+    the pending-confirmation flag.
+
+    The flag drop matters as much as the stamp: the row still carries
+    ``needs_confirm=1`` from the clarification round, and inference would
+    otherwise re-classify it as ``waiting_input`` on the next field-less
+    flush — but no card is waiting, the user said no. The clear goes
+    through ``upsert`` on purpose: inference runs on the merged record,
+    the monotonicity guard keeps "cancelled", and the cleared flag keeps
+    later flushes from re-deriving waiting_input.
+
+    Best-effort: a store failure must never turn the user's decision
+    into a graph error.
+    """
+    if not (task_id and task_id.startswith("inject-")):
+        return
+    try:
+        from chaos_agent.persistence.task_store import get_task_store
+
+        store = await get_task_store()
+        if store is None:
+            return
+        await store.update_task_state(task_id, "cancelled")
+        await store.upsert(task_id, needs_confirm=0)
+    except Exception:
+        logger.debug("Failed to cancel task row: %s", task_id, exc_info=True)
+
+
+async def _revive_task_row(task_id: str) -> None:
+    """Approval-path revive of a previously-cancelled row.
+
+    Ids are reused across rejections, so an approval must un-cancel the
+    row — the monotonicity guard would otherwise pin "cancelled" for the
+    whole run. Deliberately conditional:
+
+    * row missing  → no-op: ``update_task_state`` on a missing row would
+      INSERT a bare ``injecting`` row (a fresh ghost — the row is born
+      naturally as pending/injecting with evidence on the first sync);
+    * ``cancelled`` / ``waiting_input`` → stamp ``injecting`` (a fresh
+      confirmation round parked the row at waiting_input — the approval
+      moves it into execution);
+    * any other state (terminal verdicts) → no-op: never clobber a
+      verdict.
+
+    Best-effort, same as the cancel write.
+    """
+    if not (task_id and task_id.startswith("inject-")):
+        return
+    try:
+        from chaos_agent.persistence.task_store import get_task_store
+
+        store = await get_task_store()
+        if store is None:
+            return
+        row = await store.get(task_id)
+        if row and row.get("task_state") in ("cancelled", "waiting_input"):
+            await store.update_task_state(task_id, "injecting")
+    except Exception:
+        logger.debug("Failed to revive task row: %s", task_id, exc_info=True)
+
+
 # Trim window: how many tail messages survive untouched on commit.
 # Picked to mirror the previous ``intent_clarification`` fast-path
 # behaviour (last 4) so post-commit Phase 1 LLM context size matches
@@ -161,6 +223,10 @@ async def intent_confirm(state: AgentState) -> dict:
         # persist list from scratch and only back-fills ToolMessages from history,
         # so an AIMessage another node left in state is never picked up.
         persist_node_dialogue(state.get("tui_session_id", ""), [refusal])
+        # Same terminal write as an explicit user rejection — the row
+        # may already carry fault_spec evidence (written during
+        # clarification), so it would otherwise project "injecting".
+        await _cancel_task_row(task_id)
         return {
             "confirmed_intent": None,
             "intent_reasoning": "fault intent is incomplete or uses an unsupported scope",
@@ -188,6 +254,9 @@ async def intent_confirm(state: AgentState) -> dict:
             )
             tracker.complete("Dry-Run: bypassed Layer-1 confirm")
         logger.info("intent_confirm bypassed for dry_run task %s", task_id)
+        # Dry-Run enters the pipeline too — same revive as approval (the
+        # id may carry a "cancelled" from an earlier rejection).
+        await _revive_task_row(task_id)
         # Dry-Run mirrors the approved path: ``/plan <NL>`` runs the
         # full inject pipeline as a preview, so the downstream
         # agent_loop / safety_check stages need the same clean
@@ -227,11 +296,11 @@ async def intent_confirm(state: AgentState) -> dict:
         batch_lines = [f"Batch fault injection: {len(batch_faults)} fault(s) (serial execution)"]
         for i, f in enumerate(batch_faults, 1):
             item_spec = read_fault_spec({"fault_spec": f}) if isinstance(f, dict) else None
-            if item_spec is not None and not item_spec.blade_target:
+            if item_spec is not None and not item_spec.fault_target:
                 item_spec = None
             scope = item_spec.scope if item_spec else f.get("scope", "")
-            target = item_spec.blade_target if item_spec else f.get("target", "")
-            action = item_spec.blade_action if item_spec else f.get("action", "")
+            target = item_spec.fault_target if item_spec else f.get("target", "")
+            action = item_spec.fault_action if item_spec else f.get("action", "")
             namespace = item_spec.namespace if item_spec else f.get("namespace", "")
             names = list(item_spec.names) if item_spec else f.get("names", [])
             duration = item_spec.duration_seconds if item_spec else f.get("duration_seconds", 0)
@@ -260,6 +329,10 @@ async def intent_confirm(state: AgentState) -> dict:
         if tracker:
             tracker.complete("User confirmed the intent, moving to the execution stage")
         logger.info("Intent confirmed by user: %s", fault_intent.get("fault_type"))
+        # Revive in case this id was cancelled by an earlier rejection on
+        # the same conversation (id reuse contract) — the monotonicity
+        # guard would otherwise pin "cancelled" for the whole run.
+        await _revive_task_row(task_id)
         # Option A handoff: the trim + bootstrap side effects used to
         # fire from ``intent_clarification`` the moment intent
         # converged, which meant the working messages list shrank even
@@ -283,6 +356,11 @@ async def intent_confirm(state: AgentState) -> dict:
         if tracker:
             tracker.complete("User rejected the intent, returning to conversation")
         logger.info("Intent rejected by user, returning to conversation")
+        # Terminal write for the TaskStore row: the id stays reserved for
+        # reuse, but its sqlite row must stop reporting "injecting".
+        # Direct column write; the monotonicity guard keeps later
+        # field-less flushes from regressing it.
+        await _cancel_task_row(task_id)
         # The reviewed FaultSpec remains available for the next turn. It is
         # replaced only by a new explicit proposal, never merged from prose.
         return {

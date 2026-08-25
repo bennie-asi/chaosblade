@@ -1,0 +1,84 @@
+# Golden 01 — complex inject path: vague network request → clarification
+# → user quantifies → LLM probes the cluster with kubectl BEFORE
+# submitting → submit_fault_intent bootstraps a complete spec through the
+# ToolNode re-entry fast path. This exercises the full ReAct loop the
+# production graph runs: node → ToolNode → node, including the rule that
+# executable fields may come ONLY from the structured submit (never from
+# prose or probe output).
+name: intent-network-delay-probe-submit
+description: 网络延迟多轮对话+kubectl探测+结构化提交全链路收敛
+surface: intent
+input:
+  # Real-model note: the production prompt forbids submitting on guessed
+  # targets (“探测通道未返回清单不能凭猜测提交”), so the real model asks
+  # for an explicit go-ahead after laying out the spec — the third turn.
+  # Turn 2 also answers the target question the real model inevitably
+  # raises (probe-less environments make it ask for pod names/labels);
+  # without it the model may submit a locator-less spec that the node
+  # correctly rejects (forensic: outputs/forensic_01.log, attempt 2).
+  # The mock script needs neither (its steps are pre-authored).
+  user_turns:
+    - "给 reg-center 的 zookeeper 加点网络延迟"
+    - "延迟 2000 毫秒，影响 30% 的流量，目标用 app=zookeeper 标签选"
+    - "确认，按这个方案执行"
+  eval_timeout_s: 420
+  llm_script:
+    # Turn 1 — the model must ask back: no percentage/duration given yet.
+    - text: "好的。请问延迟要多少毫秒？要影响全部流量还是部分流量？"
+    # Turn 2 — probe the target first (names unknown to the user).
+    - tool_calls:
+        - name: kubectl
+          args:
+            resource: pods
+            namespace: reg-center
+            labels: "app=zookeeper"
+    # Turn 2 (cont.) — submit ONLY after the probe returned concrete names.
+    - tool_calls:
+        - name: submit_fault_intent
+          args:
+            fault_type: pod-network-delay
+            scope: pod
+            target: network
+            action: delay
+            # fault_revision intentionally absent: revisions are server-owned
+            # and the replay gate compares execution fields only.
+            namespace: reg-center
+            names: ["zookeeper-0", "zookeeper-1", "zookeeper-2"]
+            params:
+              time: "2000"
+              percent: "30"
+            duration_seconds: 600
+            user_description: "reg-center zookeeper 网络延迟 2000ms/30%"
+  tool_responses:
+    kubectl:
+      - "NAME           READY   STATUS    RESTARTS   AGE\nzookeeper-0   1/1     Running   0          12d\nzookeeper-1   1/1     Running   0          12d\nzookeeper-2   1/1     Running   0          12d"
+  tool_ack: "Submitted fault intent for task planning."
+expected:
+  confirmed_intent: inject
+  # Structural contract shared by both modes. Note the mock overlay REPLACES
+  # fault_spec wholesale (shallow merge) — the mock block below repeats these
+  # keys plus the exact pins. The real side must NOT pin names: the model may
+  # legitimately target via labels instead of probed pod names.
+  fault_spec:
+    scope: pod
+    fault_target: network
+    fault_action: delay
+    namespace: reg-center
+expected_mock:
+  fault_spec:
+    scope: pod
+    fault_target: network
+    fault_action: delay
+    namespace: reg-center
+    names: ["zookeeper-0", "zookeeper-1", "zookeeper-2"]
+    params:
+      time: "2000"
+      percent: "30"
+  llm_calls: 3
+  tool_trace_contains: [kubectl, submit_fault_intent]
+expected_real:
+  # Confirmation adds one exchange: two turns of clarification + submit.
+  llm_calls_max: 10
+  clarification_round_max: 4
+  # The probe is model discretion; the structured submit is the contract.
+  tool_trace_contains: [submit_fault_intent]

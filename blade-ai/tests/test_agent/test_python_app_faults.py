@@ -8,13 +8,13 @@ Covers the four seams a new fault domain must land in:
     in-process injection as cross-profile drift)
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from chaos_agent.agent.providers import FaultProviderRegistry
-from chaos_agent.agent.providers.chaosblade_python import ChaosbladePythonProvider
+from chaos_agent.agent.providers.chaosblade.python_provider import ChaosbladePythonProvider
 from chaos_agent.agent.spec.fault_registry import (
     carrier_actions,
     carrier_targets,
@@ -41,10 +41,18 @@ class TestVocabularyAndFamily:
         from chaos_agent.agent.spec.fault_spec import INTENT_ACTIONS, INTENT_TARGETS
 
         assert carrier_targets("chaosblade_python") == (
-            "redis", "mysql", "http", "httpx", "grpc", "kafka", "sqlalchemy",
+            "redis",
+            "mysql",
+            "http",
+            "httpx",
+            "grpc",
+            "kafka",
+            "sqlalchemy",
         )
         assert carrier_actions("chaosblade_python") == (
-            "delay", "throwCustomException", "returnValue",
+            "delay",
+            "throwCustomException",
+            "returnValue",
         )
         for target in carrier_targets("chaosblade_python"):
             assert target in INTENT_TARGETS
@@ -74,20 +82,37 @@ class TestVocabularyAndFamily:
 def _python_inject_msgs(uid: str = "a" * 16, *, destroyed: bool = False):
     """AIMessage + ToolMessage pair attesting a blade_python_create injection."""
     msgs = [
-        AIMessage(content="", tool_calls=[{
-            "name": "blade_python_create", "id": "c0", "type": "tool_call",
-            "args": {"target": "redis", "action": "delay"},
-        }]),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "blade_python_create",
+                    "id": "c0",
+                    "type": "tool_call",
+                    "args": {"target": "redis", "action": "delay"},
+                }
+            ],
+        ),
         ToolMessage(
             content='{"code":200,"success":true,"result":"%s"}' % uid,
-            name="blade_python_create", tool_call_id="c0",
+            name="blade_python_create",
+            tool_call_id="c0",
         ),
     ]
     if destroyed:
-        msgs.append(AIMessage(content="", tool_calls=[{
-            "name": "blade_destroy", "id": "d0", "type": "tool_call",
-            "args": {"uid": uid},
-        }]))
+        msgs.append(
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "blade_destroy",
+                        "id": "d0",
+                        "type": "tool_call",
+                        "args": {"uid": uid},
+                    }
+                ],
+            )
+        )
     return msgs
 
 
@@ -100,9 +125,10 @@ class TestProviderContract:
         assert FaultProviderRegistry.resolve_by_method("python_agent").carrier == (
             "chaosblade_python"
         )
-        assert FaultProviderRegistry.resolve_primary_by_scope(
-            PYTHON_SCOPE
-        ).carrier == "chaosblade_python"
+        assert (
+            FaultProviderRegistry.resolve_primary_by_scope(PYTHON_SCOPE).carrier
+            == "chaosblade_python"
+        )
 
     def test_only_host_channel(self):
         p = ChaosbladePythonProvider()
@@ -112,32 +138,36 @@ class TestProviderContract:
     def test_detects_own_injection(self):
         p = ChaosbladePythonProvider()
         msgs = _python_inject_msgs()
-        assert p.detect(msgs, None, is_host=True) == "python_agent"
-        assert p.injection_recency(msgs, None, is_host=True) >= 0
+        assert p.detect(msgs, is_host=True) == "python_agent"
+        assert p.injection_recency(msgs, is_host=True) >= 0
 
     def test_destroyed_uid_not_reclaimed(self):
         p = ChaosbladePythonProvider()
         msgs = _python_inject_msgs(destroyed=True)
-        assert p.detect(msgs, None, is_host=True) is None
+        assert p.detect(msgs, is_host=True) is None
 
     def test_chaosblade_os_carrier_does_not_claim_python_injection(self):
         """The isolation that makes a separate tool necessary: the OS carrier
         scans only blade_create / kubectl ToolMessages, so it must NOT attribute
         a Python-agent experiment to itself (which would route recovery to the
         wrong backend)."""
-        from chaos_agent.agent.providers.chaosblade import ChaosbladeProvider
+        from chaos_agent.agent.providers.chaosblade.provider import ChaosbladeProvider
 
         msgs = _python_inject_msgs()
-        assert ChaosbladeProvider().detect(msgs, None, is_host=True) is None
-        assert FaultProviderRegistry.detect_method(
-            msgs, None, is_host=True,
-        ) == "python_agent"
+        assert ChaosbladeProvider().detect(msgs, is_host=True) is None
+        assert (
+            FaultProviderRegistry.detect_method(
+                msgs,
+                is_host=True,
+            )
+            == "python_agent"
+        )
 
     def test_execute_phase_binds_injection_surface(self):
         names = [t.name for t in ChaosbladePythonProvider().tools("execute")]
         assert "blade_python_create" in names
-        assert "blade_destroy" in names          # ReAct cleanup
-        assert "blade_create" not in names       # not this domain's tool
+        assert "blade_destroy" in names  # ReAct cleanup
+        assert "blade_create" not in names  # not this domain's tool
 
     def test_plan_phase_has_no_injection_tool(self):
         names = [t.name for t in ChaosbladePythonProvider().tools("plan")]
@@ -155,7 +185,7 @@ class TestProviderContract:
 class TestInjectionToolCommand:
     async def _run(self, **kwargs) -> tuple[str, list[str], bool]:
         """Invoke the tool with the transport mocked; return (out, argv, bypass)."""
-        from chaos_agent.tools.blade_python import blade_python_create
+        from chaos_agent.agent.providers.chaosblade.cli_python import blade_python_create
 
         captured: dict = {}
 
@@ -164,11 +194,13 @@ class TestInjectionToolCommand:
             captured["bypass"] = kw.get("bypass_channel")
             return CommandResult(
                 stdout='{"code":200,"success":true,"result":"%s"}' % ("b" * 16),
-                stderr="", exit_code=0,
+                stderr="",
+                exit_code=0,
             )
 
         with patch(
-            "chaos_agent.tools.blade_python.execute_via_transport", new=AsyncMock(side_effect=_fake)
+            "chaos_agent.agent.providers.chaosblade.cli_python.execute_via_transport",
+            new=AsyncMock(side_effect=_fake),
         ):
             out = await blade_python_create.ainvoke(kwargs)
         return out, captured["cmd"], captured["bypass"]
@@ -176,11 +208,16 @@ class TestInjectionToolCommand:
     @pytest.mark.asyncio
     async def test_redis_delay_command_shape(self):
         out, argv, bypass = await self._run(
-            target="redis", action="delay", cmd="GET", flags="--time 500",
+            target="redis",
+            action="delay",
+            cmd="GET",
+            flags="--time 500",
         )
         assert argv[1:5] == ["create", "python", "redis", "delay"]
-        assert ["--cmd", "GET"] == argv[argv.index("--cmd"):argv.index("--cmd") + 2]
-        assert ["--time", "500"] == argv[argv.index("--time"):argv.index("--time") + 2]
+        assert ["--cmd", "GET"] == argv[argv.index("--cmd") : argv.index("--cmd") + 2]
+        assert ["--time", "500"] == argv[
+            argv.index("--time") : argv.index("--time") + 2
+        ]
         # Runs on the host that hosts the application (never wiz-bypassed).
         assert bypass is False
         # Duration guarantee applies to this path too.
@@ -192,12 +229,15 @@ class TestInjectionToolCommand:
         """A Redis matcher passed to a MySQL fault must not reach the CLI as an
         unknown flag."""
         _out, argv, _bypass = await self._run(
-            target="mysql", action="delay", cmd="GET", sqltype="select",
+            target="mysql",
+            action="delay",
+            cmd="GET",
+            sqltype="select",
             flags="--time 100",
         )
         assert "--cmd" not in argv
         assert ["--sqltype", "select"] == argv[
-            argv.index("--sqltype"):argv.index("--sqltype") + 2
+            argv.index("--sqltype") : argv.index("--sqltype") + 2
         ]
 
     @pytest.mark.asyncio
@@ -212,19 +252,20 @@ class TestInjectionToolCommand:
         prepare command firstly"), which made the test pass while the production
         match never fired against the real CLI.
         """
-        from chaos_agent.tools.blade_python import blade_python_create
+        from chaos_agent.agent.providers.chaosblade.cli_python import blade_python_create
 
         async def _fake(cmd, target, **kw):
             return CommandResult(
                 stdout='{"code":47000,"success":false,"error":"invalid `port` '
-                       'parameter value: ``. no running python preparation '
-                       'record found"}',
+                "parameter value: ``. no running python preparation "
+                'record found"}',
                 stderr="",
                 exit_code=1,
             )
 
         with patch(
-            "chaos_agent.tools.blade_python.execute_via_transport", new=AsyncMock(side_effect=_fake)
+            "chaos_agent.agent.providers.chaosblade.cli_python.execute_via_transport",
+            new=AsyncMock(side_effect=_fake),
         ):
             out = await blade_python_create.ainvoke(
                 {"target": "redis", "action": "delay", "flags": "--time 500"}
@@ -244,20 +285,21 @@ class TestInjectionToolCommand:
         PYTHONPATH. This is a different remedy from a missing record, so the two
         must not collapse into one message.
         """
-        from chaos_agent.tools.blade_python import blade_python_create
+        from chaos_agent.agent.providers.chaosblade.cli_python import blade_python_create
 
         async def _fake(cmd, target, **kw):
             return CommandResult(
                 stdout='{"code":63064,"success":false,"error":"`http://127.0.0.1'
-                       ':9535/create?target=redis`: http cmd failed, err: Get '
-                       '\\"http://127.0.0.1:9535/create\\": dial tcp '
-                       '127.0.0.1:9535: connect: connection refused"}',
+                ":9535/create?target=redis`: http cmd failed, err: Get "
+                '\\"http://127.0.0.1:9535/create\\": dial tcp '
+                '127.0.0.1:9535: connect: connection refused"}',
                 stderr="",
                 exit_code=1,
             )
 
         with patch(
-            "chaos_agent.tools.blade_python.execute_via_transport", new=AsyncMock(side_effect=_fake)
+            "chaos_agent.agent.providers.chaosblade.cli_python.execute_via_transport",
+            new=AsyncMock(side_effect=_fake),
         ):
             out = await blade_python_create.ainvoke(
                 {"target": "redis", "action": "delay", "flags": "--time 500"}
@@ -328,19 +370,22 @@ class TestInjectionToolCommand:
         ctx = build_capability_context(state, "execute", tools)
         visible = {t.name for t in filter_tools_for_context(tools, ctx)}
         assert "kubectl" in visible
-        assert not {"blade_python_create", "blade_python_prepare",
-                    "blade_python_revoke"} & visible
+        assert (
+            not {"blade_python_create", "blade_python_prepare", "blade_python_revoke"}
+            & visible
+        )
         # And the screener-side fail-closed check agrees (restored checkpoints).
         assert not is_tool_name_allowed_for_context(
-            "blade_python_create", state, "execute",
+            "blade_python_create",
+            state,
+            "execute",
         )
-
 
     @pytest.mark.asyncio
     async def test_registered_but_failed_experiment_surfaces_uid_for_cleanup(self):
         """A failed create whose experiment WAS registered must name its uid.
 
-        Project policy (``utils.blade_uid``) deliberately refuses to extract a
+        Project policy (``providers.chaosblade.verify``) deliberately refuses to extract a
         ``code=54000 success=false`` uid, so such an experiment never becomes
         ``state['blade_uid']`` — attributing a failed injection would mislead the
         verifier. The k8s path takes the same stance, so this backend must not
@@ -349,8 +394,8 @@ class TestInjectionToolCommand:
         it up. Locking that here keeps the only cleanup handle from silently
         disappearing.
         """
-        from chaos_agent.tools.blade_python import blade_python_create
-        from chaos_agent.utils.blade_uid import extract_blade_uid
+        from chaos_agent.agent.providers.chaosblade.cli_python import blade_python_create
+        from chaos_agent.agent.providers.chaosblade.verify import extract_experiment_uid
 
         uid = "b" * 16
         raw = '{"code":54000,"success":false,"result":"%s"}' % uid
@@ -359,16 +404,16 @@ class TestInjectionToolCommand:
             return CommandResult(stdout=raw, stderr="", exit_code=1)
 
         with patch(
-            "chaos_agent.tools.blade_python.execute_via_transport",
+            "chaos_agent.agent.providers.chaosblade.cli_python.execute_via_transport",
             new=AsyncMock(side_effect=_fake),
         ):
             out = await blade_python_create.ainvoke(
                 {"target": "redis", "action": "delay", "flags": "--time 500"}
             )
 
-        assert uid in out                      # cleanup handle preserved
-        assert "blade_destroy" in out          # and the exact remedy named
-        assert extract_blade_uid(out) is None  # but NOT promoted to state
+        assert uid in out  # cleanup handle preserved
+        assert "blade_destroy" in out  # and the exact remedy named
+        assert extract_experiment_uid(out) is None  # but NOT promoted to state
 
 
 class TestPreconditionTools:
@@ -387,18 +432,19 @@ class TestPreconditionTools:
                 # must be FREE, because prepare's hook starts an agent there.
                 return CommandResult(
                     stdout='{"code":47000,"success":false,"error":"invalid `port` '
-                           'parameter value: `9526`. the port has been used by '
-                           'other program"}',
+                    "parameter value: `9526`. the port has been used by "
+                    'other program"}',
                     stderr="",
                     exit_code=exit_code,
                 )
             return CommandResult(
                 stdout='{"code":200,"success":true,"result":"p1"}',
-                stderr="", exit_code=0,
+                stderr="",
+                exit_code=0,
             )
 
         with patch(
-            "chaos_agent.tools.blade_python.execute_via_transport",
+            "chaos_agent.agent.providers.chaosblade.cli_python.execute_via_transport",
             new=AsyncMock(side_effect=_fake),
         ):
             out = await tool.ainvoke(args)
@@ -412,7 +458,7 @@ class TestPreconditionTools:
         it fails with ``required flag(s) "target-script" not set``. An earlier
         version of this test asserted the opposite (that the flag be omitted).
         """
-        from chaos_agent.tools.blade_python import blade_python_prepare
+        from chaos_agent.agent.providers.chaosblade.cli_python import blade_python_prepare
 
         out, cap = await self._run(
             blade_python_prepare,
@@ -425,14 +471,16 @@ class TestPreconditionTools:
         assert cap["argv"][1:3] == ["prepare", "python"]
         assert cap["argv"][cap["argv"].index("--port") + 1] == "9527"
         assert "--python-path" in cap["argv"]
-        assert cap["argv"][cap["argv"].index("--target-script") + 1] == "/srv/app/main.py"
+        assert (
+            cap["argv"][cap["argv"].index("--target-script") + 1] == "/srv/app/main.py"
+        )
         assert cap["bypass"] is False
         assert "p1" in out
 
     @pytest.mark.asyncio
     async def test_prepare_rejects_empty_target_script_before_executing(self):
         """Fail with an actionable message instead of letting the CLI reject it."""
-        from chaos_agent.tools.blade_python import blade_python_prepare
+        from chaos_agent.agent.providers.chaosblade.cli_python import blade_python_prepare
 
         called = False
 
@@ -442,7 +490,7 @@ class TestPreconditionTools:
             return CommandResult(stdout="", stderr="", exit_code=0)
 
         with patch(
-            "chaos_agent.tools.blade_python.execute_via_transport",
+            "chaos_agent.agent.providers.chaosblade.cli_python.execute_via_transport",
             new=AsyncMock(side_effect=_fake),
         ):
             out = await blade_python_prepare.ainvoke({"target_script": "  "})
@@ -451,14 +499,14 @@ class TestPreconditionTools:
 
     @pytest.mark.asyncio
     async def test_revoke_command_shape(self):
-        from chaos_agent.tools.blade_python import blade_python_revoke
+        from chaos_agent.agent.providers.chaosblade.cli_python import blade_python_revoke
 
         _out, cap = await self._run(blade_python_revoke, {"uid": "p1"})
         assert cap["argv"][1:] == ["revoke", "p1"]
 
     @pytest.mark.asyncio
     async def test_failures_are_surfaced_as_errors(self):
-        from chaos_agent.tools.blade_python import (
+        from chaos_agent.agent.providers.chaosblade.cli_python import (
             blade_python_prepare,
             blade_python_revoke,
         )
@@ -483,21 +531,20 @@ class TestTargetGuardClassification:
             {"target": "redis", "action": "delay", "cmd": "GET"},
         )
         assert et.scope == PYTHON_SCOPE
-        assert et.blade_target == "redis"
+        assert et.fault_target == "redis"
         assert et.confidence == ConfidenceLevel.HIGH
 
     def test_not_misresolved_to_pod_scope(self):
         """``BLADE_TARGET_TO_SCOPE`` maps redis→pod; going through
         ``_classify_blade_create`` would therefore make every in-process
         injection look like a cross-profile drift."""
-        from chaos_agent.agent.target_guard.classifier import (
-            BLADE_TARGET_TO_SCOPE,
-            infer_effective_target,
-        )
+        from chaos_agent.agent.providers.chaosblade.provider import BLADE_TARGET_TO_SCOPE
+        from chaos_agent.agent.target_guard.classifier import infer_effective_target
 
         assert BLADE_TARGET_TO_SCOPE["redis"] == "pod"  # the trap being avoided
         et = infer_effective_target(
-            "blade_python_create", {"target": "redis", "action": "delay"},
+            "blade_python_create",
+            {"target": "redis", "action": "delay"},
         )
         assert et.scope != "pod"
 
@@ -507,11 +554,15 @@ class TestTargetGuardClassification:
         from chaos_agent.agent.target_guard.types import ApprovedTarget, GuardVerdict
 
         approved = ApprovedTarget(
-            scope=PYTHON_SCOPE, namespace="",
-            blade_target="redis", blade_action="delay", lock_fault_type=True,
+            scope=PYTHON_SCOPE,
+            namespace="",
+            fault_target="redis",
+            fault_action="delay",
+            lock_fault_type=True,
         )
         et = infer_effective_target(
-            "blade_python_create", {"target": "redis", "action": "delay"},
+            "blade_python_create",
+            {"target": "redis", "action": "delay"},
         )
         assert target_drift_guard(et, approved).verdict == GuardVerdict.ALLOW
 
@@ -521,11 +572,15 @@ class TestTargetGuardClassification:
         from chaos_agent.agent.target_guard.types import ApprovedTarget, GuardVerdict
 
         approved = ApprovedTarget(
-            scope=PYTHON_SCOPE, namespace="",
-            blade_target="redis", blade_action="delay", lock_fault_type=True,
+            scope=PYTHON_SCOPE,
+            namespace="",
+            fault_target="redis",
+            fault_action="delay",
+            lock_fault_type=True,
         )
         et = infer_effective_target(
-            "blade_python_create", {"target": "mysql", "action": "delay"},
+            "blade_python_create",
+            {"target": "mysql", "action": "delay"},
         )
         assert target_drift_guard(et, approved).verdict == GuardVerdict.REJECT_DRIFT
 
@@ -541,158 +596,13 @@ class TestTargetGuardClassification:
         assert infer_effective_target(tool, {"port": 9526}).scope == SCOPE_READONLY
 
 
-# Minimal host-addressing channel: python-scope faults are host-profile, so a
-# k8s channel is refused by the capability gate before any injection runs.
-_HOST_CHANNEL_STATE = {
-    "kube_connection_mode": "kubewiz_host",
-    "host_name": "app-host-1",
-    "kubewiz_profile": "p1",
-}
-
-
-class TestDirectExecuteRouting:
-    """``direct_execute`` must route a python-scope spec to the in-process tool.
-
-    Before this domain existed the node called ``blade_create`` unconditionally
-    and, on a missing UID, fell back to ``kubectl exec`` into a cluster tool pod.
-    Both are wrong for an in-process fault, so the routing is asserted directly.
-    """
-
-    @pytest.mark.asyncio
-    async def test_python_scope_uses_python_tool_and_no_fallback(self):
-        from chaos_agent.agent.nodes.execute import direct_execute as de
-        from chaos_agent.agent.spec.fault_spec import FaultSpec
-
-        spec = FaultSpec(
-            scope=PYTHON_SCOPE, blade_target="redis", blade_action="delay",
-            params={"time": "500", "cmd": "GET"},
-        )
-        state = {
-            "fault_spec": spec.to_dict(), "task_id": "t-py-1", "messages": [],
-            # direct_execute now applies the capability gate (see the
-            # _HOST_CHANNEL_STATE note above).
-            **_HOST_CHANNEL_STATE,
-        }
-
-        py_tool = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
-        py_tool.ainvoke = AsyncMock(
-            return_value='{"code":200,"success":true,"result":"%s"}' % ("c" * 16)
-        )
-        blade_create_mock = __import__(
-            "unittest.mock", fromlist=["MagicMock"]
-        ).MagicMock()
-        blade_create_mock.ainvoke = AsyncMock(return_value="should-not-be-called")
-
-        with patch("chaos_agent.tools.blade_python.blade_python_create", py_tool), \
-             patch.object(de, "blade_create", blade_create_mock), \
-             patch.object(de, "get_tracker"), \
-             patch.object(de, "get_global_session_store"), \
-             patch.object(de, "sync_node_status_to_session"), \
-             patch.object(de, "sync_to_store", new=AsyncMock()), \
-             patch.object(de, "_try_kubectl_exec_fallback", new=AsyncMock()) as fb:
-            result = await de.direct_execute(state)
-
-        assert result["injection_method"] == "python_agent"
-        assert result["blade_uid"] == "c" * 16
-        py_tool.ainvoke.assert_awaited_once()
-        # The k8s tool and its cluster fallback must stay untouched.
-        blade_create_mock.ainvoke.assert_not_awaited()
-        fb.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_matchers_split_from_action_flags(self):
-        """``params`` carry both matchers and action flags; the matcher keys must
-        be forwarded as tool arguments, not folded into the flag string."""
-        from chaos_agent.agent.nodes.execute import direct_execute as de
-        from chaos_agent.agent.spec.fault_spec import FaultSpec
-
-        spec = FaultSpec(
-            scope=PYTHON_SCOPE, blade_target="redis", blade_action="delay",
-            params={"time": "500", "cmd": "GET", "key": "user:1"},
-        )
-        state = {
-            "fault_spec": spec.to_dict(), "task_id": "t-py-2", "messages": [],
-            # direct_execute now applies the capability gate (see the
-            # _HOST_CHANNEL_STATE note above).
-            **_HOST_CHANNEL_STATE,
-        }
-
-        py_tool = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
-        py_tool.ainvoke = AsyncMock(
-            return_value='{"code":200,"success":true,"result":"%s"}' % ("d" * 16)
-        )
-        with patch("chaos_agent.tools.blade_python.blade_python_create", py_tool), \
-             patch.object(de, "get_tracker"), \
-             patch.object(de, "get_global_session_store"), \
-             patch.object(de, "sync_node_status_to_session"), \
-             patch.object(de, "sync_to_store", new=AsyncMock()):
-            await de.direct_execute(state)
-
-        kwargs = py_tool.ainvoke.await_args.args[0]
-        assert kwargs["cmd"] == "GET"
-        assert kwargs["key"] == "user:1"
-        assert "--time 500" in kwargs["flags"]
-        assert "--cmd" not in kwargs["flags"]
-
-    @pytest.mark.asyncio
-    async def test_flag_value_with_spaces_survives_to_argv(self):
-        """Regression: the flag string is re-split with ``shlex`` by the tool, so an
-        unquoted value containing spaces was torn into several argv items —
-        truncating ``--exception-message`` and leaving stray positional args. This
-        is the normal shape for this fault domain, so it is asserted end-to-end
-        down to the actual command."""
-        from chaos_agent.agent.nodes.execute import direct_execute as de
-        from chaos_agent.agent.spec.fault_spec import FaultSpec
-
-        message = "chaos drill: mysql unavailable"
-        spec = FaultSpec(
-            scope=PYTHON_SCOPE, blade_target="mysql",
-            blade_action="throwCustomException",
-            params={
-                "exception": "ConnectionError",
-                "exception-message": message,
-                "sqltype": "select",
-            },
-        )
-        state = {
-            "fault_spec": spec.to_dict(), "task_id": "t-py-3", "messages": [],
-            # direct_execute now applies the capability gate (see the
-            # _HOST_CHANNEL_STATE note above).
-            **_HOST_CHANNEL_STATE,
-        }
-
-        captured: dict = {}
-
-        async def _fake(cmd, target, **kw):
-            captured["argv"] = cmd
-            return CommandResult(
-                stdout='{"code":200,"success":true,"result":"%s"}' % ("a" * 16),
-                stderr="", exit_code=0,
-            )
-
-        with patch(
-            "chaos_agent.tools.blade_python.execute_via_transport",
-            new=AsyncMock(side_effect=_fake),
-        ), patch.object(de, "get_tracker"), \
-             patch.object(de, "get_global_session_store"), \
-             patch.object(de, "sync_node_status_to_session"), \
-             patch.object(de, "sync_to_store", new=AsyncMock()):
-            await de.direct_execute(state)
-
-        argv = captured["argv"]
-        # The whole message must be ONE argv element, not four.
-        assert argv[argv.index("--exception-message") + 1] == message
-        # And the matcher must still be forwarded as its own flag.
-        assert argv[argv.index("--sqltype") + 1] == "select"
-
-
 class TestReActPathWiring:
     """The ReAct (LLM) path must attribute AND capture the uid for this carrier.
 
-    Direct mode parses the uid itself, so these two seams are the only thing
-    standing between an LLM-issued in-process injection and a recoverable task:
-    without them ``blade_uid`` stays empty and both verification Layer 1 and
-    recovery have no uid to act on.
+    These two seams are the only thing standing between an LLM-issued
+    in-process injection and a recoverable task: without them ``blade_uid``
+    stays empty and both verification Layer 1 and recovery have no uid to
+    act on.
     """
 
     def test_issue_time_method_classification(self):
@@ -700,28 +610,35 @@ class TestReActPathWiring:
             classify_issue_time_method,
         )
 
-        assert classify_issue_time_method(
-            "blade_python_create", {"target": "redis", "action": "delay"},
-            is_host=True,
-        ) == "python_agent"
+        assert (
+            classify_issue_time_method(
+                "blade_python_create",
+                {"target": "redis", "action": "delay"},
+                is_host=True,
+            )
+            == "python_agent"
+        )
 
     def test_uid_extracted_from_python_tool_message(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import (
-            _extract_blade_uid_from_messages,
+        # Phase-4 T2 canonical address (kept under the historical call name).
+        from chaos_agent.agent.providers.chaosblade.verify import (
+            extract_experiment_uid_from_messages as _extract_blade_uid_from_messages,
         )
 
         uid = "e" * 16
         assert _extract_blade_uid_from_messages(_python_inject_msgs(uid)) == uid
 
     def test_destroyed_uid_not_returned(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import (
-            _extract_blade_uid_from_messages,
+        # Phase-4 T2 canonical address (kept under the historical call name).
+        from chaos_agent.agent.providers.chaosblade.verify import (
+            extract_experiment_uid_from_messages as _extract_blade_uid_from_messages,
         )
 
         uid = "f" * 16
-        assert _extract_blade_uid_from_messages(
-            _python_inject_msgs(uid, destroyed=True)
-        ) != uid
+        assert (
+            _extract_blade_uid_from_messages(_python_inject_msgs(uid, destroyed=True))
+            != uid
+        )
 
 
 class TestCatalogExampleCommands:
@@ -772,12 +689,14 @@ class TestVerifyAndRecoverBodies:
         from chaos_agent.agent.result.verdict import Layer1Result
 
         with patch(
-            "chaos_agent.agent.nodes.verify._verifier_layer1._run_host_blade_layer1",
+            "chaos_agent.agent.providers.chaosblade.verify._run_host_blade_layer1",
             new=AsyncMock(return_value=Layer1Result(status="passed", details="ok")),
         ) as helper:
             result = await ChaosbladePythonProvider().layer1_verify(
                 {"messages": ["m"]},
-                blade_uid="uid-1", kubeconfig="kc", task_id="t",
+                experiment_uid="uid-1",
+                kubeconfig="kc",
+                task_id="t",
             )
 
         assert result.status.value == "passed"
@@ -796,26 +715,33 @@ class TestVerifyAndRecoverBodies:
             def is_passed(self):
                 return passed
 
-            def model_dump(self):
+            def model_dump(self, mode="python"):
+                # Signature aligns with the real pydantic Layer1Result: the
+                # storage-shape helper calls model_dump(mode="json") since
+                # phase-5 (str-Enum status rendered as plain string).
                 return {"status": self.status}
 
         return _R()
 
     @pytest.mark.asyncio
     async def test_recover_success_maps_to_recovered(self):
-        from chaos_agent.agent.nodes.recover import _recover_layer1 as rl
+        from chaos_agent.agent.providers.chaosblade import recover as cr
 
         with patch.object(
-            rl, "_run_recover_layer1",
+            cr,
+            "run_layer1_destroy",
             new=AsyncMock(return_value=self._layer1_stub(True)),
         ) as helper:
             res = await ChaosbladePythonProvider().recover(
-                {}, None, blade_uid="uid-1", kubeconfig="", messages=[],
+                {},
+                {"kind": "blade_uid", "value": "uid-1"},
+                kubeconfig="",
+                messages=[],
             )
 
         assert res.recovered is True
         assert res.level == "recovered"
-        assert res.blade_uid == "uid-1"
+        assert res.experiment_uid == "uid-1"
         assert res.failure is None
         # Layer 2 is skipped without an LLM, and that must be stated.
         assert res.layer2["status"] == "skipped"
@@ -824,15 +750,19 @@ class TestVerifyAndRecoverBodies:
 
     @pytest.mark.asyncio
     async def test_recover_failure_maps_to_failure_category(self):
-        from chaos_agent.agent.nodes.recover import _recover_layer1 as rl
+        from chaos_agent.agent.providers.chaosblade import recover as cr
         from chaos_agent.agent.result.verdict import FailureCategory
 
         with patch.object(
-            rl, "_run_recover_layer1",
+            cr,
+            "run_layer1_destroy",
             new=AsyncMock(return_value=self._layer1_stub(False)),
         ):
             res = await ChaosbladePythonProvider().recover(
-                {}, None, blade_uid="uid-1", kubeconfig="", messages=[],
+                {},
+                {"kind": "blade_uid", "value": "uid-1"},
+                kubeconfig="",
+                messages=[],
             )
 
         assert res.recovered is False
@@ -843,7 +773,10 @@ class TestVerifyAndRecoverBodies:
     def test_recover_layer2_context_is_application_oriented(self):
         layer1 = self._layer1_stub(True)
         ctx, instruction = ChaosbladePythonProvider().recover_layer2_context(
-            {}, layer1, is_deterministic=True, blade_uid="uid-1",
+            {},
+            layer1,
+            is_deterministic=True,
+            experiment_uid="uid-1",
             is_host_scope=True,
         )
         assert "uid-1" in ctx
@@ -951,7 +884,10 @@ class TestStateAndSkills:
 
         catalogue = (
             Path(__file__).resolve().parents[2]
-            / "skills" / "python-app-chaos-skills" / "references" / "catalogue"
+            / "skills"
+            / "python-app-chaos-skills"
+            / "references"
+            / "catalogue"
         )
         if not catalogue.exists():
             pytest.skip("python skill pack not present in this checkout")
@@ -978,8 +914,7 @@ class TestStateAndSkills:
         from chaos_agent.tools.guard import ToolGuard
 
         skill_dir = (
-            Path(__file__).resolve().parents[2]
-            / "skills" / "python-app-chaos-skills"
+            Path(__file__).resolve().parents[2] / "skills" / "python-app-chaos-skills"
         )
         if not skill_dir.exists():
             pytest.skip("python skill pack not present in this checkout")
@@ -988,7 +923,11 @@ class TestStateAndSkills:
         # Lines starting with these are documentation of operator-side setup or
         # of the agent's own CLI, not commands the drill agent executes.
         _OPERATOR_SIDE = {
-            "blade-ai", "python", "pip", "export", "chaosblade-exec-python",
+            "blade-ai",
+            "python",
+            "pip",
+            "export",
+            "chaosblade-exec-python",
         }
         offenders: list[tuple[str, str]] = []
         for md in skill_dir.rglob("*.md"):
@@ -1002,69 +941,5 @@ class TestStateAndSkills:
                     offenders.append((md.name, stripped[:80]))
 
         assert not offenders, (
-            "skill pack documents commands the ToolGuard will reject: "
-            f"{offenders}"
+            f"skill pack documents commands the ToolGuard will reject: {offenders}"
         )
-
-
-class TestDirectModeCapabilityGate:
-    """``--direct`` must enforce the same profile rule as the LLM path.
-
-    Before this change ``direct_execute`` contained zero calls into
-    ``capabilities``, so a fault domain incompatible with the configured
-    transport reached execution unchecked. The documented direct-only escape
-    (co-located ``kubeconfig`` + host-profile fault) is intentionally gone:
-    a silent cross-profile execution returns data from the wrong machine
-    (task-46317228), which is worse than refusing.
-    """
-
-    @pytest.mark.asyncio
-    async def test_host_profile_fault_on_k8s_channel_is_refused(self):
-        from chaos_agent.agent.nodes.execute import direct_execute as de
-        from chaos_agent.agent.spec.fault_spec import FaultSpec
-
-        spec = FaultSpec(scope=PYTHON_SCOPE, blade_target="redis", blade_action="delay")
-        state = {
-            "fault_spec": spec.to_dict(), "task_id": "t-gate-1", "messages": [],
-            "kube_connection_mode": "kubewiz_k8s",
-            "kubewiz_cluster_uuid": "uuid-1", "kubewiz_profile": "p1",
-        }
-
-        py_tool = MagicMock()
-        py_tool.ainvoke = AsyncMock(return_value="should-not-run")
-        blade_create_mock = MagicMock()
-        blade_create_mock.ainvoke = AsyncMock(return_value="should-not-run")
-
-        with patch("chaos_agent.tools.blade_python.blade_python_create", py_tool), \
-             patch.object(de, "blade_create", blade_create_mock), \
-             patch.object(de, "get_tracker"), \
-             patch.object(de, "sync_to_store", new=AsyncMock()):
-            result = await de.direct_execute(state)
-
-        assert result["safety_status"] == "rejected"
-        assert "cannot run through the configured" in str(result.get("error"))
-        py_tool.ainvoke.assert_not_awaited()
-        blade_create_mock.ainvoke.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_kubeconfig_co_location_no_longer_escapes(self):
-        """The removed convenience case, pinned so it cannot silently return."""
-        from chaos_agent.agent.nodes.execute import direct_execute as de
-        from chaos_agent.agent.spec.fault_spec import FaultSpec
-
-        spec = FaultSpec(scope=PYTHON_SCOPE, blade_target="redis", blade_action="delay")
-        state = {
-            "fault_spec": spec.to_dict(), "task_id": "t-gate-2", "messages": [],
-            "kube_connection_mode": "kubeconfig", "kubeconfig": "/tmp/kc",
-        }
-
-        py_tool = MagicMock()
-        py_tool.ainvoke = AsyncMock(return_value="should-not-run")
-
-        with patch("chaos_agent.tools.blade_python.blade_python_create", py_tool), \
-             patch.object(de, "get_tracker"), \
-             patch.object(de, "sync_to_store", new=AsyncMock()):
-            result = await de.direct_execute(state)
-
-        assert result["safety_status"] == "rejected"
-        py_tool.ainvoke.assert_not_awaited()

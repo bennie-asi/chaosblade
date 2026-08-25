@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import shlex
 
-from chaos_agent.agent.nodes.execute._injection_detection import _TOOL_POD_NAMESPACE
+from chaos_agent.tools.pod_discovery import TOOL_POD_NAMESPACE as _TOOL_POD_NAMESPACE
 from chaos_agent.transports import PROFILE_HOST, PROFILE_K8S, profile_of
 
 # ---------------------------------------------------------------------------
@@ -38,8 +38,9 @@ K8S_ALLOWED_SUBCOMMANDS = frozenset({"get", "top", "describe", "exec"})
 # host leading binary and the command after a ``kubectl exec --``).
 #
 # This is a RECOMMENDATION set, not the enforcement set: enforcement lives in
-# ``tools.readonly`` (``is_readonly_argv`` / ``is_readonly_inner_tokens``), which
-# accepts more commands than are worth advertising (shell no-ops like ``true`` /
+# ``tools.readonly``'s public surfaces (``contains_shell_metachar`` /
+# ``host_command_rejection_reason`` / ``kubectl_exec_rejection_reason``), which
+# accept more commands than are worth advertising (shell no-ops like ``true`` /
 # ``echo``, pipeline filters that are useless here because pipes are rejected,
 # and network egress tools like ``curl`` / ``wget``).
 #
@@ -71,38 +72,42 @@ DIAG_BINARY_WHITELIST = frozenset({
     "command",
 })
 
-# Shell metacharacters rejected in ANY baseline command (injection defense).
-# ``--`` (kubectl exec separator) and single flags are fine; these are the
-# constructs that chain/redirect/substitute commands.
-_SHELL_METACHARS = ("|", ">", "<", ";", "&", "`", "$(", "\n")
-
-
 def validate_command(command: str, profile: str) -> bool:
     """Return True iff *command* is a permitted read-only baseline command
     for *profile*.
 
-    - Rejects shell metacharacters (pipe / redirect / chain / substitution).
+    - Rejects shell structure (pipe / redirect / chain / substitution).
     - ``k8s``: must be ``kubectl <allowed-subcommand> ...``; for ``exec`` the
       command after ``--`` must be a read-only diagnostic.
     - ``host``: leading binary must be a read-only diagnostic.
+
+    The structural screen and the read/mutate judgement both live in
+    ``tools.readonly``'s public surfaces, which self-dispatch on the guard
+    engine (design 4.6, face 5) — baseline capture, host_read, and the
+    kubectl-exec probe classifier share ONE vocabulary (with argument-level
+    guards for dual-use tools like ip / systemctl / mount / dmesg). Under
+    the facts engine the screens are structural, so a quoted literal no
+    longer trips the metachar scan (the P1 fix).
     """
     if not command or not command.strip():
         return False
-    for bad in _SHELL_METACHARS:
-        if bad in command:
-            return False
+    from chaos_agent.tools.readonly import (
+        contains_shell_metachar,
+        host_command_rejection_reason,
+        kubectl_exec_rejection_reason,
+    )
+
+    # The upfront screen is the ONLY structural check the non-exec kubectl
+    # subcommands (get/top/describe) get — the inner judges below only see
+    # the command after ``--``.
+    if contains_shell_metachar(command):
+        return False
     try:
         tokens = shlex.split(command)
     except ValueError:
         return False
     if not tokens:
         return False
-
-    # Read/mutate judgement is delegated to the shared read-only classifier so
-    # baseline capture, host_read, and the kubectl-exec probe classifier all
-    # share ONE vocabulary (with argument-level guards for dual-use tools like
-    # ip / systemctl / mount / dmesg).
-    from chaos_agent.tools.readonly import is_readonly_argv, is_readonly_inner_tokens
 
     if profile == PROFILE_K8S:
         if tokens[0] != "kubectl":
@@ -117,16 +122,19 @@ def validate_command(command: str, profile: str) -> bool:
             # after it as a read-only probe. Uses the EXEC-context judge so a
             # node probe through a debug pod (``chroot /host df -h``) is judged
             # by the command it actually runs — same semantics the guard and
-            # kubectl_read apply.
+            # kubectl_read apply. The judge takes the full command line; its
+            # judgement starts at the ``--`` boundary (prefix inert).
             if "--" not in tokens:
                 return False
             after = tokens[tokens.index("--") + 1:]
-            if not after or not is_readonly_inner_tokens(after):
+            if not after:
+                return False
+            if kubectl_exec_rejection_reason(command) is not None:
                 return False
         return True
 
     if profile == PROFILE_HOST:
-        return is_readonly_argv(tokens)
+        return host_command_rejection_reason(command) is None
 
     # Unknown profile → reject (fail closed).
     return False

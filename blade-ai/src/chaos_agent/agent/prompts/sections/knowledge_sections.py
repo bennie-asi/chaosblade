@@ -67,12 +67,18 @@ def get_skill_index_section(skill_catalog: str) -> str:
     return "\n".join(lines)
 
 
-def get_knowledge_summary_section() -> str:
+def get_knowledge_summary_section(phase: str | None = None) -> str:
     """Compact knowledge index — high-density reference table.
 
     Profile-agnostic: the registry list is a generic on-demand index, not a
     k8s-specific artifact; both profiles see the same index and load only the
     documents applicable to the current environment via read_knowledge_resource.
+
+    ``phase`` ("plan" / "execute" / "verify" / "recover") filters the index
+    down to the documents relevant to the current phase — each doc declares
+    its phases in YAML frontmatter (``phases: [...]``); docs without the
+    field stay visible everywhere. Filtering keeps phases from paying index
+    tokens for docs they cannot use (planning traces in the verifier, etc.).
 
     Metadata is auto-discovered from YAML frontmatter in knowledge/*.md files.
     LLM can call ``read_knowledge_resource(filename, section)`` for full or
@@ -89,6 +95,11 @@ def get_knowledge_summary_section() -> str:
     from chaos_agent.agent.prompts.knowledge_registry import get_knowledge_registry
 
     registry = get_knowledge_registry()
+    if phase:
+        registry = [
+            e for e in registry
+            if e.get("phases") is None or phase in e["phases"]
+        ]
     lines = [
         "## Domain Knowledge (on-demand)",
         f"{len(registry)} documents available. Call `read_knowledge_resource(filename='<name>', section='<heading>')` to load content.",

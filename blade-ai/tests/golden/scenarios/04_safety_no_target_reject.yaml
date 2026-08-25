@@ -1,0 +1,14 @@
+# Golden 04 — safety reject: spec carries no scope (the gate's actual
+# no-target contract is `not spec.scope` — cluster-scoped targets may have
+# empty namespace, but a scopeless spec must never reach execution).
+name: safety-no-target-reject
+description: 无 scope 的故障规格被安全门拒绝
+surface: safety
+input:
+  skill_name: pod-cpu-fullload
+  fault_spec:
+    namespace: cms-demo
+    names: []
+expected:
+  safety_status: rejected
+  safety_reason_contains: ["no target"]

@@ -161,5 +161,5 @@ async def test_network_feasibility_fail_open_for_third_profile():
     from chaos_agent.agent.spec._feasibility_checkers import NetworkFeasibilityChecker
 
     checker = NetworkFeasibilityChecker()
-    spec = FaultSpec(scope=VM_SCOPE, namespace="", blade_target="network")
+    spec = FaultSpec(scope=VM_SCOPE, namespace="", fault_target="network")
     assert await checker.assess(spec, "") is None

@@ -271,7 +271,6 @@ def _parse_llm_json(raw_text: str) -> Optional[list[dict]]:
             "fault_symptom": item.get("fault_symptom", ""),
             "resource_path": item.get("resource_path", ""),
             "example_cmd": item.get("example_cmd", ""),
-            "example_cmd_direct": item.get("example_cmd_direct", ""),
         })
 
     return result
@@ -369,23 +368,6 @@ def build_nl_cmd(display: str, category: str, scope: str) -> str:
     )
 
 
-def build_direct_cmd(params: dict) -> str:
-    """Build a structured example command from inferred blade params."""
-    scope = params["scope"]
-    name_ph = "<node-name>" if scope == "node" else "<name>"
-    parts = [
-        "blade-ai inject",
-        f"--scope {scope}",
-        f"--target {params['target']}",
-        f"--action {params['action']}",
-        f"-n {name_ph}",
-    ]
-    if scope != "node":
-        parts.append("--namespace <namespace>")
-    parts.append("--kubeconfig <kubeconfig>")
-    return " ".join(parts)
-
-
 def _generate_from_catalogue(catalogue_dir: Path, skill_name: str) -> Optional[list[dict]]:
     """Generate use-case list directly from catalogue directory structure.
 
@@ -411,13 +393,10 @@ def _generate_from_catalogue(catalogue_dir: Path, skill_name: str) -> Optional[l
             # Try to read fault_symptom from the .md file
             fault_symptom = _extract_fault_symptom(md_file)
 
-            # Build example commands (scope-aware)
+            # Build example command (scope-aware)
             display = root_cause.replace("_", " ")
             scope = infer_scope(category)
             example_cmd = build_nl_cmd(display, category, scope)
-
-            blade_params = infer_blade_params(category, scope=scope)
-            example_cmd_direct = build_direct_cmd(blade_params) if blade_params else ""
 
             use_cases.append({
                 "category": category,
@@ -425,7 +404,6 @@ def _generate_from_catalogue(catalogue_dir: Path, skill_name: str) -> Optional[l
                 "fault_symptom": fault_symptom,
                 "resource_path": resource_path,
                 "example_cmd": example_cmd,
-                "example_cmd_direct": example_cmd_direct,
             })
 
     return use_cases if use_cases else None

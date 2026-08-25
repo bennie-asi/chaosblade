@@ -19,8 +19,8 @@ from chaos_agent.agent.baseline_extractors import (
     Extractor,
     extract_pod_top_metrics,
 )
-from chaos_agent.agent.nodes.execute._injection_detection import (
-    _TOOL_POD_NAMESPACE,
+from chaos_agent.tools.pod_discovery import (
+    TOOL_POD_NAMESPACE as _TOOL_POD_NAMESPACE,
 )
 from chaos_agent.transports import PROFILE_HOST
 
@@ -161,7 +161,7 @@ _SCOPE_FALLBACK: dict[str, list[BaselineCommand]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Host Registry (profile == "host"): blade_target -> host shell diagnostics
+# Host Registry (profile == "host"): fault_target -> host shell diagnostics
 #
 # Host baseline runs the SAME strategy chain as k8s (LLM -> registry ->
 # fallback). These are the registry entries: plain read-only diagnostics

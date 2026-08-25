@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
+from chaos_agent.agent.state import has_active_fault
 from chaos_agent.agent.streaming import StreamEvent
 from chaos_agent.models.schemas import build_inject_envelope
 
@@ -54,9 +55,7 @@ def _build_inject_result_events(
             task_id=task_id,
         )], False
 
-    blade_uid = values.get("blade_uid", "")
-
-    if interaction_mode == "tui" and not blade_uid:
+    if interaction_mode == "tui" and not has_active_fault(values):
         events: list[StreamEvent] = []
         from chaos_agent.agent.result.operation_outcome import read_operation_outcome
         error_msg = read_operation_outcome(values).error

@@ -18,6 +18,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+
 # ---------------------------------------------------------------------------
 # ANSI colors — applied only when *color* is True (caller checks isatty)
 # ---------------------------------------------------------------------------
@@ -158,7 +159,7 @@ def _render_header(data: dict, color: bool) -> list[str]:
 
     # LLM model frozen at task finalize — empty for tasks archived before
     # the model_name column existed, so render only when present (same
-    # discipline as blade_uid below).
+    # discipline as experiment_uid below).
     if data.get("model_name"):
         rows.append(("model", str(data["model_name"])))
 
@@ -169,8 +170,9 @@ def _render_header(data: dict, color: bool) -> list[str]:
     tools = summary.get("total_tool_calls") or 0
     if tok_in or tok_out or llm or tools:
         rows.append(("cost", f"{tok_in}↓ {tok_out}↑ tokens · LLM ×{llm} · tools ×{tools}"))
-    if data.get("blade_uid"):
-        rows.append(("blade uid", str(data["blade_uid"])))
+    experiment_uid = data.get("experiment_uid")
+    if experiment_uid:
+        rows.append(("experiment uid", str(experiment_uid)))
 
     width = max(len(k) for k, _ in rows)
     for k, v in rows:

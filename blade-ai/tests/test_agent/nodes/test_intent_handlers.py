@@ -88,12 +88,12 @@ class TestRecoverHandler:
         """Exactly 1 active experiment → auto-select with enriched detail."""
         mock_store = AsyncMock()
         mock_store.query_active = AsyncMock(return_value=[
-            {"task_id": "task-001", "blade_uid": "exp-abc"},
+            {"task_id": "task-001", "experiment_uid": "exp-abc"},
         ])
         mock_store.get = AsyncMock(return_value={
             "task_id": "task-001",
             "fault_type": "pod-cpu-fullload",
-            "blade_uid": "exp-abc",
+            "experiment_uid": "exp-abc",
             "target": {"namespace": "cms-demo"},
         })
 
@@ -102,7 +102,7 @@ class TestRecoverHandler:
 
         assert result["operation"] == "recover"
         assert result["recover_task_id"] == "task-001"
-        assert result["blade_uid"] == "exp-abc"
+        assert result["experiment_uid"] == "exp-abc"
         assert "Found 1 active experiment" in result["messages"][0].content
         assert "pod-cpu-fullload" in result["messages"][0].content  # enriched fault_type
 
@@ -115,8 +115,8 @@ class TestRecoverHandler:
             {"task_id": "task-002"},
         ])
         mock_store.get = AsyncMock(side_effect=[
-            {"task_id": "task-001", "fault_type": "pod-cpu-fullload", "target": {"namespace": "cms-demo"}, "blade_uid": "exp-1"},
-            {"task_id": "task-002", "fault_type": "pod-mem-load", "target": {"namespace": "default"}, "blade_uid": "exp-2"},
+            {"task_id": "task-001", "fault_type": "pod-cpu-fullload", "target": {"namespace": "cms-demo"}, "experiment_uid": "exp-1"},
+            {"task_id": "task-002", "fault_type": "pod-mem-load", "target": {"namespace": "default"}, "experiment_uid": "exp-2"},
         ])
 
         with patch("chaos_agent.agent.nodes.recover.recover_handler.get_task_store", return_value=mock_store):
@@ -156,7 +156,7 @@ class TestRecoverHandler:
         """store.get returns None for a task → fall back to query_active raw data."""
         mock_store = AsyncMock()
         mock_store.query_active = AsyncMock(return_value=[
-            {"task_id": "task-001", "blade_uid": "exp-abc"},
+            {"task_id": "task-001", "experiment_uid": "exp-abc"},
         ])
         mock_store.get = AsyncMock(return_value=None)  # get fails → fallback to raw
 

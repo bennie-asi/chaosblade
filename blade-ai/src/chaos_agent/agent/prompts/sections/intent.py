@@ -434,15 +434,13 @@ for the user first. Then append exactly one private proposal trailer on a new li
 <blade-fault-proposal>{"faults":[{...}]}</blade-fault-proposal>
 
 Each proposal item must be a complete FaultSpec shape shown below. The trailer
-is private protocol data: never describe it, its internal tool names, or server
-revision to the user. The server owns revisions and derives them after it
-normalises the proposal. If a read-only tool is needed, call the tool without
-prose; after its result, return the normal reply followed by a proposal only
-when the reviewed contract changed. A pure chat or capability reply that does
-not change intent may be ordinary Chinese text. Do not submit in the same
-response that changes fault semantics. Once the reviewed FaultSpec is complete
-and unchanged, call the matching submit tool immediately; when re-submitting an
-already-reviewed spec, carry its exact revision."""
+is private protocol data: never describe it or its internal tool names to the
+user. If a read-only tool is needed, call the tool without prose; after its
+result, return the normal reply followed by a proposal only when the reviewed
+contract changed. A pure chat or capability reply that does not change intent
+may be ordinary Chinese text. Once the user approves a complete reviewed
+FaultSpec, call the matching submit tool immediately, replaying its execution
+fields exactly."""
 
 
 # ---------------------------------------------------------------------------
@@ -467,8 +465,13 @@ def get_intent_completeness_section(
     if not specs:
         current = "No FaultSpec has been collected yet."
     else:
+        # ``revision`` is server-owned bookkeeping; hiding it here keeps the
+        # model from ever carrying or quoting it (see Response Contract).
         current = json.dumps(
-            {"faults": [spec.to_intent_dict() for spec in specs]},
+            {"faults": [
+                {k: v for k, v in spec.to_intent_dict().items() if k != "revision"}
+                for spec in specs
+            ]},
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -479,13 +482,9 @@ one user outcome: multiple targets, directions, execution steps, retries,
 verification actions, or recovery actions do not by themselves create a batch.
 
 When the user changes the outcome, return the full replacement FaultSpec in the
-private proposal trailer. Do not infer missing fields from old prose. Preserve
-the server-owned `revision` shown below until a submit tool carries it. If no
-reviewed FaultSpec is present when the complete summary is stated, submit the
-complete structured arguments with `fault_revision=0`; the server will create
-revision 1. Use one `faults` item
-for one composite objective; use more than one only for independently meaningful
-objectives.
+private proposal trailer. Do not infer missing fields from old prose. Use one
+`faults` item for one composite objective; use more than one only for
+independently meaningful objectives.
 
 Current contract:
 """ + current

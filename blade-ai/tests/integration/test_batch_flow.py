@@ -54,8 +54,8 @@ async def stub_agent_loop(state: AgentState) -> dict:
     idx = state.get("current_fault_index", 0)
     spec_dict = state.get("fault_spec") or {}
     scope = spec_dict.get("scope", "")
-    target = spec_dict.get("blade_target", "")
-    action = spec_dict.get("blade_action", "")
+    target = spec_dict.get("fault_target", "")
+    action = spec_dict.get("fault_action", "")
     result = {
         "skill_name": "k8s-chaos-skills",
         "plan": f"Inject {scope}-{target}-{action}",
@@ -87,7 +87,7 @@ async def stub_execute(state: AgentState) -> dict:
         return {}
     idx = state.get("current_fault_index", 0)
     result = {
-        "blade_uid": f"blade-uid-{idx}",
+        "experiment_uid": f"blade-uid-{idx}",
         "messages": [AIMessage(content=f"Injected fault {idx}")],
     }
     if idx == 0:
@@ -214,7 +214,7 @@ class TestBatchFlow:
         results = state.values.get("batch_results", [])
         assert len(results) == 3
         for i, r in enumerate(results):
-            assert r["blade_uid"] == f"blade-uid-{i}"
+            assert r["experiment_uid"] == f"blade-uid-{i}"
             # The stub never runs a verifier, so no verdict is recorded — and a
             # terminal record without a verdict is FAILED, not "injecting".
             # ``batch_next`` shares ``terminal_task_state`` with the
@@ -251,10 +251,10 @@ class TestBatchFlow:
         assert not state.next
         results = state.values.get("batch_results", [])
         assert len(results) == 3
-        assert results[0]["blade_uid"] == "blade-uid-0"
-        assert results[1]["blade_uid"] is None
+        assert results[0]["experiment_uid"] == "blade-uid-0"
+        assert results[1]["experiment_uid"] is None
         assert results[1]["error"] is not None
-        assert results[2]["blade_uid"] == "blade-uid-2"
+        assert results[2]["experiment_uid"] == "blade-uid-2"
 
     @pytest.mark.asyncio
     async def test_disconnect_recovery(self, graph):
@@ -318,7 +318,7 @@ class TestBatchFlow:
         assert not state.next
         results = state.values.get("batch_results", [])
         assert len(results) == 1
-        assert results[0]["blade_uid"] == "blade-uid-0"
+        assert results[0]["experiment_uid"] == "blade-uid-0"
 
     @pytest.mark.asyncio
     async def test_messages_isolated_between_faults(self, graph):
@@ -366,7 +366,7 @@ class TestBatchFlow:
 
         assert state.next
         assert values.get("current_fault_index") == 1
-        assert values.get("blade_uid") is None
+        assert values.get("experiment_uid") is None
         assert values.get("recover_verification") is None
         assert values.get("inject_layer1_cache") is None
         assert values.get("metric_observations") is None

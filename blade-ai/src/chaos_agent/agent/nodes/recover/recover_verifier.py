@@ -8,17 +8,12 @@ continue to work without modification.
 
 from chaos_agent.agent.nodes.recover._recover_layer1 import (  # noqa: F401 — backward compat re-exports
     RecoverLayer1Result,
-    _DESTROYED_STATES,
-    _parse_blade_destroy_output,
-    _parse_blade_status_destroyed,
     _RECOVER_BASELINE_TOOL_CALL_ID,
     _RECOVER_SYNTHETIC_TOOL_CALL_IDS,
     _RECOVER_CONTEXT_KWARGS_KEY,
     _build_recover_baseline_tool_messages,
     _build_layer1_recovery_prompt,
     _parse_layer1_recovery_result,
-    _run_recover_layer1,
-    _recover_layer1_to_dict as _layer1_to_dict,  # noqa: F401 — backward compat alias
 )
 from chaos_agent.agent.nodes.recover._recover_layer2_parse import (  # noqa: F401 — backward compat re-exports
     _build_recover_verifier_prompt,
@@ -40,5 +35,11 @@ from chaos_agent.agent.nodes.recover._recover_verifier_loop import (
     recover_verifier,
     make_recover_verifier,
 )
+# Phase-9: the ``_chaosblade_recover`` backward-compat re-exports
+# (``DESTROYED_STATES`` / ``parse_blade_destroy_output`` /
+# ``parse_blade_status_destroyed`` / ``run_layer1_destroy``) were removed —
+# zero consumers repo-wide, and the re-export made this generic-layer
+# facade import a concrete carrier module (direction violation). Import
+# from ``providers.chaosblade.recover`` directly if the need ever returns.
 
 __all__ = ["recover_verifier", "make_recover_verifier"]

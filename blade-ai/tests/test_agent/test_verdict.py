@@ -376,7 +376,7 @@ class TestDictToVerificationResult:
             "layer1": {"status": "passed"},
             "layer2": {"status": "partial"},
             "warnings": [
-                "Layer 2 (fault-specific) verification was skipped. Only general blade_status verification was performed.",
+                "Layer 2 (fault-specific) verification was skipped. Only Layer 1 (programmatic) verification was performed.",
                 "No Verification Checklist detected in LLM output.",
             ],
         }

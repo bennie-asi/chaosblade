@@ -171,8 +171,8 @@ def _build_suggestion(approved: ApprovedTarget) -> str:
         bits.append(f"names={list(approved.names)}")
     if approved.labels:
         bits.append(f"labels={dict(approved.labels)}")
-    if approved.blade_target:
-        bits.append(f"blade_target={approved.blade_target}")
+    if approved.fault_target:
+        bits.append(f"fault_target={approved.fault_target}")
     if approved.is_namespace_wide:
         bits.append("namespace-wide=true")
     bits.append(f"target={approved.as_target().describe()}")
@@ -252,12 +252,12 @@ class K8sDriftPolicy:
             # against secondary_namespace (preserved from FaultSpec before
             # cluster-scope clearing). Cluster-scoped effective targets
             # (node, pv) skip namespace check — they have no namespace.
-            # However, blade_create targeting nodes (blade_target set) is a
+            # However, blade_create targeting nodes (fault_target set) is a
             # real scope escalation and must still be blocked.
-            if effective_scope in CLUSTER_SCOPED_KINDS and effective.blade_target:
+            if effective_scope in CLUSTER_SCOPED_KINDS and effective.fault_target:
                 return GuardDecision(
                     verdict=GuardVerdict.REJECT_DRIFT,
-                    reason=f"scope drift: blade {effective.blade_target} targets {effective_scope} under {approved_scope} approval",
+                    reason=f"scope drift: blade {effective.fault_target} targets {effective_scope} under {approved_scope} approval",
                     effective=effective,
                     suggestion=_build_suggestion(approved),
                 )
@@ -266,9 +266,16 @@ class K8sDriftPolicy:
                 effective_ns = (effective.namespace or "default").strip()
                 # Exempt tool pod namespaces (e.g. "chaosblade") for cluster-scoped
                 # approved targets: node-scope faults legitimately need access to
-                # injection infrastructure (exec into tool pods for blade operations).
-                from chaos_agent.agent.target_guard.classifier import TOOL_POD_NAMESPACES
-                is_tool_ns = effective_ns in TOOL_POD_NAMESPACES
+                # injection infrastructure (exec into tool pods for carrier
+                # operations). The exemption set is provider-declared
+                # (``tool_pod_namespaces``) and unioned here — a module-level
+                # providers import would cycle (providers register target_guard
+                # consumers at import time), so this stays function-local.
+                from chaos_agent.agent.providers import FaultProviderRegistry
+
+                is_tool_ns = effective_ns in FaultProviderRegistry.union_tool_names(
+                    "tool_pod_namespaces"
+                )
                 if check_ns != effective_ns and not is_tool_ns:
                     return GuardDecision(
                         verdict=GuardVerdict.REJECT_DRIFT,

@@ -5,9 +5,12 @@ from langchain_core.messages import ToolMessage, AIMessage, HumanMessage
 
 from chaos_agent.agent.nodes.execute.execute_loop import (
     execute_loop,
-    _extract_blade_uid_from_messages,
     _detect_injection_method,
     _should_redetect_injection_method,
+)
+# Phase-5 canonical address (kept under the historical call name).
+from chaos_agent.agent.providers.chaosblade.verify import (
+    extract_experiment_uid_from_messages as _extract_blade_uid_from_messages,
 )
 from chaos_agent.config.settings import settings
 
@@ -285,8 +288,8 @@ class TestExtractBladeUidRetired:
     """Tests for the ``retired`` filter of _extract_blade_uid_from_messages.
 
     Framework-side verify-replan cleanup destroys experiments in CODE (no
-    blade_destroy ToolMessage), so retired_blade_uids is the only record that
-    a UID is dead. Extraction must treat retired UIDs exactly like destroyed
+    blade_destroy ToolMessage), so retired_experiment_uids is the only record
+    that a UID is dead. Extraction must treat retired UIDs exactly like destroyed
     ones (task-29848471).
     """
 
@@ -346,7 +349,10 @@ class TestResetAttributionState:
 
     def _populated(self) -> dict:
         return {
-            "blade_uid": "uid-123",
+            "experiment_uid": "uid-123",
+            "fault_handle": {
+                "kind": "blade_uid", "value": "uid-123", "method": "kubectl_exec",
+            },
             "injection_method": "kubectl_exec",
             "combo_native_issued": True,
             "kubectl_exec_pod_name": "tool-pod",
@@ -361,7 +367,8 @@ class TestResetAttributionState:
             reset_attribution_state,
         )
         reset_attribution_state(result)
-        assert result["blade_uid"] is None
+        assert result["experiment_uid"] is None
+        assert result["fault_handle"] is None
         assert result["injection_method"] is None
         assert result["combo_native_issued"] is None
         assert result["kubectl_exec_pod_name"] is None
@@ -369,26 +376,28 @@ class TestResetAttributionState:
         assert result["injection_start_time"] is None
         assert result["unrelated_field"] == "keep-me"
 
-    def test_keep_blade_uid_preserves_live_experiment(self):
-        """Execute-replan with existing_blade_uids keeps the UID (recover must
+    def test_keep_experiment_uid_preserves_live_experiment(self):
+        """Execute-replan with existing_experiment_uids keeps the UID (recover must
         still reach it) while re-arming method re-detection."""
         result = self._populated()
         from chaos_agent.agent.nodes.execute.execute_loop import (
             reset_attribution_state,
         )
-        reset_attribution_state(result, keep_blade_uid=True)
-        assert result["blade_uid"] == "uid-123"
+        reset_attribution_state(result, keep_experiment_uid=True)
+        assert result["experiment_uid"] == "uid-123"
+        # A live experiment keeps its handle for the recover graph.
+        assert result["fault_handle"]["value"] == "uid-123"
         assert result["injection_method"] is None
         assert result["kubectl_exec_pod_name"] is None
 
-    def test_keep_blade_uid_preserves_combo_marker(self):
+    def test_keep_experiment_uid_preserves_combo_marker(self):
         """A live experiment keeps its native companion: the combo marker
         belongs to the same attribution as the UID."""
         result = self._populated()
         from chaos_agent.agent.nodes.execute.execute_loop import (
             reset_attribution_state,
         )
-        reset_attribution_state(result, keep_blade_uid=True)
+        reset_attribution_state(result, keep_experiment_uid=True)
         assert result.get("combo_native_issued") is True
 
     def test_accepts_partial_dict(self):
@@ -398,7 +407,7 @@ class TestResetAttributionState:
             reset_attribution_state,
         )
         reset_attribution_state(result)
-        assert result["blade_uid"] is None
+        assert result["experiment_uid"] is None
         assert result["injection_method"] is None
 
     def test_message_count_records_epoch_boundary(self):
@@ -468,11 +477,11 @@ class TestEpochBoundedAttribution:
         ]
         state = {"attribution_epoch_index": 1}
         # Unbounded (pre-fix) scan attributes the stale attempt…
-        assert _detect_injection_method(msgs, None, is_host=False) == "kubectl_native"
+        assert _detect_injection_method(msgs, is_host=False) == "kubectl_native"
         # …the epoch-bounded scan does not.
         bounded = _epoch_bounded_messages(msgs, state)
         assert bounded == msgs[1:]
-        assert _detect_injection_method(bounded, None, is_host=False) is None
+        assert _detect_injection_method(bounded, is_host=False) is None
 
     def test_current_epoch_attempt_still_attributed(self):
         """The boundary must never hide an injection issued AFTER the seam."""
@@ -488,7 +497,7 @@ class TestEpochBoundedAttribution:
         ]
         state = {"attribution_epoch_index": 1}
         bounded = _epoch_bounded_messages(msgs, state)
-        assert _detect_injection_method(bounded, None, is_host=False) == "kubectl_native"
+        assert _detect_injection_method(bounded, is_host=False) == "kubectl_native"
 
     def test_boundary_beyond_length_falls_back_to_full_scan(self):
         """Trimming may shift the list under a stored index; over-scan keeps
@@ -515,27 +524,27 @@ class TestParseBladeUidFromContent:
     """Tests for _parse_blade_uid_from_content helper."""
 
     def test_valid_success_json(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import _parse_blade_uid_from_content
+        from chaos_agent.agent.providers.chaosblade.verify import _parse_blade_uid_from_content
         assert _parse_blade_uid_from_content('{"code":200,"success":true,"result":"abc123"}') == "abc123"
 
     def test_failure_json(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import _parse_blade_uid_from_content
+        from chaos_agent.agent.providers.chaosblade.verify import _parse_blade_uid_from_content
         assert _parse_blade_uid_from_content('{"code":500,"success":false,"error":"fail"}') is None
 
     def test_non_string_result(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import _parse_blade_uid_from_content
+        from chaos_agent.agent.providers.chaosblade.verify import _parse_blade_uid_from_content
         assert _parse_blade_uid_from_content('{"code":200,"success":true,"result":{"uid":"abc"}}') is None
 
     def test_empty_result(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import _parse_blade_uid_from_content
+        from chaos_agent.agent.providers.chaosblade.verify import _parse_blade_uid_from_content
         assert _parse_blade_uid_from_content('{"code":200,"success":true,"result":""}') is None
 
     def test_non_json_content(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import _parse_blade_uid_from_content
+        from chaos_agent.agent.providers.chaosblade.verify import _parse_blade_uid_from_content
         assert _parse_blade_uid_from_content("not json") is None
 
     def test_non_string_input(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import _parse_blade_uid_from_content
+        from chaos_agent.agent.providers.chaosblade.verify import _parse_blade_uid_from_content
         assert _parse_blade_uid_from_content(None) is None
 
 
@@ -543,7 +552,7 @@ class TestParseBladeCreateFromVArgs:
     """Tests for _parse_blade_create_from_v_args helper."""
 
     def test_network_loss(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import _parse_blade_create_from_v_args
+        from chaos_agent.agent.providers.chaosblade.provider import _parse_blade_create_from_v_args
         v_args = (
             "otel-c-tool-xxx -n chaosblade -- blade create k8s pod-network loss "
             "--percent 100 --interface eth0 --namespace cms-demo "
@@ -557,7 +566,7 @@ class TestParseBladeCreateFromVArgs:
         }
 
     def test_cpu_fullload(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import _parse_blade_create_from_v_args
+        from chaos_agent.agent.providers.chaosblade.provider import _parse_blade_create_from_v_args
         v_args = (
             "otel-c-tool-xxx -n chaosblade -- blade create k8s node-cpu fullload "
             "--cpu-percent 80 --names worker-1"
@@ -569,13 +578,13 @@ class TestParseBladeCreateFromVArgs:
         }
 
     def test_no_blade_create(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import _parse_blade_create_from_v_args
+        from chaos_agent.agent.providers.chaosblade.provider import _parse_blade_create_from_v_args
         v_args = "otel-c-tool-xxx -n chaosblade -- blade destroy abc123"
         result = _parse_blade_create_from_v_args(v_args)
         assert result is None
 
     def test_non_blade_kubectl(self):
-        from chaos_agent.agent.nodes.execute.execute_loop import _parse_blade_create_from_v_args
+        from chaos_agent.agent.providers.chaosblade.provider import _parse_blade_create_from_v_args
         v_args = "some-pod -n default -- cat /etc/hosts"
         result = _parse_blade_create_from_v_args(v_args)
         assert result is None
@@ -612,9 +621,9 @@ class TestHostNativeDetection:
     def test_detect_host_native_only_when_is_host(self):
         msgs = [self._host_tool_msg()]
         # Without a resolved host channel, a bare shell carrier stays unknown.
-        assert _detect_injection_method(msgs, None, is_host=False) is None
+        assert _detect_injection_method(msgs, is_host=False) is None
         # On a host channel it is classified host_native (recoverable).
-        assert _detect_injection_method(msgs, None, is_host=True) == "host_native"
+        assert _detect_injection_method(msgs, is_host=True) == "host_native"
 
     def test_detect_blade_uid_wins_over_host_native(self):
         blade = ToolMessage(
@@ -623,7 +632,7 @@ class TestHostNativeDetection:
             tool_call_id="b1",
         )
         # A real blade experiment must not be downgraded to host_native.
-        assert _detect_injection_method([blade], "uid-123", is_host=True) == "host_blade"
+        assert _detect_injection_method([blade], is_host=True) == "host_blade"
 
 
 class TestClassifyIssueTimeMethod:
@@ -732,12 +741,16 @@ class TestIssueTimeRecording:
         assert "injection_method" not in result
 
     def test_combo_marked_when_native_issued_after_experiment_method(self):
-        """blade-first combo: the experiment method is already attributed and
-        a native mutating call is issued → durable combo marker for recovery
-        routing (deterministic destroy would leak the native mutation)."""
+        """blade-first combo: the experiment method is already attributed AND
+        its UID attests the experiment live; a native mutating call issued
+        alongside → durable combo marker for recovery routing (deterministic
+        destroy would leak the native mutation)."""
         tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
                 "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
-        result = self._run(tcs, state={"injection_method": "host_blade"})
+        result = self._run(tcs, state={
+            "injection_method": "host_blade",
+            "experiment_uid": "uid-live",
+        })
         assert result.get("combo_native_issued") is True
         # Attribution itself stays monotonic.
         assert "injection_method" not in result
@@ -765,25 +778,44 @@ class TestIssueTimeRecording:
         literal host_blade name check."""
         tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
                 "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
-        result = self._run(tcs, state={"injection_method": "kubectl_exec"})
+        result = self._run(tcs, state={
+            "injection_method": "kubectl_exec",
+            "experiment_uid": "uid-live",
+        })
         assert result.get("combo_native_issued") is True
+
+    def test_no_combo_when_experiment_method_unfulfilled(self):
+        """task-51193464 regression: an experiment-method attribution WITHOUT
+        its UID proof is unfulfilled (in that task the recorded "uid" was a
+        k8s debug-pod object uid mis-read as blade evidence). A native
+        mutation issued on top is the ONLY real mutation → NOT a combo, so
+        recovery keeps the native routing instead of the LLM path."""
+        tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
+                "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
+        result = self._run(tcs, state={"injection_method": "kubectl_exec"})
+        assert result.get("combo_native_issued") is None
+        # Attribution stays monotonic (no UID proof → no re-attribution here).
+        assert "injection_method" not in result
 
     def test_combo_marked_when_native_issued_after_python_agent_method(self):
         """python_agent carries an experiment UID too — same combo semantics."""
         tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
                 "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
-        result = self._run(tcs, state={"injection_method": "python_agent"})
+        result = self._run(tcs, state={
+            "injection_method": "python_agent",
+            "experiment_uid": "uid-live",
+        })
         assert result.get("combo_native_issued") is True
 
     def test_combo_marked_when_native_issued_after_keep_uid_seam(self):
-        """Execute-replan seam with keep_blade_uid: the method is cleared for
+        """Execute-replan seam with keep_experiment_uid: the method is cleared for
         re-detection but the LIVE experiment's UID survives. Native work in
         the new epoch is still a combo — the epoch-bounded re-detect scan
         cannot see the pre-seam blade_create, so issue-time UID evidence is
         the only coverage."""
         tcs = [{"name": "kubectl", "args": {"subcommand": "scale",
                 "v_args": "deploy/foo --replicas=0"}, "id": "k1"}]
-        result = self._run(tcs, state={"blade_uid": "uid-live"})
+        result = self._run(tcs, state={"experiment_uid": "uid-live"})
         assert result.get("injection_method") == "kubectl_native"
         assert result.get("combo_native_issued") is True
 
@@ -875,6 +907,62 @@ class TestTextOnlyStallGate:
         assert result.get("_execute_text_stall_count") == 0
 
 
+class TestUnfulfilledAttributionFailFast:
+    """task-51193464 regression: a text-only conclusion under an experiment-
+    method attribution WITHOUT its UID proof must fail fast into the
+    verifier — the unfulfilled promise means ``has_active_fault`` can never
+    open the router's exit gate, so honouring the text exit would spin the
+    loop until the budget dies (the model concluded "execution complete" for
+    six minutes while the router kept returning "continue")."""
+
+    def _detect(self, response, state):
+        from chaos_agent.agent.nodes.execute.execute_loop import (
+            _detect_terminal_conclusion,
+        )
+        result: dict = {}
+        _detect_terminal_conclusion(response, state, result)
+        return result
+
+    def test_text_conclusion_with_unfulfilled_method_fails(self):
+        response = AIMessage(content="Injection completed successfully.")
+        result = self._detect(response, {"injection_method": "kubectl_exec"})
+        assert result.get("error")
+        assert "unfulfilled experiment attribution" in result["error"]
+        assert "kubectl_exec" in result["error"]
+
+    def test_fulfilled_method_exits_cleanly(self):
+        # The UID proves the experiment live — the text-only exit is the
+        # normal, correct terminal path.
+        response = AIMessage(content="Injection completed successfully.")
+        result = self._detect(response, {
+            "injection_method": "kubectl_exec",
+            "experiment_uid": "uid-live",
+        })
+        assert not result.get("error")
+
+    def test_native_method_without_uid_is_not_failed(self):
+        # UID-less is the NATURAL state for a native method (the attempt is
+        # its own proof) — only experiment-method attributions make the
+        # unfulfilled promise. kubectl_native is multi-step so the one-shot
+        # self-check path runs first and (no skill case) falls through clean.
+        response = AIMessage(content="Injection completed successfully.")
+        result = self._detect(response, {
+            "injection_method": "kubectl_native",
+            "_injection_selfcheck_nudged": True,
+        })
+        assert not result.get("error")
+
+    def test_tool_call_turn_not_failed(self):
+        # The fail-fast guards TEXT-ONLY conclusions; a turn still issuing
+        # tool calls has not concluded anything yet.
+        response = AIMessage(content="", tool_calls=[
+            {"name": "kubectl", "args": {"subcommand": "get",
+             "v_args": "pods"}, "id": "k1"},
+        ])
+        result = self._detect(response, {"injection_method": "kubectl_exec"})
+        assert not result.get("error")
+
+
 class TestShouldRedetectInjectionMethod:
     """Channel B re-scan gate: it runs only for RESUME + blade_uid UPGRADE,
     and is skipped in steady state so it does not re-derive the same answer
@@ -907,6 +995,23 @@ class TestShouldRedetectInjectionMethod:
         # candidacy (the rare host+blade_uid hybrid). Pure host (no uid) still
         # short-circuits to False above.
         assert _should_redetect_injection_method("host_native", "uid-1") is True
+
+    def test_experiment_method_without_uid_arms_downgrade(self):
+        """task-51193464 regression: an experiment-method attribution whose
+        UID never materialised is UNFULFILLED — its promise (a live experiment)
+        is outstanding, so the scan stays armed and the registry's RECENCY
+        arbitration can correct the mis-attribution to a more-recent native
+        backend. UID-less native methods are their own proof and keep
+        skipping (see test_steady_kubectl_native_without_uid_skips)."""
+        assert _should_redetect_injection_method("kubectl_exec", None) is True
+        assert _should_redetect_injection_method("host_blade", None) is True
+        assert _should_redetect_injection_method("python_agent", None) is True
+
+    def test_fulfilled_experiment_method_closes_downgrade_arm(self):
+        # Once the UID materialises the attribution is fulfilled — no more
+        # downgrade candidacy, and non-multi-step methods skip the rescan.
+        assert _should_redetect_injection_method("kubectl_exec", "uid-1") is False
+        assert _should_redetect_injection_method("host_blade", "uid-1") is False
 
 
 def _finalized_msg(summary: str = "inject mem load on pod-x") -> ToolMessage:
@@ -1129,3 +1234,135 @@ class TestPhase2KickoffIntegration:
 
         result = await node(state)
         assert len(self._kickoffs(result.get("messages", []))) == 1
+
+
+class TestDowngradeCommitIntegration:
+    """task-51193464 regression, channel-B commit seam: an UNFULFILLED
+    experiment-method attribution (no experiment UID anywhere) is corrected
+    to the UID-less native backend once the registry's RECENCY arbitration
+    recognises a more-recent native mutation in history — without the
+    correction the fault-handle projection can never claim the fault and the
+    router's has_active_fault gate stays closed forever."""
+
+    class _FakeStore:
+        def __init__(self):
+            self.appended = []
+
+        def append_messages(self, task_id, messages, node_name=""):
+            self.appended.extend(messages)
+
+    class _FakeHook:
+        def __init__(self):
+            self.session_store = TestDowngradeCommitIntegration._FakeStore()
+
+        async def __call__(self, state):
+            return {}
+
+    class _FakeLLM:
+        def bind_tools(self, tools):
+            return self
+
+        async def ainvoke(self, messages):
+            # Productive turn: carries tool_calls so the stall guard and the
+            # fail-fast both stay quiet — the scan seam is what's under test.
+            return AIMessage(content="", tool_calls=[
+                {"name": "kubectl", "args": {"subcommand": "get",
+                 "v_args": "pods"}, "id": "c1"},
+            ])
+
+    def _node(self):
+        from chaos_agent.agent.nodes.execute.execute_loop import make_execute_loop
+        return make_execute_loop(
+            hook=self._FakeHook(), llm=self._FakeLLM(),
+            tools=[], env_info={"context": "test"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_downgrade_commits_native_over_unfulfilled_experiment(
+        self, sample_agent_state,
+    ):
+        node = self._node()
+        state = sample_agent_state
+        state["execute_loop_count"] = 0
+        state["task_id"] = "test-task"
+        # The poisoned shape from the task: experiment-method attribution
+        # with its start time but NO uid promise ever fulfilled.
+        state["injection_method"] = "kubectl_exec"
+        state["injection_start_time"] = "2026-08-24T15:48:03+00:00"
+        # A more-recent UID-less native mutation in history (RECENCY winner).
+        state["messages"] = [
+            AIMessage(content="", tool_calls=[
+                {"name": "kubectl", "args": {"subcommand": "scale",
+                 "v_args": "deploy/foo --replicas=0"}, "id": "k1"},
+            ]),
+            ToolMessage(content="deployment.apps/foo scaled",
+                        name="kubectl", tool_call_id="k1"),
+        ]
+
+        result = await node(state)
+
+        assert result.get("injection_method") == "kubectl_native"
+        # The native mutation is the ONLY real one — no combo marker.
+        assert result.get("combo_native_issued") is None
+        # The earlier (mis-)attribution time is preserved, not re-stamped.
+        assert "injection_start_time" not in result
+
+    @pytest.mark.asyncio
+    async def test_unfulfilled_attribution_survives_without_native_evidence(
+        self, sample_agent_state,
+    ):
+        node = self._node()
+        state = sample_agent_state
+        state["execute_loop_count"] = 0
+        state["task_id"] = "test-task"
+        state["injection_method"] = "kubectl_exec"
+        # Only the false-evidence pair in history: the debug-pod-meta uid is
+        # blocked as blade evidence (cross-check) and debug+sleep is a
+        # read-only probe for the native scan — nothing to correct TO.
+        state["messages"] = [
+            AIMessage(content="", tool_calls=[
+                {"name": "kubectl", "args": {"subcommand": "debug",
+                 "v_args": "node/n1 --profile=sysadmin -- sleep 3600"},
+                 "id": "d1"},
+            ]),
+            ToolMessage(
+                content='pod created [debug-pod-meta: {"name":"dbg-x",'
+                        '"uid":"3fbb468c-5ac2-4d05-b25c-17454df09ade"}]',
+                name="kubectl", tool_call_id="d1",
+            ),
+        ]
+
+        result = await node(state)
+
+        # No commit: the attribution stays as-is (monotonic in state) — the
+        # fail-fast on the eventual text conclusion is the exit, not a
+        # silent re-attribution.
+        assert "injection_method" not in result
+        assert result.get("combo_native_issued") is None
+
+    @pytest.mark.asyncio
+    async def test_downgrade_stamps_start_time_when_absent(
+        self, sample_agent_state,
+    ):
+        # Same downgrade shape but WITHOUT an existing injection_start_time
+        # (e.g. the mis-attribution never got as far as stamping one): the
+        # committed correction stamps the time so duration accounting starts
+        # from the corrected attribution.
+        node = self._node()
+        state = sample_agent_state
+        state["execute_loop_count"] = 0
+        state["task_id"] = "test-task"
+        state["injection_method"] = "kubectl_exec"
+        state["messages"] = [
+            AIMessage(content="", tool_calls=[
+                {"name": "kubectl", "args": {"subcommand": "scale",
+                 "v_args": "deploy/foo --replicas=0"}, "id": "k1"},
+            ]),
+            ToolMessage(content="deployment.apps/foo scaled",
+                        name="kubectl", tool_call_id="k1"),
+        ]
+
+        result = await node(state)
+
+        assert result.get("injection_method") == "kubectl_native"
+        assert result.get("injection_start_time")

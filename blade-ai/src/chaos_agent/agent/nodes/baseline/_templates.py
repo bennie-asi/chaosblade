@@ -344,7 +344,7 @@ def _evidence_supplement_commands(
         # host identity + cross-metric probes come from the shared contract in
         # evidence.py so baseline and verification anchor evidence identically.
         for description, argv in host_evidence_supplements(
-            spec.blade_target if spec else "", missing, existing_commands,
+            spec.fault_target if spec else "", missing, existing_commands,
         ):
             supplements.append(BaselineCommand(description, " ".join(argv)))
         return supplements

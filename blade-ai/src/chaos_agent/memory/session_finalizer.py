@@ -40,11 +40,12 @@ def build_inject_session_summary(
     if mode == RESULT_SUMMARY_DATA_ENVELOPE:
         return JSONEnvelope.ok(data=data)
     if mode == RESULT_SUMMARY_STATUS_ENVELOPE:
+        experiment_uid = data.get("experiment_uid") or ""
         return JSONEnvelope.ok(data={
             "task_id": data.get("task_id", ""),
             "result": task_state,
             "fault_type": data.get("fault_type", ""),
-            "blade_uid": data.get("blade_uid", ""),
+            "experiment_uid": experiment_uid,
             "fault_spec": data.get("fault_spec") or {},
             "targets": _targets_from_result_data(data),
             "verification": data.get("verification"),

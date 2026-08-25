@@ -38,7 +38,7 @@ _ACTIVE = {
     "task_id": "task-abc123",
     "fault_type": "pod-cpu",
     "target": {"namespace": "prod"},
-    "blade_uid": "uid-1",
+    "experiment_uid": "uid-1",
 }
 
 

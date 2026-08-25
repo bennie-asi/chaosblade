@@ -353,7 +353,7 @@ def _conn_to_state_patch(conn: dict) -> dict:
 
 # phase_started node → runtime.step() name mapping.
 # Only nodes wrapped with with_phase_events() emit events.
-# direct_setup, load_memory do NOT emit phase events.
+# load_memory does NOT emit phase events.
 # terminal_reports IS wrapped (phase="postmortem") — it carries the
 # postmortem / issue-report generation ahead of save_memory, which is
 # deliberately NOT wrapped (pure persistence, no user-facing phase).
@@ -367,7 +367,6 @@ _PHASE_STEP_MAP: dict[str, str] = {
     "intent_confirm": "approval_gate",
     "baseline_capture": "baseline_capture",
     "execute_loop": "fault_injection",
-    "direct_execute": "fault_injection",
     "verifier_loop": "verification",
     "finalize_verification": "verification",
     "terminal_reports": "postmortem",

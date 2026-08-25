@@ -1,0 +1,25 @@
+# Golden 08 — recover with multiple active experiments: the handler must
+# ask the user to choose (needs_task_selection) and enumerate the options
+# instead of silently picking one.
+name: recover-multiple-ask
+description: 多活跃实验时列出选项等待用户选择
+surface: recover
+input:
+  user_message: "恢复故障"
+  store_rows:
+    - task_id: "task-001"
+      experiment_uid: "exp-abc"
+      fault_type: "pod-cpu-fullload"
+      target: {"namespace": "cms-demo"}
+      gmt_create: "2026-08-18T10:00:00+08:00"
+      plan_summary: ""
+    - task_id: "task-002"
+      experiment_uid: "exp-def"
+      fault_type: "pod-mem-load"
+      target: {"namespace": "reg-center"}
+      gmt_create: "2026-08-18T11:00:00+08:00"
+      plan_summary: ""
+expected:
+  operation: recover
+  needs_task_selection: true
+  message_contains: ["multiple active experiments", "task-001", "task-002"]

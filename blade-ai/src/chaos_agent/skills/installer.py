@@ -78,7 +78,7 @@ def _candidate_skill_dirs(root: Path) -> list[Path]:
 
 async def _git_clone(url: str, dest: Path) -> None:
     """Clone *url* into *dest* with depth=1.  Raises on failure."""
-    from chaos_agent.utils.blade_paths import resolve_exec_path
+    from chaos_agent.utils.exec_path import resolve_exec_path
     git_bin = resolve_exec_path("git")
     proc = await asyncio.create_subprocess_exec(
         git_bin,

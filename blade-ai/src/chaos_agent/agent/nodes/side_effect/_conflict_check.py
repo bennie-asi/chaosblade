@@ -194,7 +194,7 @@ async def check_blade_conflicts(
             TransportTarget,
             execute_via_transport,
         )
-        from chaos_agent.agent.nodes.execute._injection_detection import (
+        from chaos_agent.tools.pod_discovery import (
             discover_tool_pods_cluster_wide,
         )
 

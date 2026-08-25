@@ -43,7 +43,12 @@ async def batch_next(state: AgentState) -> dict:
     outcome = read_operation_outcome(state)
     entry = {
         "task_id": state.get("task_id", ""),
-        "blade_uid": state.get("blade_uid"),
+        # Handle fields let a terminal record hydrate a FaultHandle for
+        # recovery: experiment_uid + injection_method feed the legacy path,
+        # fault_handle (projected by execute_loop) is the direct form.
+        "experiment_uid": state.get("experiment_uid"),
+        "injection_method": state.get("injection_method"),
+        "fault_handle": state.get("fault_handle"),
         "task_state": task_state,
         "fault_type": fault_type_from_state(dict(state)),
         "error": outcome.error,

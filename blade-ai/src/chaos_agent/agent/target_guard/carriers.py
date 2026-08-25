@@ -298,14 +298,6 @@ _FAULT_BINARIES = frozenset({
     "fallocate", "fio",
 })
 
-# Sequential/conditional chaining operators permitted BETWEEN read-only probe
-# segments (every segment must still independently be a read-only probe).
-_PROBE_SEPARATORS = frozenset({";", "&&", "||"})
-# Substrings that never appear in a plain read-only probe — a pipe, redirect,
-# command substitution / variable expansion, backgrounding, backtick, an inline
-# ``;`` glued to a token, or a newline. Any occurrence fails closed.
-_PROBE_DANGEROUS = ("|", "`", "$", ">", "<", "\n", "&", ";")
-
 
 def _host_entry_tokens(inner: list[str]) -> list[str]:
     """Unwrap a single ``sh -c "<script>"`` layer to reach the real entry token.
@@ -452,7 +444,7 @@ def _resolve_carrier_from_artifact(
         )
 
     operation_family = classify_host_operation(host_command)
-    approved_family = _normalise_family(approved.blade_target)
+    approved_family = _normalise_family(approved.fault_target)
     artifact_family = _normalise_family(artifact.get("operation_family", ""))
     if readonly_probe:
         operation_family = approved_family
@@ -511,7 +503,7 @@ def _resolve_carrier_from_artifact(
             scope="node",
             namespace="",
             names=(node_name,),
-            blade_target=operation_family,
+            fault_target=operation_family,
             confidence=ConfidenceLevel.HIGH,
             raw_command=f"kubectl exec {pod_name} -n {namespace} -- {host_command}",
         ),
@@ -720,37 +712,20 @@ def is_readonly_host_probe(command: str) -> bool:
     """Recognise a narrow set of host capability/identity inspections.
 
     Accepts a single probe, a ``sh -c '<payload>'`` / ``bash -c`` wrapped probe
-    (one wrapper layer, unwrapped by ``_host_payload_tokens``), and probes
-    chained with ``;`` / ``&&`` / ``||`` — but ONLY when EVERY resulting segment
-    is itself an approved read-only probe. A pipe, redirect, command
-    substitution, variable expansion, backgrounding, backtick, or any non-probe
-    segment fails closed.
+    (one wrapper layer, unwrapped structurally), and probes chained with
+    ``;`` / ``&&`` / ``||`` — but ONLY when EVERY resulting segment is itself
+    an approved read-only probe. A pipe, redirect, command substitution,
+    variable expansion, backgrounding, backtick, or any non-probe segment
+    fails closed.
+
+    Judged on bashfacts STRUCTURE by ``_probe_facts`` (design 4.6 face 3);
+    the legacy shlex+substring chain was deleted at the engine flip.
     """
-    if not isinstance(command, str) or not command.strip():
-        return False
-    tokens = _host_payload_tokens(command)
-    if not tokens:
-        return False
+    from chaos_agent.agent.target_guard._probe_facts import (
+        is_readonly_host_probe_facts,
+    )
 
-    # Split the unwrapped payload into sequential segments on chaining
-    # operators. Every segment must independently be a read-only probe; any
-    # surviving dangerous metacharacter (pipe/redirect/cmd-subst/backgrounding/
-    # inline ``;``/newline) fails closed.
-    segments: list[list[str]] = []
-    current: list[str] = []
-    for tok in tokens:
-        if tok in _PROBE_SEPARATORS:
-            segments.append(current)
-            current = []
-            continue
-        if any(bad in tok for bad in _PROBE_DANGEROUS):
-            return False
-        current.append(tok)
-    segments.append(current)
-
-    if any(not seg for seg in segments):
-        return False
-    return all(_is_single_readonly_probe(seg) for seg in segments)
+    return is_readonly_host_probe_facts(command)
 
 
 def _is_single_readonly_probe(tokens: list[str]) -> bool:
@@ -778,36 +753,28 @@ def _is_single_readonly_probe(tokens: list[str]) -> bool:
     return False
 
 
-def _host_payload_tokens(command: str) -> list[str]:
-    """Unwrap a host-entry command to the single command being inspected."""
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return []
-    if not tokens:
-        return []
-    unwrapped = _host_entry_tokens(tokens)
-    if unwrapped != tokens:
-        tokens = unwrapped
-    if tokens[0] == "chroot":
-        if len(tokens) < 3:
-            return []
-        return _host_entry_tokens(tokens[2:])
-    if tokens[0] in ("nsenter", "unshare"):
-        if "--" not in tokens:
-            return []
-        return _host_entry_tokens(tokens[tokens.index("--") + 1:])
-    if tokens[0].startswith("/host/"):
-        return tokens
-    return []
-
-
 def classify_host_operation(command: str) -> str:
     """Classify a host command into the approved fault family."""
-    payload = _host_payload_tokens(command)
+    from chaos_agent.agent.target_guard._probe_facts import host_payload_tokens_facts
+
+    payload = host_payload_tokens_facts(command) or []
     lowered = command.lower()
     if payload:
         lowered = f"{lowered} {' '.join(payload).lower()}"
+    # A ``systemd-run`` timer's payload is the command the TIMER runs at its
+    # deadline — for the host carrier it usually sits in a quoted
+    # ``sh -c 'kill -CONT $(…)'`` script that no host-entry unwrap covers
+    # (that machinery knows chroot/nsenter/unshare, not bare systemd-run).
+    # Surface the quoted script text so the family regexes below can see the
+    # payload's verbs; WITHOUT this the family resolves empty and the fault
+    # -type lock silently loses its pin (verified: the 进程假死挂起 timer).
+    if re.search(r"(^|[\s/])systemd-run(\s|$)", lowered):
+        quoted = " ".join(
+            frag for pair in re.findall(r"'([^']*)'|\"([^\"]*)\"", command)
+            for frag in pair if frag
+        )
+        if quoted:
+            lowered = f"{lowered} {quoted.lower()}"
     if re.search(
         r"(^|[\s;&|/])(rm|mv|cp|chmod|chown|curl|wget|python[0-9.]*|perl|"
         r"systemctl|reboot|shutdown|mount|umount|mkfs(?:\.[a-z0-9]+)?|tee)"

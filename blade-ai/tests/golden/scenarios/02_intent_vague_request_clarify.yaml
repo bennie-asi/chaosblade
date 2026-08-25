@@ -1,0 +1,23 @@
+# Golden 02 — clarification: vague request, the scripted LLM asks back in
+# plain text. Priority-2 chat branch: dialogue advances, but NO semantic
+# state is derived from prose — fault_spec stays absent and the intent is
+# not confirmed. First follow-up round must not consume the clarification
+# budget (bump only fires from dialogue_round >= 1).
+name: intent-vague-request-clarify
+description: 模糊请求纯文本追问，语义状态不得从散文派生
+surface: intent
+input:
+  user_message: "帮我给订单服务加点故障"
+  llm_script:
+    - text: "请问要注入哪种故障类型？目前支持 CPU 满载、内存压力、网络延迟等。目标命名空间是什么？"
+expected:
+  # dialogue_round 是节点执行次数：mock 脚本恰好一步，real 模型可
+  # 多步追问（先问类型再问命名空间），故精确值只在 mock 侧钉死。
+  absent: [confirmed_intent, fault_spec]
+  clarification_round: 0
+expected_mock:
+  dialogue_round: 1
+  message_contains: ["CPU"]
+expected_real:
+  llm_calls_max: 4
+  dialogue_round_max: 4

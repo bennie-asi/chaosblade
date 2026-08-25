@@ -127,7 +127,10 @@ async def execute_via_transport(
         ToolGuardError: If the raw command is blocked by ToolGuard.
     """
     # Lazy import to avoid circular dependency:
-    # transports → tools.shell → tools.__init__ → tools.blade → transports
+    # transports → tools.shell → tools.__init__ → tools.kubectl → transports
+    # (The chain formerly ran through tools.blade; that node relocated to the
+    # chaosblade provider package in phase-11, but kubectl/host_cmd still hold
+    # top-level transports imports, so the cycle remains.)
     from chaos_agent.tools.guard_gateway import get_guard_gateway
     from chaos_agent.tools.shell import get_tool_guard, run_command
 

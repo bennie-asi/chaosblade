@@ -20,7 +20,6 @@ from chaos_agent.agent.capabilities import (
     build_capability_context,
     filter_tools_for_context,
 )
-from chaos_agent.agent.nodes.execute._debug_pod import parse_debug_pod_name, delete_debug_pod
 from chaos_agent.agent.nodes.execute._kubeconfig_inject import (
     _resolve_kubeconfig,
     inject_kubeconfig_into_tool_calls,
@@ -29,10 +28,8 @@ from chaos_agent.agent.nodes.execute._kubeconfig_inject import (
 )
 from chaos_agent.agent.nodes.store._store_sync import sync_to_store
 from chaos_agent.agent.nodes.verify._verifier_layer1 import (
-    _run_host_blade_layer1,  # noqa: F401  (re-exported for tests)
     run_layer1_for_state,
     _restore_layer1_from_state,
-    _layer1_to_dict,
 )
 from chaos_agent.agent.nodes.verify._verifier_layer2_parse import (  # noqa: F401 — re-exports for tests
     _count_verification_steps_in_skill_case,  # noqa: F401
@@ -79,10 +76,11 @@ from chaos_agent.agent.nodes.execute.react_helpers import (
     record_system_prompt,
 )
 from chaos_agent.agent.result.operation_outcome import write_inject_verification
+from chaos_agent.agent.result.verdict import layer1_to_dict
 from chaos_agent.agent.prompts import build_system_prompt, PromptMode
 from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.spec.skill_identity import read_active_skill_name
-from chaos_agent.agent.state import AgentState
+from chaos_agent.agent.state import AgentState, materialize_fault_handle
 from chaos_agent.config.settings import settings
 from chaos_agent.agent.state_mgmt.state_helpers import fail_state
 from chaos_agent.agent.result.verdict import FailureCategory
@@ -91,21 +89,46 @@ from chaos_agent.observability.status_tracker import (
     StatusCategory,
 )
 from chaos_agent.agent.dispatch import dispatch_node_message
+from chaos_agent.agent.providers import FaultProviderRegistry
 
-# Backward-compat aliases (some tests still import these from verifier→baseline_capture)
-_parse_debug_pod_name = parse_debug_pod_name
-_delete_debug_pod = delete_debug_pod
+
+def _experiment_uid_of(handle) -> str:
+    """Experiment UID rendered from the handle (protocol field ``value``);
+    empty for UID-less native handles. Mirrors the recover chain's helper
+    (:func:`_recover_verifier_loop._experiment_uid_of`) and feeds tracker
+    copy plus the ``experiment_uid`` result key — an L4/Web/DB-facing contract
+    field, so this render seam is permanent, not transitional."""
+    return str((handle or {}).get("value") or "")
+
+
+def _resolve_fault_dispatch(state):
+    """Registry fault dispatch as a module seam: returns ``(provider,
+    identity_handle)`` through the same four-level identity resolution the
+    recover chain uses (experiment claim → message-history claim →
+    attribution handle → method)."""
+    return FaultProviderRegistry.resolve_fault_dispatch(state)
+
+
+def _recovery_vehicle_of(state: dict) -> str | None:
+    """Recovery vehicle (e.g. the kubectl-exec tool pod) rendered via the
+    dispatched provider's ``recovery_vehicle`` hook — the verifier never
+    names a carrier-specific state field. Dispatched through the same fault
+    identity resolution as both verifier entries (phase-4 T5): a
+    message-history experiment claim resolves to the experiment carrier,
+    whose vehicle record then renders."""
+    provider, _identity = _resolve_fault_dispatch(state)
+    return (provider.recovery_vehicle(state) or "") or None
 
 logger = logging.getLogger(__name__)
 
 # Loop budget: settings.max_verifier_loop (default 60, env BLADE_AI_MAX_VERIFIER_LOOP)
 
 
-# moved to _verifier_layer1.py: Layer1Result, _EXPIRED_STATES, _RUNNING_STATES,
-# _parse_blade_status_output, _QueryK8sResult, _parse_blade_query_k8s_output,
-# _find_blade_query_in_messages, _map_query_k8s_to_layer1,
-# _run_layer1_via_kubectl_exec, _run_host_blade_layer1,
-# _restore_layer1_from_state, _layer1_to_dict
+# Layer-1 split homes: Layer1Result + layer1_to_dict in result/verdict.py
+# (phase-7 T1 unified address); the execution domain (parse helpers, the
+# kubectl-exec and host-blade runners) in providers/chaosblade/verify.py
+# (phase-4 T4); the state orchestration helpers (run_layer1_for_state,
+# _restore_layer1_from_state) in _verifier_layer1.py.
 
 
 
@@ -124,36 +147,41 @@ from chaos_agent.agent.nodes.verify._verifier_finalize import _cleanup_debug_pod
 async def verifier(state: AgentState) -> dict:
     """Simple verifier without LLM: only Layer 1 (blade_status + blade_query_k8s)."""
     task_id = state.get("task_id", "")
-    blade_uid = state.get("blade_uid", "")
     skill_name = read_active_skill_name(state)
     kubeconfig = _resolve_kubeconfig(state)
 
-    # Defense-in-depth: if blade_uid is empty in state, try to recover it
-    # from message history (e.g. when injection was done via kubectl exec).
-    # Retired UIDs (framework-side replan cleanup) must stay dead here too,
-    # or a destroyed experiment's UID re-enters Layer-1 (task-29848471).
-    if not blade_uid:
-        from chaos_agent.agent.nodes.execute.execute_loop import _extract_blade_uid_from_messages
-        messages = state.get("messages", [])
-        blade_uid = _extract_blade_uid_from_messages(
-            messages, retired=state.get("retired_blade_uids"),
-        ) or ""
-        if blade_uid:
-            logger.info(f"verifier: recovered blade_uid={blade_uid} from message history")
+    # Attribution handle for logging/echo — ``materialize_fault_handle``
+    # hydrates checkpoints that predate the field from the legacy facts.
+    handle = materialize_fault_handle(state)
+
+    # Route through the registry's fault dispatch (experiment claim →
+    # message-history claim → attribution handle → method) — the same
+    # four-level identity resolution the recover chain uses, replacing the
+    # legacy direct state read plus the execute-loop message
+    # fallback. The message-history claim lives INSIDE the dispatch (retired
+    # UIDs stay dead there — task-29848471), so both verifier entries and
+    # the recover entries agree on the same identity.
+    provider, identity = _resolve_fault_dispatch(state)
+    # Experiment UID for tracker/log context: dispatch identity first
+    # (combo-safe — a live experiment claim outranks the native
+    # attribution), the materialized attribution handle as fallback.
+    experiment_uid = _experiment_uid_of(identity) or _experiment_uid_of(handle)
+    if experiment_uid:
+        logger.info(f"verifier: identity handle={identity or handle}")
 
     tracker = get_tracker(task_id)
     tracker.start(
         StatusCategory.NODE,
         "verifier",
-        f"Verifying fault injection (uid={blade_uid or 'N/A'})",
-        {"blade_uid": blade_uid, "skill_name": skill_name},
+        f"Verifying fault injection (uid={experiment_uid or 'N/A'})",
+        {"experiment_uid": experiment_uid, "skill_name": skill_name},
     )
 
     # Save tracker state before Layer 1 sub-operations (defensive —
     # run_command now uses emit() so this protects against future sub-ops)
     _saved_tracker_state = tracker.save_state()
     layer1 = await run_layer1_for_state(
-        state, blade_uid, kubeconfig, task_id=task_id,
+        state, experiment_uid, kubeconfig, task_id=task_id,
     )
     tracker.restore_state(_saved_tracker_state)
     detail_msg = f"Layer 1: {layer1.status}"
@@ -181,6 +209,10 @@ async def verifier(state: AgentState) -> dict:
         except Exception:
             pass  # Session persistence is best-effort
 
+    # Status-reverse inference (skipped ⇒ non-experiment carrier), NOT an
+    # identity check — phase-4 explicit Non-Goal: splitting the skipped
+    # double meaning ("carrier not applicable" vs "infrastructure failure")
+    # is a behaviour change deferred to its own task. Kept as-is on purpose.
     _is_non_chaosblade = layer1.status == "skipped"
     _is_expired = layer1.expired
     if _is_non_chaosblade:
@@ -199,7 +231,7 @@ async def verifier(state: AgentState) -> dict:
         _verified = False  # Cannot confirm fault effect without Layer 2
     verification = {
         "level": _verification_level,
-        "layer1": _layer1_to_dict(layer1),
+        "layer1": layer1_to_dict(layer1),
         "layer2": {
             "status": "recovered_before_observation" if _is_expired else "skipped",
             "details": (
@@ -213,7 +245,7 @@ async def verifier(state: AgentState) -> dict:
         "warnings": (
             [
                 "Layer 2 (fault-specific) verification was skipped. "
-                "Only general blade_status verification was performed."
+                "Only Layer 1 (programmatic) verification was performed."
             ]
             if layer1.is_passed()
             else (
@@ -225,7 +257,7 @@ async def verifier(state: AgentState) -> dict:
                 if _is_expired
                 else (
                     [
-                        "Non-ChaosBlade fault: Layer 1 not applicable, Layer 2 skipped (no LLM). "
+                        "Native fault: Layer 1 not applicable, Layer 2 skipped (no LLM). "
                         "Fault injection could NOT be verified — the fault may not have been injected."
                     ]
                     if _is_non_chaosblade
@@ -238,13 +270,13 @@ async def verifier(state: AgentState) -> dict:
     result = {
         "task_id": task_id,
         "skill": skill_name,
-        "blade_uid": blade_uid,
+        "experiment_uid": experiment_uid,
         "verified": _verified,
     }
 
     if _verified:
-        tracker.complete(f"Verification result: {layer1.status} (uid={blade_uid or 'N/A'})")
-        await dispatch_node_message("verifier", f"Verification result: {layer1.status} (uid={blade_uid or 'N/A'})")
+        tracker.complete(f"Verification result: {layer1.status} (uid={experiment_uid or 'N/A'})")
+        await dispatch_node_message("verifier", f"Verification result: {layer1.status} (uid={experiment_uid or 'N/A'})")
     else:
         tracker.complete(f"Verification result: {layer1.status}")
         await dispatch_node_message("verifier", f"Verification result: {layer1.status}")
@@ -281,10 +313,18 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
 
     async def _verifier_with_llm(state: AgentState) -> dict:
         task_id = state.get("task_id", "")
-        blade_uid = state.get("blade_uid", "")
         skill_name = read_active_skill_name(state)
         kubeconfig = _resolve_kubeconfig(state)
         count = state.get("verifier_loop_count", 0) + 1
+
+        # Same identity resolution as the simple entry (phase-4 T5): the
+        # dispatch's message-history claim gives THIS entry the fallback it
+        # previously lacked (an experiment UID living only in message
+        # history used to be invisible here, silently degrading Layer 1 to
+        # the no-UID branch of the default carrier).
+        handle = materialize_fault_handle(state)
+        provider, identity = _resolve_fault_dispatch(state)
+        experiment_uid = _experiment_uid_of(identity) or _experiment_uid_of(handle)
 
         # Reset time_wait consecutive-call guard (mirrors execute_loop).
         # Without this, once time_wait runs in the verifier, the global
@@ -297,8 +337,8 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
         tracker.start(
             StatusCategory.NODE,
             "verifier",
-            f"Verifying fault injection (uid={blade_uid or 'N/A'}, iteration={count})",
-            {"blade_uid": blade_uid, "skill_name": skill_name, "iteration": count},
+            f"Verifying fault injection (uid={experiment_uid or 'N/A'}, iteration={count})",
+            {"experiment_uid": experiment_uid, "skill_name": skill_name, "iteration": count},
         )
 
         # ---- Guard: max iterations exceeded ----
@@ -316,7 +356,7 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
             result = {
                 "task_id": task_id,
                 "skill": skill_name,
-                "blade_uid": blade_uid,
+                "experiment_uid": experiment_uid,
                 "verified": False,  # Cannot confirm — Layer 2 was not completed
             }
             result_dict = write_inject_verification(result=result, verification=verification)
@@ -339,7 +379,7 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
             # Save tracker state before Layer 1 sub-operations (defensive)
             _saved_tracker_state = tracker.save_state()
             layer1 = await run_layer1_for_state(
-                state, blade_uid, kubeconfig, task_id=task_id,
+                state, experiment_uid, kubeconfig, task_id=task_id,
             )
             tracker.restore_state(_saved_tracker_state)
 
@@ -372,7 +412,7 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
         if layer1.is_terminal():
             verification = {
                 "level": "unverified",
-                "layer1": _layer1_to_dict(layer1),
+                "layer1": layer1_to_dict(layer1),
                 "layer2": {"status": "skipped", "details": "Layer 1 failed, skipping Layer 2"},
                 "baseline_confidence": _compute_baseline_confidence(state),
                 "warnings": [f"Layer 1 verification failed: {layer1.details}"],
@@ -380,7 +420,7 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
             result = {
                 "task_id": task_id,
                 "skill": skill_name,
-                "blade_uid": blade_uid,
+                "experiment_uid": experiment_uid,
                 "verified": False,
             }
             tracker.complete(f"Verification failed at Layer 1: {layer1.status}")
@@ -413,10 +453,10 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
         # Host-level filesystem checks now go through
         # kubectl_read(subcommand="debug"); the verifier finalization
         # scans message history and removes any debug pods automatically.
-        tool_pod_name = state.get("kubectl_exec_pod_name")
+        tool_pod_name = _recovery_vehicle_of(state)
 
         messages = _build_layer2_messages(
-            state, layer1, blade_uid, skill_name, kubeconfig, count,
+            state, layer1, experiment_uid, skill_name, kubeconfig, count,
             tool_pod_name=tool_pod_name,
             new_cycle=_new_cycle,
         )
@@ -491,7 +531,7 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
                 "You MUST output valid JSON matching this schema:\n"
                 "{\n"
                 '  "verification_checklist": [\n'
-                '    {"step": 1, "category": "core|impact", "status": "passed|failed|skipped|recovered_before_observation|expected|not_applicable", "evidence": "brief"},\n'
+                '    {"step": 1, "status": "passed|failed|skipped|recovered_before_observation|expected|not_applicable", "evidence": "brief"},\n'
                 '    ...\n'
                 '  ],\n'
                 '  "layer1": "passed|failed|skipped",\n'
@@ -526,7 +566,7 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
             # static base carries non-provider tools (``submit_verification`` /
             # ``time_wait`` / ``read_*``) that the gate keeps, and an
             # unsupported profile is already refused upstream (``agent_loop``'s
-            # ``capability_context.supported`` / ``direct_execute``). The real
+            # ``capability_context.supported``). The real
             # enforcement is the ToolNode capability screen.
             if tools and not visible_tools:
                 logger.warning(
@@ -567,7 +607,7 @@ def make_verifier(hook=None, llm=None, tools=None, registry=None):
         # Build result
         result_update = {
             "verifier_loop_count": count,
-            "inject_layer1_cache": _layer1_to_dict(layer1),  # persist for subsequent iterations
+            "inject_layer1_cache": layer1_to_dict(layer1),  # persist for subsequent iterations
         }
 
         tool_calls = getattr(response, "tool_calls", None) or []

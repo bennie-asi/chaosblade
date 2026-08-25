@@ -33,10 +33,11 @@ from chaos_agent.transports import PROFILE_HOST, profile_of, resolve_channel_nam
 from chaos_agent.agent.node_names import FINALIZE_VERIFICATION
 from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.result.operation_outcome import write_inject_verification
+from chaos_agent.agent.result.verdict import layer1_to_dict
 from chaos_agent.agent.nodes.execute._debug_pod import parse_debug_pod_info, delete_debug_pod
 from chaos_agent.agent.nodes.execute._kubeconfig_inject import _resolve_kubeconfig, sync_kubewiz_runtime
 from chaos_agent.agent.nodes.store._store_sync import sync_to_store, sync_node_status_to_session
-from chaos_agent.agent.nodes.verify._verifier_layer1 import _layer1_to_dict, _restore_layer1_from_state
+from chaos_agent.agent.nodes.verify._verifier_layer1 import _restore_layer1_from_state
 from chaos_agent.agent.nodes.verify._verifier_layer2_parse import (
     _count_verification_steps_in_skill_case,
     _detect_checklist_conclusion_inconsistency,
@@ -163,12 +164,9 @@ def _verification_from_submit_args(args: dict) -> dict:
             "total_executed": len(checklist),
         }
         if l2_status == "passed":
-            # IMPACT items are drill findings — their absence-phrasing
-            # evidence must not pollute inconsistency auto-downgrade.
             _non_passed_ev = " ".join(
                 c.get("evidence", "") for c in checklist
                 if isinstance(c, dict) and c.get("status") in ("failed", "partial", "recovered_before_observation")
-                and c.get("category") != "impact"
             )
             inc_warning, should_downgrade = _detect_checklist_conclusion_inconsistency(
                 checklist, l2_status, _non_passed_ev,
@@ -255,7 +253,9 @@ async def _cleanup_residuals(state: AgentState, kubeconfig: str) -> list[dict]:
     Checks state for known residual types and cleans them up deterministically.
     Returns a list of cleaned-up artifacts for replan context.
 
-    Tool coupling: ``blade_uid`` cleanup is ChaosBlade-specific. For
+    Dispatch: ``experiment_uid`` cleanup runs through the fault-dispatch
+    provider's ``layer1_raw_destroy`` — the generic layer never imports the
+    carrier CLI (phase-11 carrier-import-boundary). For
     ``kubectl_native`` injections, the revert command is injection-specific
     (e.g. ``kubectl scale`` back, ``kubectl untaint``) and not tracked in
     state, so no deterministic cleanup is performed — the replan is expected
@@ -264,29 +264,41 @@ async def _cleanup_residuals(state: AgentState, kubeconfig: str) -> list[dict]:
     """
     cleaned = []
 
-    blade_uid = state.get("blade_uid", "")
-    if blade_uid:
+    # Phase-4 T5: render the residual-experiment UID through the fault
+    # dispatch (same identity resolution as the verifier entries) instead
+    # of a bare state read — the dispatch's live-experiment claim IS the
+    # residue this cleanup destroys, and retired UIDs stay dead there.
+    from chaos_agent.agent.nodes.verify.verifier import (
+        _experiment_uid_of,
+        _resolve_fault_dispatch,
+    )
+
+    provider, _identity = _resolve_fault_dispatch(state)
+    experiment_uid = _experiment_uid_of(_identity)
+    if experiment_uid:
         try:
-            from chaos_agent.tools.blade import blade_destroy as _blade_destroy
-            _destroy_out = await _blade_destroy.ainvoke(
-                {"uid": blade_uid, "kubeconfig": kubeconfig}
+            # Phase-11 (carrier-import-boundary): deterministic destroy
+            # dispatches through the fault-dispatch provider. UID-less
+            # carriers' layer1_raw_destroy returns "" (nothing to destroy).
+            _destroy_out = await provider.layer1_raw_destroy(
+                experiment_uid, kubeconfig
             )
             cleaned.append({
                 "type": "running_experiment",
-                "id": blade_uid,
+                "id": experiment_uid,
                 "cleanup_result": str(_destroy_out)[:200],
             })
             logger.info(
-                "Verify-replan cleanup: destroyed experiment %s", blade_uid,
+                "Verify-replan cleanup: destroyed experiment %s", experiment_uid,
             )
         except Exception as e:
             cleaned.append({
                 "type": "running_experiment",
-                "id": blade_uid,
+                "id": experiment_uid,
                 "cleanup_result": f"failed: {e}",
             })
             logger.warning(
-                "Verify-replan cleanup: failed for %s: %s", blade_uid, e,
+                "Verify-replan cleanup: failed for %s: %s", experiment_uid, e,
             )
 
     return cleaned
@@ -310,21 +322,15 @@ def _retired_uids_from_residuals(residuals_cleaned: list[dict]) -> list[str]:
     ]
 
 
-def _verify_replan_eligible(state, verification: dict) -> bool:
+def _verify_replan_eligible(verification: dict) -> bool:
     """Whether an unverified verdict may re-enter Phase 1 for re-planning.
 
-    The verdict gate itself (unverified + Layer 2 failed) is necessary but
-    not sufficient: direct mode is excluded. A direct run carries the
-    injection the USER specified verbatim — there is no plan to revise, and
-    ``agent_loop`` has no Phase-1 planning context to replan against
-    (direct runs skip Phase 1). Re-planning would silently substitute a
-    different injection for the one ordered. Such runs finalize the verdict
-    as-is; budget gating stays at the call site.
+    Gate on the verdict alone: unverified + Layer 2 failed. Budget gating
+    stays at the call site.
     """
     return (
         verification.get("level", "") == "unverified"
         and verification.get("layer2", {}).get("status", "unknown") == "failed"
-        and not state.get("direct", False)
     )
 
 
@@ -445,7 +451,7 @@ async def _supplement_host_verification_evidence(
         _record_evidence_text(r) for r in existing_records
     ).lower()
     probes = host_evidence_supplements(
-        spec.blade_target if spec else "", missing, existing_text,
+        spec.fault_target if spec else "", missing, existing_text,
     )
     if not probes:
         return []
@@ -494,10 +500,7 @@ def _enforce_disk_burn_facts(verification: dict, state: AgentState) -> bool:
         ) or "measured"
         _io_overridden = False
         for _ci in verification.get("checklist", {}).get("items", []):
-            # IMPACT items are drill findings (e.g. an honestly recorded
-            # absent phenomenon) — never flip them into fake passes.
-            if _ci.get("status") in ("failed", "recovered_before_observation", "partial") \
-                    and _ci.get("category") != "impact":
+            if _ci.get("status") in ("failed", "recovered_before_observation", "partial"):
                 _ci["status"] = "passed"
                 _ci["evidence"] = (
                     f"[OVERRIDE] Programmatic I/O check confirmed ACTIVE "
@@ -540,11 +543,9 @@ def _enforce_disk_burn_facts(verification: dict, state: AgentState) -> bool:
     if _enforcement_applied:
         _all_items = verification.get("checklist", {}).get("items", [])
         if _all_items:
-            # IMPACT items are drill findings — they never gate the level.
             _remaining_bad = sum(
                 1 for _ci in _all_items
                 if _ci.get("status") in ("failed", "recovered_before_observation", "partial")
-                and _ci.get("category") != "impact"
             )
             if _remaining_bad == 0 and verification.get("layer2", {}).get("status") == "passed":
                 verification["level"] = "verified"
@@ -643,7 +644,19 @@ def make_finalize_verification(registry=None):
     async def finalize_verification(state: AgentState) -> dict:
         task_id = state.get("task_id", "")
         skill_name = read_active_skill_name(state)
-        blade_uid = state.get("blade_uid", "")
+        # Phase-4 T5: same identity resolution as both verifier entries —
+        # the finalize node renders the SAME experiment UID the entry's
+        # dispatch produced (a bare state read renders "" on
+        # message-history-claim states, disagreeing with the entry).
+        from chaos_agent.agent.nodes.verify.verifier import (
+            _experiment_uid_of,
+            _resolve_fault_dispatch,
+        )
+        from chaos_agent.agent.state import materialize_fault_handle
+
+        _handle = materialize_fault_handle(state)
+        _, _identity = _resolve_fault_dispatch(state)
+        experiment_uid = _experiment_uid_of(_identity) or _experiment_uid_of(_handle)
         kubeconfig = _resolve_kubeconfig(state)
         sync_kubewiz_runtime(state)
         messages = state.get("messages", [])
@@ -653,7 +666,7 @@ def make_finalize_verification(registry=None):
             StatusCategory.NODE,
             "finalize_verification",
             "Finalizing verification verdict",
-            {"blade_uid": blade_uid},
+            {"experiment_uid": experiment_uid},
         )
 
         layer1 = _restore_layer1_from_state(state)
@@ -675,7 +688,7 @@ def make_finalize_verification(registry=None):
         verification = cross_check_evidence(
             verification, state.get("metric_observations"),
         )
-        verification["layer1"] = _layer1_to_dict(layer1)
+        verification["layer1"] = layer1_to_dict(layer1)
 
         # ---- Programmatic Fact Enforcement: disk_burn I/O active ----
         # (extracted to _enforce_disk_burn_facts; mutates verification in place)
@@ -693,7 +706,7 @@ def make_finalize_verification(registry=None):
         if layer1_affected > 0 and len(target_names) > layer1_affected:
             coverage_warning = (
                 f"Coverage: {layer1_affected}/{len(target_names)} target resources "
-                f"affected by ChaosBlade experiment."
+                f"affected by the fault experiment."
             )
             warnings = verification.get("warnings", [])
             if coverage_warning not in warnings:
@@ -824,8 +837,8 @@ def make_finalize_verification(registry=None):
             _spec4 = read_fault_spec(state)
             adaptations = lookup_adaptations(
                 _spec4.scope if _spec4 else "",
-                _spec4.blade_target if _spec4 else "",
-                _spec4.blade_action if _spec4 else "",
+                _spec4.fault_target if _spec4 else "",
+                _spec4.fault_action if _spec4 else "",
                 target_metadata,
                 rule_type="verification_integrity_guard",
             )
@@ -918,7 +931,7 @@ def make_finalize_verification(registry=None):
         # ---- Verify-Replan: unverified + L2 failed → replan to Phase 1 ----
         _level = verification.get("level", "")
         _l2_status = verification.get("layer2", {}).get("status", "unknown")
-        if _verify_replan_eligible(state, verification):
+        if _verify_replan_eligible(verification):
             verify_replan_count = state.get("verify_replan_count", 0)
             try:
                 _max_verify_replan = int(settings.max_verify_replan_count)
@@ -931,12 +944,12 @@ def make_finalize_verification(registry=None):
 
                 # 1b. Retire the UIDs the framework just destroyed. The destroy
                 # ran in CODE (no blade_destroy ToolMessage in history), so the
-                # message scan would resurrect the stale UID into blade_uid and
+                # message scan would resurrect the stale UID into experiment_uid and
                 # misroute the next verification's Layer-1 (task-29848471).
                 _retired_new = _retired_uids_from_residuals(residuals_cleaned)
                 if _retired_new:
-                    result_update["retired_blade_uids"] = list(
-                        state.get("retired_blade_uids") or []
+                    result_update["retired_experiment_uids"] = list(
+                        state.get("retired_experiment_uids") or []
                     ) + _retired_new
 
                 # 2. Build replan context with verifier findings
@@ -964,7 +977,7 @@ def make_finalize_verification(registry=None):
                 result_update["approved_target"] = None
                 result_update["reverify_gaps"] = None
                 result_update["error"] = None
-                # Shared attribution reset (blade_uid included — the residue
+                # Shared attribution reset (experiment_uid included — the residue
                 # was just destroyed and retired above): re-arms injection
                 # method re-detection so the registry can re-attribute by
                 # RECENCY if the replanned attempt switches carriers. The
@@ -1036,7 +1049,7 @@ def make_finalize_verification(registry=None):
         result = {
             "task_id": task_id,
             "skill": skill_name,
-            "blade_uid": blade_uid,
+            "experiment_uid": experiment_uid,
             "verified": verification["level"] == "verified",
         }
 

@@ -167,7 +167,7 @@ def check_kubeconfig() -> CheckResult:
 
 def check_kubectl() -> CheckResult:
     """Check that kubectl (or wiz in kubewiz mode) is executable."""
-    from chaos_agent.utils.blade_paths import is_executable
+    from chaos_agent.utils.exec_path import is_executable
     # SSH channel executes on the remote host; local kubectl is irrelevant.
     if resolve_channel_name() == "ssh":
         return CheckResult(name="kubectl", severity="blocking", passed=True)
@@ -205,7 +205,7 @@ def check_blade() -> CheckResult:
     preflight side-effect-free is what lets the async TUI preflight stay
     within its 8s budget.
     """
-    from chaos_agent.utils.blade_paths import is_executable
+    from chaos_agent.utils.exec_path import is_executable
     if is_executable(settings._resolve_blade_path()):
         return CheckResult(name="blade", severity="warning", passed=True)
 
@@ -272,17 +272,85 @@ def check_transport_config() -> CheckResult:
 
 # ── Check lists per command ─────────────────────────────────────────
 
-INJECT_CHECKS: list[Callable[[], CheckResult]] = [
-    check_llm_api_key, check_kubeconfig, check_kubectl, check_transport_config, check_blade,
-]
-RECOVER_CHECKS: list[Callable[[], CheckResult]] = [
-    check_llm_api_key, check_kubeconfig, check_kubectl, check_transport_config, check_blade,
-]
-LIST_CHECKS: list[Callable[[], CheckResult]] = [check_llm_api_key]
-CONFIRM_CHECKS: list[Callable[[], CheckResult]] = [check_llm_api_key]
-METRIC_CHECKS: list[Callable[[], CheckResult]] = []
-CONFIG_CHECKS: list[Callable[[], CheckResult]] = []
-VERSION_CHECKS: list[Callable[[], CheckResult]] = []
+# Scope registry — the single source of truth for which checks each
+# command tier runs. Built-in checks register below in their historical
+# order; external packages (domain packs / plugins) append via
+# ``register_check``. The seven per-tier constants further down are
+# load-time snapshots of this registry.
+_CHECK_SCOPES: dict[str, list[Callable[[], CheckResult]]] = {
+    "inject": [],
+    "recover": [],
+    "list": [],
+    "confirm": [],
+    "metric": [],
+    "config": [],
+    "version": [],
+}
+
+
+def register_check(scope: str, fn: Callable[[], CheckResult]) -> None:
+    """Register a sync presence check into one command tier.
+
+    Trusted in-process extension point — NOT a security boundary (the
+    guard gates are). ``scope`` must be one of the seven command tiers
+    (inject / recover / list / confirm / metric / config / version);
+    unknown scopes fail loud with the known set instead of silently
+    creating a new tier — a typo'd scope silently dropping a check is a
+    safety incident, not a convenience loss. Appended checks run after
+    the built-ins, so the ordering of existing checks never shifts.
+
+    Snapshot semantics: the derived tier constants (INJECT_CHECKS etc.)
+    capture the registry at module-load completion and do not grow;
+    external appends are visible via ``checks_for``.
+    """
+    if scope not in _CHECK_SCOPES:
+        raise ValueError(
+            f"unknown preflight scope {scope!r}; known={sorted(_CHECK_SCOPES)}"
+        )
+    _CHECK_SCOPES[scope].append(fn)
+
+
+def checks_for(scope: str) -> list[Callable[[], CheckResult]]:
+    """Current check list of one command tier (built-ins + appends).
+
+    The visibility path for checks appended after module load: the
+    derived tier constants are load-time snapshots and do not reflect
+    later ``register_check`` calls.
+    """
+    if scope not in _CHECK_SCOPES:
+        raise ValueError(
+            f"unknown preflight scope {scope!r}; known={sorted(_CHECK_SCOPES)}"
+        )
+    return list(_CHECK_SCOPES[scope])
+
+
+# Built-in checks enter through the same registration channel as
+# external appends — no bypassing literal lists (single source of truth).
+register_check("inject", check_llm_api_key)
+register_check("inject", check_kubeconfig)
+register_check("inject", check_kubectl)
+register_check("inject", check_transport_config)
+register_check("inject", check_blade)
+register_check("recover", check_llm_api_key)
+register_check("recover", check_kubeconfig)
+register_check("recover", check_kubectl)
+register_check("recover", check_transport_config)
+register_check("recover", check_blade)
+register_check("list", check_llm_api_key)
+register_check("confirm", check_llm_api_key)
+# metric / config / version tiers are deliberately empty (historical
+# behavior); external packages may append into them.
+
+# Derived load-time snapshots — the public per-command lists consumed by
+# the CLI. External ``register_check`` appends are NOT reflected here;
+# query ``checks_for`` instead.
+INJECT_CHECKS: list[Callable[[], CheckResult]] = list(_CHECK_SCOPES["inject"])
+RECOVER_CHECKS: list[Callable[[], CheckResult]] = list(_CHECK_SCOPES["recover"])
+LIST_CHECKS: list[Callable[[], CheckResult]] = list(_CHECK_SCOPES["list"])
+CONFIRM_CHECKS: list[Callable[[], CheckResult]] = list(_CHECK_SCOPES["confirm"])
+METRIC_CHECKS: list[Callable[[], CheckResult]] = list(_CHECK_SCOPES["metric"])
+CONFIG_CHECKS: list[Callable[[], CheckResult]] = list(_CHECK_SCOPES["config"])
+VERSION_CHECKS: list[Callable[[], CheckResult]] = list(_CHECK_SCOPES["version"])
 
 
 # ── Live (async) checks — TUI boot panel ─────────────────────────────
@@ -792,7 +860,7 @@ async def check_blade_version() -> CheckResult:
 
     # Show the resolved blade binary path so users can confirm which
     # blade (bundled vendor copy vs PATH-installed) the agent will
-    # invoke. ``_resolve_blade_path`` is what env_info / direct_execute
+    # invoke. ``_resolve_blade_path`` is what env_info / the injection path
     # actually call at runtime, so the path matches reality.
     resolved = settings._resolve_blade_path() or settings.blade_path
     return CheckResult(
@@ -1357,7 +1425,7 @@ def _ensure_blade_for_cli() -> None:
     kubectl exec). Runs only in the sync CLI path, so the blocking
     download here is fine — there is no event loop or preflight budget.
     """
-    from chaos_agent.utils.blade_paths import is_executable
+    from chaos_agent.utils.exec_path import is_executable
     if is_executable(settings._resolve_blade_path()):
         return
     try:

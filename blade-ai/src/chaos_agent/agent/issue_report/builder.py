@@ -149,11 +149,11 @@ def should_publish_issue(state: dict, settings) -> bool:
 # ---------------------------------------------------------------------------
 
 def _fault_triple(state: dict) -> tuple[str, str, str]:
-    """scope / blade_target / blade_action from the canonical FaultSpec.
+    """scope / fault_target / fault_action from the canonical FaultSpec.
 
     Goes through ``read_fault_spec`` so the dict↔instance contract and
     the legacy scattered-field projection (old checkpoints carrying
-    ``state.target`` / ``state.blade_target`` instead of a fault_spec
+    ``state.target`` / ``state.fault_target`` instead of a fault_spec
     dict) live in one place.
     """
     from chaos_agent.agent.spec.fault_spec import read_fault_spec
@@ -162,8 +162,8 @@ def _fault_triple(state: dict) -> tuple[str, str, str]:
     if spec is not None:
         return (
             spec.scope or "?",
-            spec.blade_target or "?",
-            spec.blade_action or "?",
+            spec.fault_target or "?",
+            spec.fault_action or "?",
         )
     return ("?", "?", "?")
 

@@ -50,7 +50,7 @@ def _state(**kw) -> dict:
 
 def _attempted_state(**kw) -> dict:
     """A state where the current contract DID attempt an injection."""
-    return _state(injection_method="blade", blade_uid="abc123", **kw)
+    return _state(injection_method="blade", experiment_uid="abc123", **kw)
 
 
 def _fail_result(error: str = REPLAN_ERROR) -> dict:
@@ -177,7 +177,7 @@ class TestFireReplanSeam:
 
 
 # ---------------------------------------------------------------------------
-# Seam blade_uid retention (task-349ccf5d)
+# Seam experiment_uid retention (task-349ccf5d)
 # ---------------------------------------------------------------------------
 
 def _create_msg(uid: str, call_id: str = "tc-create") -> ToolMessage:
@@ -216,19 +216,19 @@ class TestSeamBladeUidRetention:
     a successful create buried deeper in history was invisible and the
     live experiment (uid ``5aaa51dbcb78a25d``) was orphaned. The keep
     decision now runs the canonical extractor over the FULL message
-    history (destroyed/retired filtered), with ``state.blade_uid`` as
+    history (destroyed/retired filtered), with ``state.experiment_uid`` as
     the memory-compression fallback."""
 
     def test_live_uid_survives_five_failure_truncation(self):
         """Successful create followed by >=5 failed tool messages — the
         exact truncation shape that lost the uid."""
         messages = [_create_msg("uid-live")] + [_fail_msg(i) for i in range(6)]
-        state = _state(messages=messages)  # NO state.blade_uid: found in history
+        state = _state(messages=messages)  # NO state.experiment_uid: found in history
         result = _fail_result()
-        result["blade_uid"] = "uid-live"
+        result["experiment_uid"] = "uid-live"
         _fire_replan_seam(state, result, _request(), {"error_summary": REPLAN_ERROR})
-        assert result["blade_uid"] == "uid-live"  # kept, not cleared
-        assert result["replan_context"]["existing_blade_uids"] == ["uid-live"]
+        assert result["experiment_uid"] == "uid-live"  # kept, not cleared
+        assert result["replan_context"]["existing_experiment_uids"] == ["uid-live"]
 
     def test_destroyed_uid_is_not_resurrected(self):
         """An experiment already sent to blade_destroy must stay dead —
@@ -237,57 +237,94 @@ class TestSeamBladeUidRetention:
         state = _state(messages=messages)
         result = _fail_result()
         _fire_replan_seam(state, result, _request(), {"error_summary": REPLAN_ERROR})
-        assert result["blade_uid"] is None
-        assert result["replan_context"]["existing_blade_uids"] == []
+        assert result["experiment_uid"] is None
+        assert result["replan_context"]["existing_experiment_uids"] == []
 
     def test_destroyed_uid_in_state_fallback_is_not_resurrected(self):
-        """The state.blade_uid fallback must pass the SAME death filters:
-        nothing clears state.blade_uid when the LLM issues blade_destroy,
+        """The state.experiment_uid fallback must pass the SAME death filters:
+        nothing clears state.experiment_uid when the LLM issues blade_destroy,
         so the raw persisted uid would otherwise resurrect the dead
-        experiment into existing_blade_uids (the Phase-1 replan prompt)
+        experiment into existing_experiment_uids (the Phase-1 replan prompt)
         and the keep decision."""
         messages = [_create_msg("uid-dead"), _destroy_msg("uid-dead"), _fail_msg(0)]
-        state = _state(messages=messages, blade_uid="uid-dead")
+        state = _state(messages=messages, experiment_uid="uid-dead")
         result = _fail_result()
-        result["blade_uid"] = "uid-dead"
+        result["experiment_uid"] = "uid-dead"
         _fire_replan_seam(state, result, _request(), {"error_summary": REPLAN_ERROR})
-        assert result["blade_uid"] is None
-        assert result["replan_context"]["existing_blade_uids"] == []
-        assert result["replan_history"][-1]["blade_uid_at_seam"] is None
+        assert result["experiment_uid"] is None
+        assert result["replan_context"]["existing_experiment_uids"] == []
+        assert result["replan_history"][-1]["experiment_uid_at_seam"] is None
 
     def test_retired_uid_is_not_resurrected(self):
         """Framework-side cleanup leaves no destroy ToolMessage; the
         retired list is the seam's only evidence."""
         messages = [_create_msg("uid-retired"), _fail_msg(0)]
-        state = _state(messages=messages, retired_blade_uids=["uid-retired"])
+        state = _state(messages=messages, retired_experiment_uids=["uid-retired"])
         result = _fail_result()
         _fire_replan_seam(state, result, _request(), {"error_summary": REPLAN_ERROR})
-        assert result["blade_uid"] is None
-        assert result["replan_context"]["existing_blade_uids"] == []
+        assert result["experiment_uid"] is None
+        assert result["replan_context"]["existing_experiment_uids"] == []
 
     def test_state_fallback_when_create_message_compressed(self):
         """Memory compression may summarize away the create ToolMessage;
-        the persisted ``state.blade_uid`` is the fallback evidence."""
-        state = _state(messages=[_fail_msg(0)], blade_uid="uid-fallback")
+        the persisted ``state.experiment_uid`` is the fallback evidence."""
+        state = _state(messages=[_fail_msg(0)], experiment_uid="uid-fallback")
         result = _fail_result()
-        result["blade_uid"] = "uid-fallback"
+        result["experiment_uid"] = "uid-fallback"
         _fire_replan_seam(state, result, _request(), {"error_summary": REPLAN_ERROR})
-        assert result["blade_uid"] == "uid-fallback"
-        assert result["replan_context"]["existing_blade_uids"] == ["uid-fallback"]
+        assert result["experiment_uid"] == "uid-fallback"
+        assert result["replan_context"]["existing_experiment_uids"] == ["uid-fallback"]
 
-    def test_blade_uid_at_seam_recorded_in_history(self):
+    def test_experiment_uid_at_seam_recorded_in_history(self):
         """Audit trail: the uid observed at the seam lands in
         replan_history whether it was kept or dropped."""
         state = _state(messages=[_create_msg("uid-live")])
         result = _fail_result()
-        result["blade_uid"] = "uid-live"
+        result["experiment_uid"] = "uid-live"
         _fire_replan_seam(state, result, _request(), {"error_summary": REPLAN_ERROR})
-        assert result["replan_history"][-1]["blade_uid_at_seam"] == "uid-live"
+        assert result["replan_history"][-1]["experiment_uid_at_seam"] == "uid-live"
 
         # Nothing alive at the seam -> still recorded (as None).
         result2 = _fail_result()
         _fire_replan_seam(_state(), result2, _request(), {"error_summary": REPLAN_ERROR})
-        assert result2["replan_history"][-1]["blade_uid_at_seam"] is None
+        assert result2["replan_history"][-1]["experiment_uid_at_seam"] is None
+
+    # -----------------------------------------------------------------
+    # Phase-14 G4: the legacy uid spelling is EOL (fresh-database ruling).
+    # Pre-rename checkpoints that carry a top-level ``blade_uid`` key are
+    # no longer hydrated — the seam derives the uid from the modern key
+    # and message evidence only. These tests pin the retired behaviour:
+    # a legacy-only state key is invisible to every gate and filter.
+    # -----------------------------------------------------------------
+
+    def test_legacy_state_uid_key_hydrates_into_keep_decision(self):
+        """[已翻转] G4 EOL 后：旧键拼写不再被 hydration 救活——seam 从
+        state（现代键）+ 消息证据重算 uid，两者皆空时覆盖预置值为
+        None（mid-flight result 的预置 uid 不是证据）。"""
+        state = _state(messages=[_fail_msg(0)], blade_uid="uid-legacy")
+        result = _fail_result()
+        result["experiment_uid"] = "uid-legacy"  # preset, NOT evidence
+        _fire_replan_seam(state, result, _request(), {"error_summary": REPLAN_ERROR})
+        assert result["experiment_uid"] is None
+        assert result["replan_context"]["existing_experiment_uids"] == []
+
+    def test_state_destroyed_uid_is_not_resurrected(self):
+        """The durable state uid passes the SAME death filters as the
+        message scan: a uid whose experiment was destroyed stays dead."""
+        messages = [_create_msg("uid-dead"), _destroy_msg("uid-dead"), _fail_msg(0)]
+        state = _state(messages=messages, experiment_uid="uid-dead")
+        result = _fail_result()
+        _fire_replan_seam(state, result, _request(), {"error_summary": REPLAN_ERROR})
+        assert result["experiment_uid"] is None
+        assert result["replan_context"]["existing_experiment_uids"] == []
+
+    def test_legacy_state_uid_counts_as_attempted_injection(self):
+        """[已翻转] G4 EOL 后：attribution-presence gate（auto-trigger）不
+        再读旧键拼写——仅旧键的 checkpoint 不算 attempted injection，
+        seam 不触发，落入 reviewed-rejection 分支。"""
+        result = _fail_result()
+        _maybe_auto_trigger_replan(_state(blade_uid="abc123"), result)
+        assert "replan_requested" not in result
 
 
 # ---------------------------------------------------------------------------

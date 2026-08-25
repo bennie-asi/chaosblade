@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Sequence
 
+
 #: Ledger layer keys.
 ANCHOR = "anchor"
 STATE = "state"
@@ -312,8 +313,8 @@ def render_ledger(
             lines.append(f"  {_clip(goal)}")
         if isinstance(spec, Mapping) and spec:
             scope = spec.get("scope", "")
-            target = spec.get("blade_target", "")
-            action = spec.get("blade_action", "")
+            target = spec.get("fault_target", "")
+            action = spec.get("fault_action", "")
             ns = spec.get("namespace", "")
             names = spec.get("names") or []
             desc = f"  {scope}/{target}/{action}"

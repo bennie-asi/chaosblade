@@ -8,7 +8,7 @@ is physically unobservable.
 
 Architecture: Protocol/Registry pattern (identical to target_health.py).
 - FeasibilityChecker Protocol — one per resource dimension (mem/cpu/disk)
-- _REGISTRY dict — dispatch on spec.blade_target
+- _REGISTRY dict — dispatch on spec.fault_target
 - assess_feasibility() — single entry point, fail-open
 
 Purely advisory by default. When settings.feasibility_check_block_on_impossible
@@ -58,10 +58,10 @@ class FeasibilityReport:
 
 
 class FeasibilityChecker(Protocol):
-    blade_target: str
+    fault_target: str
     # Whether this dimension's probe depends on the cluster metrics-server
     # (``kubectl top``). Declared per-checker so ``assess_feasibility`` never
-    # hard-codes which blade_targets need it — the metrics-server pre-check is
+    # hard-codes which fault_targets need it — the metrics-server pre-check is
     # driven by this flag instead of a fixed ("mem","cpu") tuple.
     requires_metrics_server: bool
 
@@ -74,9 +74,9 @@ _REGISTRY: dict[str, FeasibilityChecker] = {}
 
 
 def register_feasibility_checker(checker: FeasibilityChecker) -> None:
-    _REGISTRY[checker.blade_target] = checker
+    _REGISTRY[checker.fault_target] = checker
     logger.info(
-        "registered feasibility checker: blade_target=%s", checker.blade_target
+        "registered feasibility checker: fault_target=%s", checker.fault_target
     )
 
 
@@ -156,11 +156,11 @@ async def assess_feasibility(
 ) -> FeasibilityReport | None:
     """Single entry point — safety_check calls this once per turn.
 
-    Returns None when no checker exists for the blade_target or the
+    Returns None when no checker exists for the fault_target or the
     checker cannot determine feasibility (missing data). None is
     equivalent to OK — fail-open.
     """
-    checker = _REGISTRY.get(spec.blade_target)
+    checker = _REGISTRY.get(spec.fault_target)
     if checker is None:
         return None
     try:
@@ -180,8 +180,8 @@ async def assess_feasibility(
         return await checker.assess(spec, kubeconfig)
     except Exception as exc:
         logger.warning(
-            "feasibility checker failed for blade_target=%s: %s",
-            spec.blade_target,
+            "feasibility checker failed for fault_target=%s: %s",
+            spec.fault_target,
             exc,
         )
         return None

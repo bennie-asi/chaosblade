@@ -140,7 +140,6 @@ class TestFaultPayloadSchema:
         props = FAULT_PAYLOAD_SCHEMA["properties"]
         assert "fault_intent" in props
         assert "kubeconfig" in props
-        assert "direct" in props
         assert "auto_recover" in props
 
     def test_fault_intent_schema_required_fields(self):

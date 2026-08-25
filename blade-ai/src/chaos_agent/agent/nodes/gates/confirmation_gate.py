@@ -178,8 +178,8 @@ async def confirmation_gate(state: AgentState) -> dict:
     fault_intent_brief = {
         "fault_type": spec.fault_type,    # derived: "{scope}-{target}-{action}"
         "scope":      spec.scope,
-        "target":     spec.blade_target,  # blade "target" axis: cpu / mem / network / ...
-        "action":     spec.blade_action,  # blade "action" axis: fullload / load / loss / ...
+        "target":     spec.fault_target,  # blade "target" axis: cpu / mem / network / ...
+        "action":     spec.fault_action,  # blade "action" axis: fullload / load / loss / ...
     } if spec and spec.fault_type else None
 
     confirmation_info = {
@@ -188,7 +188,7 @@ async def confirmation_gate(state: AgentState) -> dict:
         "target": target,
         # Human-facing summary first (finish_planning's summary, stored by
         # extract_planning_metadata); the head-of-plan slice is only a
-        # fallback for legacy/direct paths that never produced one.
+        # fallback for paths that never produced one.
         "plan_summary": state.get("plan_summary") or (plan[:500] if plan else ""),
         "safety_status": safety_status,
         "safety_reason": state.get("safety_reason"),

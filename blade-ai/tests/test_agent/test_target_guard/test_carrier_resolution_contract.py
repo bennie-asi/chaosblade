@@ -30,7 +30,7 @@ from chaos_agent.agent.target_guard.types import ConfidenceLevel, EffectiveTarge
 def _effective() -> EffectiveTarget:
     return EffectiveTarget(
         scope="node", namespace="", names=("node-a",),
-        blade_target="network", confidence=ConfidenceLevel.HIGH,
+        fault_target="network", confidence=ConfidenceLevel.HIGH,
         raw_command="kubectl exec dbg -- chroot /host iptables -L",
     )
 

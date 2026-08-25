@@ -25,13 +25,13 @@ def _inject_values() -> dict:
         namespace="arms-prom",
         scope="pod",
         names=("pod-a",),
-        blade_target="cpu",
-        blade_action="fullload",
+        fault_target="cpu",
+        fault_action="fullload",
         params={"cpu-percent": "80"},
     )
     return {
         "fault_spec": spec.to_dict(),
-        "blade_uid": "uid-1",
+        "experiment_uid": "uid-1",
         "result": {"success": True},
         "verification": {
             "level": "verified",
@@ -91,7 +91,7 @@ def test_status_summary_preserves_legacy_server_inject_shape():
         "task_id": "task-1",
         "task_state": "injected",
         "fault_type": "pod-cpu-fullload",
-        "blade_uid": "uid-1",
+        "experiment_uid": "uid-1",
         "fault_spec": _inject_values()["fault_spec"],
         "target": {"namespace": "arms-prom", "names": ["pod-a"]},
         "verification": {"level": "verified"},
@@ -108,7 +108,9 @@ def test_status_summary_preserves_legacy_server_inject_shape():
         "task_id": "task-1",
         "result": "injected",
         "fault_type": "pod-cpu-fullload",
-        "blade_uid": "uid-1",
+        # Legacy-spelling input pins the hydrate path — the output keeps
+        # the modern key only (phase-10 key-face normalisation).
+        "experiment_uid": "uid-1",
         "fault_spec": _inject_values()["fault_spec"],
         "targets": [{"name": "pod-a", "namespace": "arms-prom"}],
         "verification": {"level": "verified"},
@@ -209,7 +211,7 @@ async def test_finalize_failed_inject_persists_failed_status_and_summary():
     store = _SessionStore()
     values = {
         **_inject_values(),
-        "blade_uid": "",
+        "experiment_uid": "",
         "verification": None,
         "error": "execution_failed: iptables not found",
         "failure_reason": "execution_failed: iptables not found",
@@ -231,7 +233,7 @@ async def test_finalize_failed_inject_persists_failed_status_and_summary():
 @pytest.mark.asyncio
 async def test_finalize_cancelled_inject_keeps_summary_but_marks_cancelled():
     store = _SessionStore()
-    values = {**_inject_values(), "blade_uid": "", "verification": None}
+    values = {**_inject_values(), "experiment_uid": "", "verification": None}
 
     await finalize_inject_session(
         store,

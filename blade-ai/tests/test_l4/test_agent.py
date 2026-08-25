@@ -148,15 +148,15 @@ class TestL4ResilienceAgentRecover:
                 "parent_task_id": inject_task_id,
                 "operation": "recover",
                 "tui_session_id": "sid-from-snapshot",
-                "blade_uid": "uid-from-snapshot",
+                "experiment_uid": "uid-from-snapshot",
                 "skill_name": "pod-cpu-fullload",
                 "fault_spec": {
                     "namespace": "default",
                     "scope": "pod",
                     "names": ["demo"],
                     "labels": {},
-                    "blade_target": "cpu",
-                    "blade_action": "fullload",
+                    "fault_target": "cpu",
+                    "fault_action": "fullload",
                     "params": {"cpu-percent": "80"},
                 },
                 "kubeconfig": kubeconfig_override or "",
@@ -164,7 +164,7 @@ class TestL4ResilienceAgentRecover:
             }
             return RecoverInitialResolution(
                 initial_state=initial,
-                source_values={"messages": ["baseline"], "blade_uid": "uid-from-snapshot"},
+                source_values={"messages": ["baseline"], "experiment_uid": "uid-from-snapshot"},
                 source="snapshot",
             )
 

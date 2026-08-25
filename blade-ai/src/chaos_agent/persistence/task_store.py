@@ -16,7 +16,7 @@ Usage::
     from chaos_agent.persistence.task_store import get_task_store
 
     store = await get_task_store()
-    await store.upsert("task-1", skill_name="pod-kill", blade_uid="abc")
+    await store.upsert("task-1", skill_name="pod-kill", experiment_uid="abc")
     data = await store.get("task-1")
     metrics = await store.get_metric("task-1")
 """
@@ -44,10 +44,40 @@ logger = logging.getLogger(__name__)
 # Lifecycle states that carry a final verdict. ``infer_task_state`` returns
 # "injecting" as a fallback whenever the record shows no lifecycle evidence,
 # and that fallback must never overwrite a verdict already on record.
+# "cancelled" joins the set: once a task is cancelled (intent rejected /
+# turn aborted), later field-less flushes must not resurrect it.
 _TERMINAL_TASK_STATES = frozenset({
     "injected", "recovered", "partial_recovered",
-    "failed", "rejected", "completed",
+    "failed", "rejected", "completed", "cancelled",
 })
+
+# Fields whose presence proves the pipeline has taken ownership of a task
+# (an intent converged, a fault spec produced, a plan generated, a command
+# issued, a verdict recorded, ...). A row with none of them is a newborn
+# anchor — e.g. the bare ``upsert(task_id)`` the tracer does before
+# persisting spans — and must surface as "pending", not "injecting"
+# (see _infer_fields). ``confirmed_intent`` never lands in a column but
+# is part of the in-memory merge during upsert, so it is still evidence.
+_LIFECYCLE_EVIDENCE_FIELDS = (
+    "fault_spec",
+    "target",
+    "params",
+    "namespace",
+    "target_name",
+    "experiment_uid",
+    "needs_confirm",
+    "confirmed_intent",
+    "plan_summary",
+    "safety_reason",
+    "verification",
+    "recover_verification",
+    "result",
+    "execution_artifacts",
+    "injection_start_time",
+    "finished_at",
+    "error",
+    "skill_name",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +134,7 @@ class TaskStore:
         # already merges both tables, and inference must see the same record.
         # Deriving from the tasks row alone let a field-less tracer flush
         # re-project a verified task back to the "injecting" fallback
-        # (inject-9bf2dddd: tasks row has blade_uid but no verification
+        # (inject-9bf2dddd: tasks row has experiment_uid but no verification
         # column, so infer saw "no verification" and regressed 'injected').
         inference_base = dict(merged)
         if row:
@@ -202,7 +232,7 @@ class TaskStore:
                 "target": target,
                 "target_name": d.get("target_name", ""),
                 "params": detail.get("params") or {},
-                "blade_uid": d.get("blade_uid", ""),
+                "experiment_uid": d.get("experiment_uid", ""),
                 "plan_summary": detail.get("plan_summary") or "",
                 "gmt_create": d.get("gmt_create", ""),
                 "status": "success" if not d.get("error") else "failed",
@@ -277,6 +307,11 @@ class TaskStore:
         """Return combined metric data (status + spans + summary) for a task.
 
         This is the primary method for the ``metric --task-id`` command.
+        Beyond lifecycle/metrics it also carries the trace narrative —
+        ``fault_spec`` (original intent), ``feasibility_report``, and the
+        raw ``postmortem`` dict (path / summary / markdown) — so a detail
+        view renders the whole evidence chain from one envelope. Clients
+        parse the markdown's ``## Timeline`` section themselves.
         """
         task = await self.get(task_id)
         if task is None:
@@ -331,12 +366,15 @@ class TaskStore:
             "model_name": task.get("model_name") or "",
             "target": task.get("target"),
             "params": task.get("params"),
-            "blade_uid": task.get("blade_uid", ""),
+            "experiment_uid": task.get("experiment_uid", ""),
             "safety_status": task.get("safety_status", "pending"),
             "safety_reason": task.get("safety_reason"),
             "needs_confirm": bool(task.get("needs_confirm", 0)),
             "verification": task.get("verification"),
             "recover_verification": task.get("recover_verification"),
+            "fault_spec": task.get("fault_spec") or {},
+            "feasibility_report": task.get("feasibility_report"),
+            "postmortem": task.get("postmortem"),
             "plan_summary": task.get("plan_summary", ""),
             "error": merged_error,
             "gmt_create": task.get("gmt_create", ""),
@@ -394,13 +432,26 @@ class TaskStore:
                 # filters on ``task_state in {"injecting","injected"}``
                 # but was reading ``undefined`` on every row.
                 "task_state": _ts,
+                # Commitment evidence, same source of truth as
+                # ``select_active_tasks`` — verbatim: a task only counts
+                # as "in flight" once a command was actually issued
+                # (``injection_start_time`` write-once at execute). Not
+                # ``task_state == "injected"`` OR-ed in: that would
+                # re-open the very split this flag closes (a corrupted
+                # injected-without-evidence row shown by the boot card
+                # but rejected by recovery). ``task_state`` alone cannot
+                # tell "running" from "died mid-flight" (both project
+                # to injecting), so consumers filtering unfinished work
+                # — e.g. the boot card's pending list — should require
+                # ``committed !== false`` alongside the state check.
+                "committed": bool(detail.get("injection_start_time")),
                 "operation": _op,
                 "stage": _stage,
                 "status": infer_status(_stage, _ts, _op),
                 "phase": task.get("phase", "planning"),
                 "fault_type": fault_type,
                 "skill_name": task.get("skill_name", ""),
-                "blade_uid": task.get("blade_uid", ""),
+                "experiment_uid": task.get("experiment_uid", ""),
                 "target": target,
                 "gmt_create": task.get("gmt_create", ""),
                 "gmt_modified": task.get("gmt_modified", ""),
@@ -442,7 +493,12 @@ class TaskStore:
         that need to be resumed.
         """
         try:
-            from chaos_agent.agent.state import infer_task_state, infer_stage, infer_phase
+            from chaos_agent.agent.state import (
+                has_active_fault,
+                infer_phase,
+                infer_stage,
+                infer_task_state,
+            )
 
             values = dict(merged)
             # Deserialize JSON fields for inference
@@ -483,12 +539,30 @@ class TaskStore:
                     phase = "completed"  # More descriptive than "planning" for a completed task
 
             # Detect waiting_input: task is paused at an interrupt point
-            # (needs confirmation but no blade_uid yet, or interaction_mode=tui
-            # with confirmed_intent still None)
-            if task_state == "injecting" and values.get("needs_confirmation") and not values.get("blade_uid"):
+            # (needs confirmation but no committed fault yet, or
+            # interaction_mode=tui with confirmed_intent still None).
+            # ``cancelled`` joins the first branch: ids are reused across
+            # rejections, and the *next* clarification round writes
+            # needs_confirm again — that row is waiting on a fresh
+            # confirmation card, and the TUI crash-recovery detector must
+            # still be able to find it (a cancelled verdict from the
+            # previous round must not blind it).
+            if task_state in ("injecting", "cancelled") and values.get("needs_confirmation") and not has_active_fault(values):
                 task_state = "waiting_input"
-            elif values.get("interaction_mode") == "tui" and not values.get("confirmed_intent") and not values.get("blade_uid"):
+            elif values.get("interaction_mode") == "tui" and not values.get("confirmed_intent") and not has_active_fault(values):
                 task_state = "waiting_input"
+
+            # Newborn anchor: a row with zero lifecycle evidence has not
+            # entered its pipeline yet. Reporting it as "injecting" made
+            # rejected / abandoned intents masquerade as unfinished work
+            # on the boot card. Runs AFTER waiting_input detection so rows
+            # the crash-recovery detector claims keep their semantics
+            # (interaction_mode is deliberately not evidence — it marks
+            # the session, not pipeline ownership).
+            if task_state == "injecting" and not any(
+                values.get(_field) for _field in _LIFECYCLE_EVIDENCE_FIELDS
+            ):
+                task_state = "pending"
 
             return {
                 "task_state": task_state,
@@ -517,8 +591,8 @@ class TaskStore:
                     scope=str(scope),
                     names=tuple(str(n) for n in (target.get("names") or [])),
                     labels=dict(target.get("labels") or {}),
-                    blade_target=str(target_action),
-                    blade_action=str(action),
+                    fault_target=str(target_action),
+                    fault_action=str(action),
                     params={
                         k: v
                         for k, v in params.items()

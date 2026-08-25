@@ -55,7 +55,7 @@ class TestFinalizeSessionStoreStatusContract:
         task_id = new_task_id()
         state = {
             "task_id": task_id,
-            "blade_uid": "exp-abc123",
+            "experiment_uid": "exp-abc123",
             "verification": _verification("failed", "unknown", "unverified"),
             "messages": [],
         }
@@ -75,7 +75,7 @@ class TestFinalizeSessionStoreStatusContract:
             lambda: store,
         )
         task_id = new_task_id()
-        state = {"task_id": task_id, "blade_uid": "exp-abc123", "messages": []}
+        state = {"task_id": task_id, "experiment_uid": "exp-abc123", "messages": []}
 
         await _finalize_session_store(state, task_id, "inject", {})
 
@@ -93,7 +93,7 @@ class TestFinalizeSessionStoreStatusContract:
         task_id = new_task_id()
         state = {
             "task_id": task_id,
-            "blade_uid": "exp-abc123",
+            "experiment_uid": "exp-abc123",
             "verification": _verification("passed", "passed", "verified"),
             "messages": [],
         }
@@ -270,10 +270,10 @@ class TestLoadMemory:
             assert msgs[0].id, f"{node.__name__} message must have explicit id"
 
     @pytest.mark.asyncio
-    async def test_direct_mode_message_has_explicit_id(
+    async def test_structured_entry_message_has_explicit_id(
         self, sample_agent_state, tmp_memory_dir, monkeypatch,
     ):
-        """Direct-mode synthesised HumanMessages also need an explicit id."""
+        """Structured-entry synthesised HumanMessages also need an explicit id."""
         monkeypatch.setattr(settings, "memory_dir", tmp_memory_dir)
 
         state = dict(sample_agent_state)
@@ -295,7 +295,7 @@ class TestSaveMemory:
         state = sample_agent_state
         state["task_id"] = "task-save-001"
         state["skill_name"] = "pod-delete"
-        state["blade_uid"] = "uid-123"
+        state["experiment_uid"] = "uid-123"
         state["operation"] = "inject"
         state["error"] = None
 
@@ -313,7 +313,7 @@ class TestSaveMemory:
             state = sample_agent_state
             state["task_id"] = "task-save-002"
             state["skill_name"] = "pod-delete"
-            state["blade_uid"] = ""
+            state["experiment_uid"] = ""
             state["operation"] = "inject"
             state["error"] = "Execution failed"
 
@@ -361,7 +361,7 @@ class TestSaveMemory:
             state["skill_name"] = "network-delay"
             state["target"] = {"namespace": "default", "names": ["my-pod"]}
             state["params"] = {"duration": 60}
-            state["blade_uid"] = "uid-struct"
+            state["experiment_uid"] = "uid-struct"
             state["operation"] = "inject"
             state["error"] = None
 

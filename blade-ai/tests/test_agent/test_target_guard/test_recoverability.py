@@ -317,6 +317,37 @@ class TestBoundedContainerStopLoop:
         assert assess("kill -9 1234", "process").recoverable is False
 
 
+class TestHostTimerPayloadFamily:
+    """Host-channel ``systemd-run`` timer family extraction.
+
+    The host skill 降级方案 timers (进程假死挂起 et al.) carry their inverse
+    command inside a quoted ``sh -c 'kill -CONT $(…)'`` script. The
+    host-entry unwrap only knows chroot/nsenter/unshare, so without surfacing
+    the quoted text the family resolved EMPTY and the fault-type lock lost
+    its pin (verified pre-fix: family '' for the exact skill command).
+    """
+
+    def test_quoted_sigCONT_timer_classifies_as_process(self):
+        cmd = (
+            "systemd-run --on-active=300s --unit=blade-cont-nginx "
+            "sh -c 'kill -CONT $(pgrep -f nginx)'"
+        )
+        assert classify_host_operation(cmd) == "process"
+
+    def test_direct_argv_timer_classifies_as_network(self):
+        cmd = (
+            "systemd-run --on-active=600s --unit=blade-restore-drop "
+            "iptables -D OUTPUT -d 10.0.0.5 -j DROP"
+        )
+        assert classify_host_operation(cmd) == "network"
+
+    def test_non_quoted_timer_family_unchanged(self):
+        # No quotes to surface — the plain-argv family regexes already see
+        # iptables; the quoted-text join must not disturb them.
+        cmd = "systemd-run --on-active=600s --unit=x systemctl restart nginx"
+        assert classify_host_operation(cmd) == ""
+
+
 class TestTimeoutBoundedListener:
     """Port occupation via a timeout(1)-bounded ``nc -l`` listener.
 

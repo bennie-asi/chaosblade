@@ -90,7 +90,6 @@ async def inject_stream(request: InjectRequest, req: Request):
         ssh_user=getattr(request, "ssh_user", "") or getattr(settings, "ssh_user", ""),
         ssh_key_path=getattr(request, "ssh_key_path", "") or getattr(settings, "ssh_key_path", ""),
         ssh_port=getattr(request, "ssh_port", None) or getattr(settings, "ssh_port", None),
-        direct=request.direct,
     )
 
     config = {"configurable": {"thread_id": task_id}, "recursion_limit": settings.recursion_limit}
@@ -211,26 +210,16 @@ async def inject_stream(request: InjectRequest, req: Request):
         except Exception as e:
             logger.exception(f"Stream inject failed for task {task_id}")
 
-            # Auto-rollback: a ChaosBlade experiment is torn down by its UID via
-            # blade_destroy. Host-native carriers have no UID and no code-side
-            # reverse — their safety net is the injection's own
-            # ``--timeout``/``--runtime`` self-termination plus the explicit
-            # recover graph (LLM reads the skill-case reverse command).
-            rollback_info = ""
-            try:
-                current_state = await graph.aget_state(config)
-                if current_state and current_state.values:
-                    _values = current_state.values
-                    blade_uid = _values.get("blade_uid", "")
-                    kubeconfig = _values.get("kubeconfig", "")
-                    if blade_uid:
-                        from chaos_agent.tools.blade import blade_destroy
-                        await blade_destroy.ainvoke(
-                            {"uid": blade_uid, "kubeconfig": kubeconfig}
-                        )
-                        rollback_info = f" (auto-rolled back blade_uid={blade_uid})"
-            except Exception as rb_err:
-                rollback_info = f" (rollback FAILED: {rb_err})"
+            # Auto-rollback: dispatched by fault-handle kind through the
+            # provider registry (blade-family UIDs are destroyed; UID-less
+            # native carriers decline — their safety net is the injection's
+            # own ``--timeout``/``--runtime`` self-termination plus the
+            # explicit recover graph (LLM reads the skill-case reverse
+            # command)). Shared seam with the CLI runner — the single tested
+            # implementation lives in cli/session_finalize.py.
+            from chaos_agent.cli.session_finalize import auto_rollback
+
+            rollback_info = await auto_rollback(graph, config)
 
             yield StreamEvent(
                 type="error",

@@ -28,7 +28,6 @@ from chaos_agent.agent.prompts.sections.knowledge_sections import get_knowledge_
 from chaos_agent.agent.prompts.sections.recovery import (
     get_recover_role_section,
     get_recover_core_principles_section,
-    get_recover_tools_section,
     get_recover_delay_section,
     get_recover_skill_priority_section,
     get_recover_output_format_section,
@@ -40,7 +39,6 @@ from chaos_agent.agent.prompts.sections.safety import (
 )
 from chaos_agent.agent.prompts.sections.verification import (
     get_verifier_role_section,
-    get_verifier_tools_section,
     get_verifier_layer2_section,
     get_verifier_output_format_section,
     get_verifier_core_principles_section,
@@ -74,13 +72,12 @@ __all__ = [
     "get_safety_section",
     "get_tools_section",
     "get_guidelines_section", "get_execution_directives_section",
-    "get_verifier_role_section", "get_verifier_tools_section",
+    "get_verifier_role_section",
     "get_verifier_layer2_section",
     "get_verifier_output_format_section",
     "get_verifier_core_principles_section", "get_verifier_remember_section",
     "get_recover_role_section", "get_recover_core_principles_section",
-    "get_recover_tools_section", "get_recover_delay_section",
-    "get_recover_skill_priority_section",
+    "get_recover_delay_section", "get_recover_skill_priority_section",
     "get_recover_output_format_section",
     "get_recover_remember_section",
     "build_recover_verifier_system_prompt",

@@ -25,7 +25,7 @@ def test_task_snapshot_prefers_task_store_when_no_increment_log():
     snapshot = TaskSnapshot.from_sources(
         task_id="task-inject",
         record={
-            "blade_uid": "uid-from-store",
+            "experiment_uid": "uid-from-store",
             "skill_name": "pod-cpu-fullload",
             "target": _target("store-pod"),
             "params": {"cpu-percent": "80"},
@@ -35,7 +35,7 @@ def test_task_snapshot_prefers_task_store_when_no_increment_log():
         session={
             "result_summary": {
                 "data": {
-                    "blade_uid": "uid-from-session",
+                    "experiment_uid": "uid-from-session",
                     "fault_type": "pod-network-loss",
                     "target": _target("session-pod"),
                     "params": {"percent": "100"},
@@ -50,7 +50,7 @@ def test_task_snapshot_prefers_task_store_when_no_increment_log():
     )
 
     assert snapshot is not None
-    assert snapshot.blade_uid == "uid-from-store"
+    assert snapshot.experiment_uid == "uid-from-store"
     assert snapshot.skill_name == "pod-cpu-fullload"
     assert snapshot.fault_type == "pod-cpu-fullload"
     assert snapshot.target["names"] == ["store-pod"]
@@ -63,7 +63,7 @@ def test_task_snapshot_prefers_session_when_increment_log_exists():
     snapshot = TaskSnapshot.from_sources(
         task_id="task-inject",
         record={
-            "blade_uid": "uid-from-store",
+            "experiment_uid": "uid-from-store",
             "skill_name": "pod-cpu-fullload",
             "target": _target("store-pod"),
             "params": {"cpu-percent": "80"},
@@ -73,7 +73,7 @@ def test_task_snapshot_prefers_session_when_increment_log_exists():
         session={
             "result_summary": {
                 "data": {
-                    "blade_uid": "uid-from-session",
+                    "experiment_uid": "uid-from-session",
                     "fault_type": "pod-network-loss",
                     "target": _target("session-pod"),
                     "params": {"percent": "100"},
@@ -89,7 +89,7 @@ def test_task_snapshot_prefers_session_when_increment_log_exists():
     )
 
     assert snapshot is not None
-    assert snapshot.blade_uid == "uid-from-session"
+    assert snapshot.experiment_uid == "uid-from-session"
     assert snapshot.skill_name == "pod-cpu-fullload"
     assert snapshot.fault_type == "pod-network-loss"
     assert snapshot.target["names"] == ["session-pod"]
@@ -149,7 +149,7 @@ def test_task_snapshot_reads_jsonl_even_when_json_snapshot_missing(tmp_path):
     assert session is not None
     assert len(session["messages"]) == 2
     assert snapshot is not None
-    assert snapshot.blade_uid == "uid-jsonl-only"
+    assert snapshot.experiment_uid == "uid-jsonl-only"
     assert "blade_create" in snapshot.inject_context
 
 
@@ -172,8 +172,8 @@ def test_task_snapshot_builds_fault_spec_from_merged_context():
         "scope": "pod",
         "names": ["demo"],
         "labels": {},
-        "blade_target": "network",
-        "blade_action": "loss",
+        "fault_target": "network",
+        "fault_action": "loss",
         "params": {"percent": "100"},
         "params_flags": [],
         "duration_seconds": 0,
@@ -200,8 +200,8 @@ def test_task_snapshot_prefers_record_fault_spec_over_stale_legacy_fields():
                 "scope": "pod",
                 "names": ["fresh-pod"],
                 "labels": {"app": "demo"},
-                "blade_target": "network",
-                "blade_action": "loss",
+                "fault_target": "network",
+                "fault_action": "loss",
                 "params": {"percent": "100"},
                 "params_flags": [],
                 "duration_seconds": 0,
@@ -223,7 +223,7 @@ def test_task_snapshot_prefers_record_fault_spec_over_stale_legacy_fields():
         "resource_type": "pod",
     }
     assert snapshot.params == {"percent": "100"}
-    assert snapshot.fault_spec()["blade_target"] == "network"
+    assert snapshot.fault_spec()["fault_target"] == "network"
     assert snapshot.fault_spec()["names"] == ["fresh-pod"]
 
 
@@ -237,8 +237,8 @@ def test_task_snapshot_increment_log_can_override_record_fault_spec():
                 "scope": "pod",
                 "names": ["old-pod"],
                 "labels": {},
-                "blade_target": "network",
-                "blade_action": "loss",
+                "fault_target": "network",
+                "fault_action": "loss",
                 "params": {"percent": "100"},
                 "params_flags": [],
                 "duration_seconds": 0,
@@ -264,7 +264,7 @@ def test_task_snapshot_increment_log_can_override_record_fault_spec():
     assert snapshot.fault_type == "pod-cpu-fullload"
     assert snapshot.target["names"] == ["session-pod"]
     assert snapshot.params == {"cpu-percent": "80"}
-    assert snapshot.fault_spec()["blade_target"] == "cpu"
+    assert snapshot.fault_spec()["fault_target"] == "cpu"
     assert snapshot.fault_spec()["names"] == ["session-pod"]
 
 
@@ -296,7 +296,7 @@ async def test_recover_initial_from_task_snapshot_uses_snapshot_fields():
     snapshot = TaskSnapshot.from_sources(
         task_id="task-inject",
         record={
-            "blade_uid": "uid-from-store",
+            "experiment_uid": "uid-from-store",
             "skill_name": "pod-cpu-fullload",
             "target": _target("demo"),
             "params": {"cpu-percent": "80"},
@@ -325,7 +325,7 @@ async def test_recover_initial_from_task_snapshot_uses_snapshot_fields():
     assert initial["task_id"] == "task-recover"
     assert initial["parent_task_id"] == "task-inject"
     assert initial["tui_session_id"] == "sid-1"
-    assert initial["blade_uid"] == "uid-from-store"
+    assert initial["experiment_uid"] == "uid-from-store"
     assert initial["skill_name"] == "pod-cpu-fullload"
     assert initial["fault_type"] == "pod-cpu-fullload"
     assert initial["skill_case_content"] == "skill case text"
@@ -390,7 +390,7 @@ async def test_resolver_source_values_preserve_snapshot_verification(monkeypatch
     snapshot = TaskSnapshot.from_sources(
         task_id="task-inject",
         record={
-            "blade_uid": "uid-from-store",
+            "experiment_uid": "uid-from-store",
             "skill_name": "pod-cpu-fullload",
             "target": _target("demo"),
             "params": {"cpu-percent": "80"},
@@ -548,3 +548,110 @@ async def test_build_recover_initial_from_task_snapshot_carries_side_effects():
     )
     assert initial2 is not None
     assert initial2["blast_radius_detail"] == "checkpoint blast radius"
+
+
+# ---------------------------------------------------------------------------
+# R4: attribution facts (injection_method / fault_handle) survive finalize
+# persistence and feed recover hydration
+# ---------------------------------------------------------------------------
+
+class TestR4AttributionHydration:
+    def test_session_attribution_wins_with_increment_log(self):
+        native_handle = {"kind": "native", "method": "kubectl_native"}
+        snapshot = TaskSnapshot.from_sources(
+            task_id="task-inject",
+            record={
+                "injection_method": "kubectl_exec",
+                "fault_handle": {"kind": "blade_uid", "value": "u", "method": "kubectl_exec"},
+                "target": _target("p"),
+            },
+            session={
+                "result_summary": {
+                    "data": {
+                        "injection_method": "kubectl_native",
+                        "fault_handle": native_handle,
+                    }
+                },
+                "messages": [],
+            },
+            has_increment_log=True,
+        )
+        assert snapshot is not None
+        assert snapshot.injection_method == "kubectl_native"
+        assert snapshot.fault_handle == native_handle
+
+    def test_record_attribution_wins_without_increment_log(self):
+        record_handle = {"kind": "blade_uid", "value": "uid-r", "method": "host_blade"}
+        snapshot = TaskSnapshot.from_sources(
+            task_id="task-inject",
+            record={
+                "injection_method": "host_blade",
+                "fault_handle": record_handle,
+                "target": _target("p"),
+            },
+            session={
+                "result_summary": {
+                    "data": {
+                        "injection_method": "kubectl_exec",
+                        "fault_handle": {"kind": "blade_uid", "value": "uid-s"},
+                    }
+                },
+                "messages": [],
+            },
+            has_increment_log=False,
+        )
+        assert snapshot is not None
+        assert snapshot.injection_method == "host_blade"
+        assert snapshot.fault_handle == record_handle
+
+    @pytest.mark.asyncio
+    async def test_native_fault_handle_hydrates_recover_initial(self):
+        """Old store row (no injection_method column) + finalize-persisted
+        native attribution: the recover initial state still carries the
+        handle — a UID-less fault is recoverable across a restart."""
+        native_handle = {"kind": "native", "method": "kubectl_native"}
+        snapshot = TaskSnapshot.from_sources(
+            task_id="task-inject",
+            record={
+                "skill_name": "pod-replicas-scale",
+                "target": _target("demo"),
+                "params": {"replicas": "0"},
+            },
+            session={
+                "result_summary": {
+                    "data": {
+                        "injection_method": "kubectl_native",
+                        "fault_handle": native_handle,
+                    }
+                },
+                "messages": [],
+            },
+            has_increment_log=True,
+        )
+        assert snapshot is not None
+        assert snapshot.experiment_uid == ""
+
+        initial = await build_recover_initial_from_task_snapshot(
+            snapshot, record_task_id="task-recover"
+        )
+        assert initial is not None
+        assert initial["injection_method"] == "kubectl_native"
+        assert initial["fault_handle"] == native_handle
+        assert initial["experiment_uid"] == ""
+
+    def test_build_inject_data_persists_attribution_facts(self):
+        """Supply side: finalize projection freezes the attribution facts into
+        the persisted result-card data."""
+        from chaos_agent.agent.result.operation_result import (
+            build_inject_data_from_state,
+        )
+
+        data = build_inject_data_from_state(
+            {"injection_method": "kubectl_native"}, "task-inject"
+        )
+        assert data["injection_method"] == "kubectl_native"
+        assert data["fault_handle"] == {
+            "kind": "native", "method": "kubectl_native"
+        }
+        assert data["experiment_uid"] == ""
+        assert "blade_uid" not in data

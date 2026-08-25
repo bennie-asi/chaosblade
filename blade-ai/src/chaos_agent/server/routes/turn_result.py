@@ -46,7 +46,11 @@ async def build_result_payload(
     """Read final graph state and shape it into a ResultCard envelope.
 
     Returns ``None`` when nothing operational happened (chat /
-    capability Q&A / ambiguous turns with no plan and no blade_uid).
+    capability Q&A / ambiguous turns with no plan and no experiment_uid).
+
+    ``started_monotonic`` is the PIPELINE DISPATCH moment (not the dialogue
+    turn start): the reported duration must cover only the operation itself.
+    Intent clarification that preceded dispatch is conversation time.
     """
     try:
         final_state = await graph.aget_state(config)
@@ -84,7 +88,12 @@ async def build_recover_result_payload(
     inject_state_values: dict,
     started_monotonic: float,
 ) -> dict | None:
-    """Build a result card payload for recover_graph completion."""
+    """Build a result card payload for recover_graph completion.
+
+    ``started_monotonic`` is the RECOVER GRAPH start moment (not the
+    dialogue turn start) — same duration-scope rule as
+    ``build_result_payload``.
+    """
     try:
         final = await recover_graph.aget_state(recover_config)
     except Exception:

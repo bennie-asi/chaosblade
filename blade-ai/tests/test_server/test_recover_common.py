@@ -18,7 +18,7 @@ class _CheckpointPipeline:
             values = {
                 "task_id": "task-inject",
                 "tui_session_id": "sid-1",
-                "blade_uid": "blade-123",
+                "experiment_uid": "blade-123",
                 "skill_name": "pod-cpu-fullload",
                 "fault_spec": {
                     "namespace": "default",
@@ -44,7 +44,7 @@ async def test_recover_initial_state_uses_checkpoint_when_available():
 
     assert initial["task_id"] == "task-recover"
     assert initial["parent_task_id"] == "task-inject"
-    assert initial["blade_uid"] == "blade-123"
+    assert initial["experiment_uid"] == "blade-123"
     assert initial["recover_phase"] == "layer1_recovery"
     assert initial["layer1_iteration_count"] == 0
     assert initial["layer2_context_added"] is False
@@ -65,7 +65,7 @@ async def test_recover_initial_state_uses_resolver_without_checkpoint(monkeypatc
             "task_id": record_task_id,
             "parent_task_id": task_id,
             "operation": "recover",
-            "blade_uid": "blade-from-store",
+            "experiment_uid": "blade-from-store",
             "skill_name": "pod-network-loss",
             "fault_spec": {
                 "namespace": "default",
@@ -96,7 +96,7 @@ async def test_recover_initial_state_uses_resolver_without_checkpoint(monkeypatc
 
     assert initial["task_id"] == "task-recover"
     assert initial["parent_task_id"] == "task-inject"
-    assert initial["blade_uid"] == "blade-from-store"
+    assert initial["experiment_uid"] == "blade-from-store"
     assert initial["recover_phase"] == "layer1_recovery"
     assert initial["layer1_iteration_count"] == 0
     assert initial["layer2_context_added"] is False
@@ -184,11 +184,11 @@ async def test_recover_store_rebuild_fills_missing_uid_from_task_jsonl(tmp_path)
     assert initial is not None
     assert initial["task_id"] == "task-recover"
     assert initial["parent_task_id"] == "task-inject"
-    assert initial["blade_uid"] == "uid-from-jsonl"
+    assert initial["experiment_uid"] == "uid-from-jsonl"
     assert initial["skill_name"] == "pod-cpu-fullload"
     assert initial["fault_spec"]["scope"] == "pod"
-    assert initial["fault_spec"]["blade_target"] == "cpu"
-    assert initial["fault_spec"]["blade_action"] == "fullload"
+    assert initial["fault_spec"]["fault_target"] == "cpu"
+    assert initial["fault_spec"]["fault_action"] == "fullload"
     assert initial["fault_spec"]["params"] == {"cpu-percent": "80"}
     assert "EXPIRED DATA" in initial["inject_context"]
     assert "blade_create" in initial["inject_context"]
@@ -208,7 +208,7 @@ async def test_recover_store_rebuild_restores_tui_session_id_from_task_file(tmp_
             "task-inject-tui-session",
             operation="inject",
             skill_name="pod-cpu-fullload",
-            blade_uid="uid-from-task-store",
+            experiment_uid="uid-from-task-store",
             target={
                 "namespace": "default",
                 "names": ["demo"],
@@ -252,7 +252,7 @@ async def test_recover_store_rebuild_prefers_task_jsonl_when_live(tmp_path):
             "task-inject-live",
             operation="inject",
             skill_name="pod-cpu-fullload",
-            blade_uid="uid-from-task-store",
+            experiment_uid="uid-from-task-store",
             inject_context="stale task-store context",
             target={
                 "namespace": "default",
@@ -295,7 +295,7 @@ async def test_recover_store_rebuild_prefers_task_jsonl_when_live(tmp_path):
         set_global_session_store(None)  # type: ignore[arg-type]
 
     assert initial is not None
-    assert initial["blade_uid"] == "uid-from-live-jsonl"
+    assert initial["experiment_uid"] == "uid-from-live-jsonl"
     assert "latest inject observation" in initial["inject_context"]
     assert initial["inject_context"] != "stale task-store context"
 
@@ -313,15 +313,15 @@ async def test_recover_initial_state_prefers_live_jsonl_over_checkpoint(tmp_path
                 values = {
                     "task_id": "task-inject-checkpoint-live",
                     "tui_session_id": "sid-checkpoint",
-                    "blade_uid": "uid-from-checkpoint",
+                    "experiment_uid": "uid-from-checkpoint",
                     "skill_name": "pod-cpu-fullload",
                     "fault_spec": {
                         "namespace": "default",
                         "scope": "pod",
                         "names": ["demo"],
                         "labels": {},
-                        "blade_target": "cpu",
-                        "blade_action": "fullload",
+                        "fault_target": "cpu",
+                        "fault_action": "fullload",
                         "params": {"cpu-percent": "80"},
                     },
                     "inject_context": "stale checkpoint context",
@@ -338,7 +338,7 @@ async def test_recover_initial_state_prefers_live_jsonl_over_checkpoint(tmp_path
             "task-inject-checkpoint-live",
             operation="inject",
             skill_name="pod-cpu-fullload",
-            blade_uid="uid-from-task-store",
+            experiment_uid="uid-from-task-store",
             inject_context="stale task-store context",
             target={
                 "namespace": "default",
@@ -380,8 +380,8 @@ async def test_recover_initial_state_prefers_live_jsonl_over_checkpoint(tmp_path
     finally:
         set_global_session_store(None)  # type: ignore[arg-type]
 
-    assert initial["blade_uid"] == "uid-from-jsonl-even-with-checkpoint"
-    assert state_values["blade_uid"] == "uid-from-jsonl-even-with-checkpoint"
+    assert initial["experiment_uid"] == "uid-from-jsonl-even-with-checkpoint"
+    assert state_values["experiment_uid"] == "uid-from-jsonl-even-with-checkpoint"
     assert "fresh jsonl observation" in initial["inject_context"]
     assert initial["inject_context"] != "stale checkpoint context"
     assert state_values["messages"] == ["baseline-message"]

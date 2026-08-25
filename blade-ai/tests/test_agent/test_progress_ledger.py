@@ -27,7 +27,7 @@ from chaos_agent.agent.progress_ledger import (
 )
 
 _SPEC = {
-    "scope": "pod", "blade_target": "network", "blade_action": "loss",
+    "scope": "pod", "fault_target": "network", "fault_action": "loss",
     "namespace": "ns", "names": ["p0"],
 }
 
@@ -708,7 +708,7 @@ def test_render_can_omit_anchor_for_combined_record():
 def test_operation_record_is_one_message_headline_plus_process_no_repeat():
     from chaos_agent.agent.result.operation_summary import build_operation_record
 
-    values = {"progress_ledger": _ledger_with_content(), "blade_uid": "x"}
+    values = {"progress_ledger": _ledger_with_content(), "experiment_uid": "x"}
     record = build_operation_record(values, "task-1")
     # ONE record: the summary headline AND the ledger's process detail.
     assert "[Task Summary]" in record
@@ -725,7 +725,7 @@ def test_operation_record_degrades_to_plain_summary_without_ledger():
         build_task_summary_text,
     )
 
-    values = {"blade_uid": "x"}
+    values = {"experiment_uid": "x"}
     assert build_operation_record(values, "t") == build_task_summary_text(values, "t")
 
 

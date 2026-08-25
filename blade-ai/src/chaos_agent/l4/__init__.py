@@ -83,7 +83,7 @@ def get_agent_card() -> dict:
             },
             {
                 "name": "Fault recovery",
-                "summary": "Deterministically destroy a fault experiment by blade_uid and verify the resource recovered.",
+                "summary": "Deterministically destroy a fault experiment by experiment_uid and verify the resource recovered.",
                 "examples": [
                     "Recover that CPU injection from just now",
                     "Clear out all the faults",
@@ -144,7 +144,7 @@ def get_agent_card() -> dict:
         output_schema={
             "type": "object",
             "properties": {
-                "blade_uid": {"type": "string"},
+                "experiment_uid": {"type": "string"},
                 "verification": {"type": "object"},
                 "task_state": {"type": "string"},
                 "recovery_level": {"type": "string"},

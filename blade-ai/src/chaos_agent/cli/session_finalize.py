@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from chaos_agent.memory.session_finalizer import (
-    finalize_inject_session as _finalize_inject_session,
+    finalize_inject_session as _finalize_inject_session,  # noqa: F401  (re-exported: cli.runner imports it from here)
 )
 
 logger = logging.getLogger(__name__)
@@ -25,27 +25,28 @@ def _format_error(e: Exception) -> tuple[int, str]:
 
 
 async def auto_rollback(graph, config) -> str:
-    """Attempt to destroy an orphaned blade experiment after inject failure.
+    """Attempt to roll back an orphaned fault handle after inject failure.
 
-    Returns a human-readable status suffix (e.g. " (auto-rolled back blade_uid=...)").
-    Returns empty string when no rollback was needed.
+    Dispatches by handle kind through the provider registry (blade UID
+    destroy, native reverse ops, ...). Returns a human-readable status
+    suffix (e.g. " (auto-rolled back experiment_uid=...)"); empty string when
+    no rollback was needed.
     """
     try:
         current_state = await graph.aget_state(config)
         if current_state and current_state.values:
-            blade_uid = current_state.values.get("blade_uid", "")
-            kubeconfig = current_state.values.get("kubeconfig", "")
-            if blade_uid:
+            values = current_state.values
+            from chaos_agent.agent.state import materialize_fault_handle
+            handle = materialize_fault_handle(values)
+            if handle:
                 logger.warning(
-                    "Auto-rollback: destroying blade experiment %s after inject failure",
-                    blade_uid,
+                    "Auto-rollback: dispatching fault handle %s after inject failure",
+                    handle,
                 )
-                from chaos_agent.tools.blade import blade_destroy
-                destroy_result = await blade_destroy.ainvoke(
-                    {"uid": blade_uid, "kubeconfig": kubeconfig}
+                from chaos_agent.agent.providers import FaultProviderRegistry
+                return await FaultProviderRegistry.rollback_handle(
+                    handle, kubeconfig=values.get("kubeconfig", ""),
                 )
-                logger.info("Auto-rollback result: %s", destroy_result)
-                return f" (auto-rolled back blade_uid={blade_uid})"
     except Exception as rb_err:
         logger.error("Auto-rollback failed: %s", rb_err)
         return f" (rollback FAILED: {rb_err})"

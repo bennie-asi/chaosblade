@@ -18,7 +18,7 @@ from chaos_agent.agent.result.operation_summary import (
     build_interrupted_record,
 )
 
-_SPEC = {"scope": "pod", "blade_target": "network", "blade_action": "loss",
+_SPEC = {"scope": "pod", "fault_target": "network", "fault_action": "loss",
          "namespace": "ns", "names": ["p0"]}
 
 
@@ -105,7 +105,7 @@ def test_error_detail_is_included_and_bounded():
 
 def test_live_fault_warning_suggests_a_check_and_does_not_order_recovery():
     record = build_interrupted_record(
-        {"progress_ledger": _ledger_mid_execution(), "blade_uid": "uid-1"},
+        {"progress_ledger": _ledger_mid_execution(), "experiment_uid": "uid-1"},
         "task-x", cause="user_cancel",
     )
     assert "advisable" in record               # advisory
@@ -113,6 +113,20 @@ def test_live_fault_warning_suggests_a_check_and_does_not_order_recovery():
     # Phrased as a suggestion, not an instruction to go recover.
     assert "must run a recovery" not in record
     assert "you must" not in record.lower()
+
+
+def test_live_fault_warning_for_native_fault_without_blade_uid():
+    # Provider-decoupled state can carry a fault_handle (e.g. python_agent)
+    # instead of a blade UID — the advisory must still fire, or an
+    # interrupted native fault would look like nothing is live.
+    record = build_interrupted_record(
+        {
+            "progress_ledger": _ledger_mid_execution(),
+            "fault_handle": {"kind": "native", "method": "python_agent"},
+        },
+        "task-x", cause="user_cancel",
+    )
+    assert "may still be in a faulted state" in record
 
 
 def test_no_live_fault_warning_when_nothing_was_executed():
@@ -275,7 +289,7 @@ def test_interruption_record_is_preserved_when_dialogue_is_trimmed():
     )
 
     record = SystemMessage(
-        content=build_interrupted_record({"blade_uid": "x"}, "task-1", cause="user_cancel"),
+        content=build_interrupted_record({"experiment_uid": "x"}, "task-1", cause="user_cancel"),
         id="rec",
     )
     messages = [record] + [

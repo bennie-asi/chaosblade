@@ -47,8 +47,7 @@ def submit_verification(
       - baseline_used: compared against the pre-injection baseline.
       - checklist: list of {"step": int, "status":
           "passed|failed|skipped|recovered_before_observation|expected|not_applicable",
-          "evidence": str}, one per skill-case step; optional "category":
-          "core"(decides verdict)|"impact"(finding, never gates verdict).
+          "evidence": str}, one per skill-case step.
       - warnings: optional warning strings.
       - chosen_candidate: chosen candidate index (multi-candidate); 0 otherwise.
 

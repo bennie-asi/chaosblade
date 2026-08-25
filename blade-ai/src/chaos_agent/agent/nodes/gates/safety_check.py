@@ -276,9 +276,9 @@ async def safety_check(state: AgentState) -> dict:
         target_names = ",".join(spec.names)
 
         scope = spec.scope
-        blade_target = spec.blade_target
-        action = spec.blade_action
-        request_sta = f"{scope}-{blade_target}-{action}" if scope and blade_target and action else ""
+        fault_target = spec.fault_target
+        action = spec.fault_action
+        request_sta = f"{scope}-{fault_target}-{action}" if scope and fault_target and action else ""
 
         uids, conflict_details = await check_blade_conflicts(
             kubeconfig, task_id,
@@ -300,7 +300,7 @@ async def safety_check(state: AgentState) -> dict:
             if same_action_same_target:
                 from chaos_agent.utils.fault_context import lookup_adaptations
                 adaptations = lookup_adaptations(
-                    scope, blade_target, action, target_metadata,
+                    scope, fault_target, action, target_metadata,
                     rule_type="conflict_escalation",
                 )
                 if adaptations:
@@ -308,7 +308,7 @@ async def safety_check(state: AgentState) -> dict:
                     conflict_status = "confirm_required"
                     conflict_reason = (
                         f"{len(same_action_same_target)} active experiment(s) with the SAME action "
-                        f"({scope}-{blade_target}-{action}) already target this resource. "
+                        f"({scope}-{fault_target}-{action}) already target this resource. "
                         f"Compound effects make individual verification impossible. "
                         f"Use --force-override to proceed anyway."
                     )
@@ -380,8 +380,8 @@ async def safety_check(state: AgentState) -> dict:
             if feas is not None:
                 feasibility_report = feas.to_dict()
                 logger.info(
-                    "feasibility assessment: blade_target=%s severity=%s headroom=%.2f",
-                    spec.blade_target, feas.severity.value, feas.headroom,
+                    "feasibility assessment: fault_target=%s severity=%s headroom=%.2f",
+                    spec.fault_target, feas.severity.value, feas.headroom,
                 )
                 tracker.update(
                     f"Feasibility: {feas.severity.value} (headroom={feas.headroom:.2f})",

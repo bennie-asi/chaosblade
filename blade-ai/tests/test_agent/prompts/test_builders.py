@@ -81,7 +81,7 @@ class TestInjectRememberRecency:
             skill_catalog="x",
             env_info={"blade_version": "1.7.0"},
             fault_spec={
-                "scope": "pod", "blade_target": "cpu", "blade_action": "fullload",
+                "scope": "pod", "fault_target": "cpu", "fault_action": "fullload",
                 "namespace": "demo", "names": ["p0"], "params": {},
             },
             replan_context={"error": "boom", "failed_node": "execute_loop"},
@@ -155,7 +155,7 @@ class TestSiblingBuildersRememberRecency:
 
     def test_intent_remember_trails_dynamic_completeness(self):
         prompt = build_intent_clarification_prompt(
-            fault_spec={"scope": "pod", "blade_target": "cpu"},
+            fault_spec={"scope": "pod", "fault_target": "cpu"},
             skill_catalog="x",
         )
         remember_idx = prompt.index("# REMEMBER")
@@ -292,7 +292,7 @@ class TestCaseHandoffReferenceSemantics:
     )
 
     _SPEC = {
-        "scope": "node", "blade_target": "mem", "blade_action": "load",
+        "scope": "node", "fault_target": "mem", "fault_action": "load",
         "case_resource_path": _CASE_PATH,
     }
 

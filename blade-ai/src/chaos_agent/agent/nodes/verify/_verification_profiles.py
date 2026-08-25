@@ -43,7 +43,7 @@ class VerificationContext:
     params: dict = field(default_factory=dict)
     tool_pod_name: str | None = None
     kubeconfig: str = ""
-    blade_uid: str = ""
+    experiment_uid: str = ""
 
 
 @dataclass(frozen=True)

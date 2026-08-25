@@ -58,7 +58,7 @@ class ResponseCode(IntEnum):
     RECOVERY_FAILED = 4001
     INJECTION_FAILED = 4002
     # Blade execution timed out — an operational failure, not an
-    # internal one. The absent blade_uid is a *consequence* of the
+    # internal one. The absent experiment_uid is a *consequence* of the
     # timeout, so consumers get the cause here rather than 5000.
     EXECUTION_TIMEOUT = 4003
 

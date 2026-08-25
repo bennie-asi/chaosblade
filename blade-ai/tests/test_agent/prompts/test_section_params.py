@@ -81,19 +81,24 @@ class TestGuidelinesSectionMethodSwitching:
         s = get_guidelines_section(include_method_switching=False)
         assert "Skill-case methods come first" in s
 
-    def test_phase1_omits_runtime_feedback(self):
-        # Phase 1: Ground Truth in Workflow covers this principle.
-        s = get_guidelines_section(include_method_switching=False, phase=1)
-        assert "Runtime Feedback Priority" not in s
+    def test_runtime_feedback_priority_not_in_guidelines(self):
+        # The runtime-feedback principle lives in executor Core Principles +
+        # REMEMBER (primacy/recency zones). The former guidelines copy sat in
+        # the lowest-attention middle zone, so it was removed for both phases.
+        for phase in (1, 2):
+            s = get_guidelines_section(include_method_switching=False, phase=phase)
+            assert "Runtime Feedback Priority" not in s
 
-    def test_phase2_keeps_runtime_feedback(self):
-        s = get_guidelines_section(include_method_switching=False, phase=2)
-        assert "Runtime Feedback Priority" in s
-
-    def test_phase1_is_shorter_than_phase2(self):
-        assert len(get_guidelines_section(include_method_switching=False, phase=1)) < len(
-            get_guidelines_section(include_method_switching=False, phase=2)
-        )
+    def test_phase_param_differentiates_deviation_criterion(self):
+        # Phase 1 is read-only: a documented path can only be ruled out by
+        # probed evidence, never by empirical failure. Phase 2 executes, so
+        # it keeps the empirical-failure wording.
+        p1 = get_guidelines_section(include_method_switching=False, phase=1)
+        p2 = get_guidelines_section(include_method_switching=False, phase=2)
+        assert "is disproved by probed evidence" in p1
+        assert "empirically failed" not in p1
+        assert "has empirically failed" in p2
+        assert "probed evidence" not in p2
 
     def test_omit_is_shorter_than_default(self):
         assert len(get_guidelines_section(include_method_switching=False, phase=2)) < len(

@@ -93,6 +93,13 @@ class TurnContext:
     # True once this turn has already written an operation record, so a failure
     # afterwards cannot append a contradicting interruption record on top.
     operation_record_written: bool = field(default=False, init=False)
+    # Monotonic reading at the moment a pipeline (inject / batch) is dispatched
+    # in this turn. The ResultCard duration measures ONLY the operation itself:
+    # intent clarification preceding dispatch is conversation time, not
+    # operation time, and must not inflate the reported duration. Zero when no
+    # pipeline dispatched in this turn (chat / recover-only turns); consumers
+    # fall back to the turn start defensively.
+    pipeline_started_monotonic: float = field(default=0.0, init=False)
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +470,28 @@ async def _finalize_task_session(
                         finalize_inject_session,
                     )
 
+                    if cancelled:
+                        # Terminal write for the TaskStore row, BEFORE the
+                        # session finalize: the row is the user-facing fact
+                        # (boot card / /tasks), the session record is
+                        # derived — a failure in the latter must not swallow
+                        # the former. No later writer comes on the abort
+                        # path, and inference cannot derive "cancelled" on
+                        # its own. Direct column write; the monotonicity
+                        # guard keeps later field-less flushes from
+                        # regressing it.
+                        try:
+                            from chaos_agent.persistence.task_store import get_task_store
+
+                            _ts_store = await get_task_store()
+                            if _ts_store is not None:
+                                await _ts_store.update_task_state(_op_tid, "cancelled")
+                                logger.info("Cancelled task row on turn abort: task=%s", _op_tid)
+                        except Exception:
+                            logger.warning(
+                                "Failed to cancel task row on turn abort: task=%s",
+                                _op_tid, exc_info=True,
+                            )
                     await finalize_inject_session(
                         _store,
                         graph,
@@ -510,6 +539,11 @@ async def _run_inject_pipeline(ctx, iv, batcher, sidewrite, converters):
     """Launch and stream the single-inject Pipeline Graph."""
     from langchain_core.messages import SystemMessage as _SM
     from chaos_agent.agent.nodes.planning.intent_clarification import bootstrap_task_session
+
+    # Duration origin for the ResultCard: the pipeline dispatch moment, not
+    # the turn start — the intent clarification that led here is conversation
+    # time and must not inflate the reported operation duration.
+    ctx.pipeline_started_monotonic = time.monotonic()
 
     _handoff_data = build_pipeline_handoff_from_intent_state(
         iv,
@@ -638,6 +672,10 @@ async def _run_batch_pipeline(ctx, iv, batcher, sidewrite, converters):
     from langchain_core.messages import SystemMessage as _SM
     from chaos_agent.memory.tui_session_store import get_global_tui_session_store as _get_tui_store
     from pathlib import Path
+
+    # Duration origin for the ResultCard: batch dispatch, same rationale as
+    # the single-inject path above (intent clarification is conversation time).
+    ctx.pipeline_started_monotonic = time.monotonic()
 
     _handoff_data = build_pipeline_handoff_from_intent_state(
         iv,
@@ -774,7 +812,7 @@ async def _run_batch_pipeline(ctx, iv, batcher, sidewrite, converters):
         await _clear_dispatched_inject_intent_state(ctx, reason="batch pipeline finalization")
 
 
-async def _run_recover(ctx, graph, config, turn_started_monotonic, batcher, sidewrite, converters):
+async def _run_recover(ctx, graph, config, batcher, sidewrite, converters):
     """Launch and stream the recover graph if intent was classified as recover."""
     from chaos_agent.memory.tui_session_store import get_global_tui_session_store as _get_tui_store
 
@@ -792,6 +830,12 @@ async def _run_recover(ctx, graph, config, turn_started_monotonic, batcher, side
     if recover_graph is None:
         return
 
+    # Duration origin for the recover ResultCard: the recover graph's own
+    # start. The dialogue that identified WHICH task to recover is
+    # conversation time, not recovery time — same rationale as the inject
+    # pipeline's dispatch-moment origin.
+    _rec_started_monotonic = time.monotonic()
+
     # Resolve inject state as optional live context; TaskSnapshot remains the
     # primary recover source inside resolve_recover_initial_state().
     checkpoint_values = {}
@@ -803,13 +847,14 @@ async def _run_recover(ctx, graph, config, turn_started_monotonic, batcher, side
         _inj_state = await ctx.agents["pipeline"].aget_state(_inj_config)
     except Exception:
         _inj_state = None
+    from chaos_agent.agent.state import has_active_fault
     if _inj_state and _inj_state.values and (
-        _inj_state.values.get("blade_uid")
+        has_active_fault(_inj_state.values)
         or has_active_skill(_inj_state.values)
         or _inj_state.values.get("fault_spec")
     ):
         checkpoint_values = _inj_state.values
-    elif _rv.get("blade_uid") or has_active_skill(_rv):
+    elif has_active_fault(_rv) or has_active_skill(_rv):
         checkpoint_values = _rv
 
     _rec_task_id = _rv.get("task_id", "") or new_recover_task_id()
@@ -862,7 +907,7 @@ async def _run_recover(ctx, graph, config, turn_started_monotonic, batcher, side
     _rec_result = await build_recover_result_payload(
         recover_graph, recover_config,
         _rec_task_id, _recover_inject_tid,
-        sv, turn_started_monotonic,
+        sv, _rec_started_monotonic,
     )
     if _rec_result is not None:
         ctx.store.add_task(ctx.sid, _rec_task_id)
@@ -1074,7 +1119,7 @@ async def _cleanup_cancelled_execution_artifacts(ctx: TurnContext) -> None:
             list(values.get("messages") or []),
             list(values.get("execution_artifacts") or []),
             task_id=str(values.get("task_id") or ctx.turn_id),
-            operation_family=(spec.blade_target if spec else ""),
+            operation_family=(spec.fault_target if spec else ""),
         )
         if not artifacts:
             return
@@ -1189,14 +1234,20 @@ async def event_generator(ctx: TurnContext):
         # 2.6 Auto-recover
         _result_graph = ctx.result_graph or ctx.intent_graph
         _result_config = ctx.result_config or ctx.graph_config
-        async for sse in _run_recover(ctx, _result_graph, _result_config, turn_started_monotonic, batcher, sidewrite, converters):
+        async for sse in _run_recover(ctx, _result_graph, _result_config, batcher, sidewrite, converters):
             yield sse
 
         # 3. Result
         _result_graph = ctx.result_graph or ctx.intent_graph
         _result_config = ctx.result_config or ctx.graph_config
+        # Duration origin: pipeline dispatch, not the turn start. The intent
+        # clarification (potentially many dialogue rounds) precedes dispatch
+        # and must not inflate the reported operation duration. Fallback to
+        # the turn start is defensive only — an inject-confirmed final state
+        # implies a pipeline ran and stamped the origin.
+        _duration_origin = ctx.pipeline_started_monotonic or turn_started_monotonic
         result_payload = None if ctx.dry_run else await build_result_payload(
-            _result_graph, _result_config, ctx.turn_id, turn_started_monotonic,
+            _result_graph, _result_config, ctx.turn_id, _duration_origin,
         )
         if result_payload is not None:
             op_task_id = ""

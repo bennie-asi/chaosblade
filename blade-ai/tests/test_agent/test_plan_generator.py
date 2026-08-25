@@ -20,7 +20,7 @@ class TestSectionBaselinePreviewK8s:
     """k8s profile: registry hit renders full kubectl command with templates."""
 
     def test_node_cpu_renders_resolved_full_command(self):
-        spec = FaultSpec(scope="node", blade_target="cpu", names=("worker-1",))
+        spec = FaultSpec(scope="node", fault_target="cpu", names=("worker-1",))
         out = _section_baseline_preview(spec)
         # Full command string is rendered (no bare "kubectl {subcommand}" glue).
         assert "kubectl top node worker-1" in out
@@ -33,8 +33,8 @@ class TestSectionBaselinePreviewK8s:
     def test_pod_process_kill_renders_namespace_and_label_selector(self):
         spec = FaultSpec(
             scope="pod",
-            blade_target="process",
-            blade_action="kill",
+            fault_target="process",
+            fault_action="kill",
             namespace="prod",
             names=("api-0",),
             labels={"app": "api"},
@@ -47,7 +47,7 @@ class TestSectionBaselinePreviewK8s:
         assert "{label_selector}" not in out
 
     def test_no_registry_match_returns_llm_fallback_note(self):
-        spec = FaultSpec(scope="pod", blade_target="totally-unknown-target")
+        spec = FaultSpec(scope="pod", fault_target="totally-unknown-target")
         out = _section_baseline_preview(spec)
         assert "LLM" in out
 
@@ -58,7 +58,7 @@ class TestSectionBaselinePreviewK8s:
     def test_does_not_raise_on_registry_hit(self):
         # The original bug: 3-arg lookup + .v_args_template / .subcommand access
         # raised before this line could return. Assert it simply completes.
-        spec = FaultSpec(scope="node", blade_target="cpu", names=("n1",))
+        spec = FaultSpec(scope="node", fault_target="cpu", names=("n1",))
         assert _section_baseline_preview(spec)  # non-empty, no exception
 
 
@@ -67,7 +67,7 @@ class TestSectionBaselinePreviewHost:
 
     def test_host_channel_uses_shell_commands(self, monkeypatch):
         monkeypatch.setattr(transports, "resolve_channel_name", lambda *a, **k: "ssh")
-        spec = FaultSpec(scope="host", blade_target="cpu")
+        spec = FaultSpec(scope="host", fault_target="cpu")
         out = _section_baseline_preview(spec)
         assert "top -bn1" in out
         assert "kubectl" not in out
@@ -108,7 +108,7 @@ class TestSectionInjectCommandDuration:
 
     def test_preview_includes_single_timeout_from_duration(self):
         spec = FaultSpec(
-            scope="pod", blade_target="cpu", blade_action="fullload",
+            scope="pod", fault_target="cpu", fault_action="fullload",
             namespace="prod", labels={"app": "web"}, duration_seconds=600,
         )
         out = _section_inject_command(spec, {})
@@ -117,7 +117,7 @@ class TestSectionInjectCommandDuration:
 
     def test_preview_timeout_alongside_other_params(self):
         spec = FaultSpec(
-            scope="pod", blade_target="cpu", blade_action="fullload",
+            scope="pod", fault_target="cpu", fault_action="fullload",
             namespace="prod", params={"cpu-percent": "80"},
             duration_seconds=300,
         )

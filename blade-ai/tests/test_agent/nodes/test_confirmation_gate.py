@@ -283,3 +283,49 @@ class TestConfirmationGate:
 
         payload = mock_interrupt.call_args[0][0]
         assert payload.get("fault_intent") is None
+
+
+class TestGateRejectionPersistsTerminalState:
+    """End-to-end lock of the gate-rejection chain (node half).
+
+    The store-level semantics are pinned in test_task_store.py
+    (TestExecutionGateRejection: safety_status='rejected' lands →
+    inference derives terminal "rejected" → field-less flushes cannot
+    resurrect it). THIS test pins the node's half of the chain: the
+    reject branch must actually persist the evidence through
+    sync_to_store. Breaking any link — dropping the result field,
+    deleting the sync_to_store call, or reordering the safety/error
+    branches in infer_task_state — regresses gate rejections into
+    boot-card ghosts, and each break fails a different assertion here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rejection_lands_terminal_state_in_store(self, sample_agent_state):
+        from chaos_agent.persistence.task_store import get_task_store
+
+        state = sample_agent_state
+        state["task_id"] = "inject-gate-e2e1"
+        state["skill_name"] = "pod-delete"
+        state["target"] = {"namespace": "default"}
+        state["plan"] = "Delete pod my-pod in namespace default"
+        state["safety_status"] = "safe"
+
+        with patch(
+            "chaos_agent.agent.nodes.gates.confirmation_gate.interrupt",
+            return_value="rejected",
+        ):
+            result = await confirmation_gate(state)
+
+        # Link 1: the state delta carries the evidence field.
+        assert result["safety_status"] == "rejected"
+        assert result["needs_confirmation"] is False
+
+        # Links 2+3: it actually landed in the store, and inference
+        # derived the terminal verdict from it (read back through the
+        # conftest-isolated store — no mocks on the persistence path).
+        store = await get_task_store()
+        data = await store.get("inject-gate-e2e1")
+        assert data is not None, "gate rejection must persist a task row"
+        assert data["safety_status"] == "rejected"
+        assert data["task_state"] == "rejected"
+        assert data["needs_confirm"] == 0

@@ -32,8 +32,8 @@ async def test_load_memory_clears_stale_approved_target():
         "approved_target": {
             "scope": "pod", "namespace": "old-ns",
             "names": ["old-pod"], "labels": {},
-            "is_namespace_wide": False, "blade_target": "cpu",
-            "blade_action": "fullload", "lock_fault_type": True,
+            "is_namespace_wide": False, "fault_target": "cpu",
+            "fault_action": "fullload", "lock_fault_type": True,
         },
         "screener_route": "pass",  # stale from previous turn
         "target": {},

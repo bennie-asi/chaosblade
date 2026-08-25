@@ -74,11 +74,10 @@ from chaos_agent.agent.prompts.sections.plan_builder import (
 )
 from chaos_agent.agent.prompts.sections.verification import (
     get_verifier_role_section,
-    get_verifier_core_principles_section,
     get_verifier_remember_section,
-    get_verifier_tools_section,
     get_verifier_layer2_section,
     get_verifier_output_format_section,
+    get_verifier_core_principles_section,
 )
 from chaos_agent.agent.prompts.sections.workflow import (
     get_verification_heuristics_compact_section,
@@ -170,9 +169,9 @@ def build_inject_system_prompt(
 
     Args:
         skill_catalog: The available skills catalog string.
-        input_is_nl: When True, the user request arrived via the NL entry
-            point. Currently informational — the NL Mode section is included
-            unconditionally for backward compatibility with test contracts.
+        input_is_nl: Vestigial — the user request arrived via the NL entry
+            point. The NL Mode section it once gated was removed; the
+            parameter is kept for caller API compatibility and ignored.
         **kwargs: Optional keyword arguments:
             env_info (dict): Runtime environment info to inject.
             replan_context (dict): Phase 2 → Phase 1 error feedback.
@@ -181,9 +180,8 @@ def build_inject_system_prompt(
     Returns:
         Assembled system prompt string.
     """
-    # ``input_is_nl`` is accepted for API symmetry with builder callers;
-    # the NL Mode section stays unconditional for now because
-    # tests/test_agent/test_prompts.py freezes its presence.
+    # ``input_is_nl`` is vestigial: the NL Mode section it once gated no
+    # longer exists, but callers (agent_loop) still pass it.
     _ = input_is_nl
     profile = kwargs.get("profile", PROFILE_K8S)
 
@@ -206,7 +204,7 @@ def build_inject_system_prompt(
         ("role", get_role_section(), "invariant"),
         ("core_principles", get_core_principles_section(), "invariant"),
         ("experience", get_experience_section(), "optional"),
-        ("knowledge_summary", get_knowledge_summary_section(), "optional"),
+        ("knowledge_summary", get_knowledge_summary_section(phase="plan"), "optional"),
         ("skill_catalog", get_skill_index_section(skill_catalog), "optional"),
         ("workflow", get_workflow_section(), "context"),
         ("safety", get_safety_section(level="hard_only"), "invariant"),
@@ -321,7 +319,7 @@ def build_execute_system_prompt(
         sections.append(("runtime_environment", get_env_section(kwargs["env_info"]), "context"))
     sections.extend([
         ("experience", get_experience_section(), "optional"),
-        ("knowledge_summary", get_knowledge_summary_section(), "optional"),
+        ("knowledge_summary", get_knowledge_summary_section(phase="execute"), "optional"),
         ("safety", get_safety_section(level="hard_only"), "invariant"),
         ("tools", get_tools_section(phase=2), "contract"),
         ("guidelines", get_guidelines_section(include_method_switching=True, phase=2), "context"),
@@ -370,8 +368,7 @@ def build_verifier_prompt(profile: str = PROFILE_K8S, **kwargs) -> str:
         ("role", get_verifier_role_section(), "invariant"),
         ("core_principles", get_verifier_core_principles_section(), "invariant"),
         ("experience", experience, "optional"),
-        ("knowledge_summary", get_knowledge_summary_section(), "optional"),
-        ("tools", get_verifier_tools_section(), "context"),
+        ("knowledge_summary", get_knowledge_summary_section(phase="verify"), "optional"),
         ("layer2", get_verifier_layer2_section(), "context"),
         ("environment_profile", _environment_prompt_fragment(profile, "verify"), "context"),
         ("verification_heuristics", get_verification_heuristics_compact_section(), "context"),

@@ -53,7 +53,7 @@ class TestSafetyCheck:
         state["skill_name"] = "host-cpu-fullload"
         from tests._helpers import replace_fault_spec
         replace_fault_spec(
-            state, scope="host", blade_target="cpu", blade_action="fullload",
+            state, scope="host", fault_target="cpu", fault_action="fullload",
             namespace="", names=(),
         )
 
@@ -227,8 +227,8 @@ class TestSafetyCheck:
             namespace="production",
             scope="node",
             names=("api-gateway",),
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_target="cpu",
+            fault_action="fullload",
             duration_seconds=0,  # permanent
         )
 
@@ -252,8 +252,8 @@ class TestSafetyCheck:
             namespace="production",
             scope="node",
             names=("api-gateway",),
-            blade_target="cpu",
-            blade_action="fullload",
+            fault_target="cpu",
+            fault_action="fullload",
             duration_seconds=0,
         )
 
@@ -278,7 +278,7 @@ class TestSafetyCheck:
         state["skill_name"] = "pod-delete"
         from tests._helpers import replace_fault_spec
         replace_fault_spec(state, namespace="default", names=("my-pod",),
-                           blade_target="mem", blade_action="load")
+                           fault_target="mem", fault_action="load")
 
         with patch(
             "chaos_agent.agent.spec.feasibility.assess_feasibility",
@@ -317,7 +317,7 @@ class TestSafetyCheck:
         state["skill_name"] = "pod-delete"
         from tests._helpers import replace_fault_spec
         replace_fault_spec(state, namespace="default", names=("my-pod",),
-                           blade_target="mem", blade_action="load")
+                           fault_target="mem", fault_action="load")
 
         with patch(
             "chaos_agent.agent.nodes.gates.safety_check.check_blade_conflicts",

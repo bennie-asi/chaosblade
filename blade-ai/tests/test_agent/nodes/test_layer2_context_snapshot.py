@@ -37,7 +37,7 @@ _BASELINE = {
 
 
 def _state(*, scope, target, action, parsed, params=None, baseline=None,
-           skill_case="", post_fill=None, post_burn=None, evidence=None):
+           skill_case="", post_fill=None, post_burn=None):
     st = {
         "target": {
             "namespace": "default",
@@ -45,10 +45,10 @@ def _state(*, scope, target, action, parsed, params=None, baseline=None,
             "labels": {},
             "resource_type": scope,
         },
-        "blade_scope": scope,
-        "blade_target": target,
-        "blade_action": action,
-        "blade_parsed_flags": parsed,
+        "fault_scope": scope,
+        "fault_target": target,
+        "fault_action": action,
+        "injection_parsed_params": parsed,
         "params": params or {},
         "skill_case_content": skill_case,
     }
@@ -58,8 +58,6 @@ def _state(*, scope, target, action, parsed, params=None, baseline=None,
         st["disk_fill_post_check"] = post_fill
     if post_burn is not None:
         st["disk_burn_post_check"] = post_burn
-    if evidence is not None:
-        st["evidence_snapshot"] = evidence
     return st
 
 
@@ -100,8 +98,7 @@ _MATRIX = [
      _layer1(), "uid-6", "pod-disk-burn", "/kc", None, ""),
     ("pod-mem-load",
      _state(scope="pod", target="mem", action="load", parsed={"percent": "80"},
-            skill_case="## 注入验证\n1. check mem\n",
-            evidence={"ps aux": {"rc": 0, "stdout": "root 1 java"}}),
+            skill_case="## 注入验证\n1. check mem\n"),
      _layer1(), "uid-7", "pod-mem-load", "/kc", None, ""),
     ("pod-process-kill",
      _state(scope="pod", target="process", action="kill", parsed={},
@@ -178,11 +175,16 @@ class TestLayer2ContextSnapshot:
         assert "<planner-verification>" in got
         assert "MemoryPressure may NOT flip" in got
         assert "planner's environment-specific conclusions prevail" in got
+        # Postmortem (inject-3a745506): the planner inflated the case's
+        # "≤60s single window" into "≥2 次" and the overlay let it win.
+        # The preamble must cap the planner's adaptation at the case's
+        # observation tiers — environment facts, never extra rounds.
+        assert "no extra observation rounds" in got
 
     @pytest.mark.parametrize("row", _BASELINE_MATRIX, ids=[r[0] for r in _BASELINE_MATRIX])
     def test_baseline_tool_messages_match_golden(self, row):
         label, bl, tgt, act, parsed = row
-        msgs = _build_baseline_tool_messages(bl, tgt, act, blade_parsed=parsed)
+        msgs = _build_baseline_tool_messages(bl, tgt, act, injection_parsed=parsed)
         ser = [{"type": type(m).__name__, "content": m.content} for m in msgs]
         assert ser == _golden_map()[("baseline", label)]
 

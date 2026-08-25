@@ -1,11 +1,11 @@
 """Terminal reports node: postmortem generation + issue-report publishing.
 
 Extracted from ``save_memory`` (task-349ccf5d) so every experiment
-terminal path — ``se_detect``, ``direct_execute`` pre-injection-end and
-``reject`` — funnels through report generation BEFORE persistence:
+terminal path — ``se_detect`` and ``reject`` — funnels through report
+generation BEFORE persistence:
 
     se_detect ───────────┐
-    direct_execute(end) ─┼→ terminal_reports → save_memory → batch_next/END
+                         ├→ terminal_reports → save_memory → batch_next/END
     reject ──────────────┘
 
 The node only PRODUCES the report artifacts (``postmortem`` /
@@ -243,8 +243,8 @@ async def _publish_issue_report(
 async def terminal_reports_node(state: AgentState) -> dict:
     """Generate terminal report artifacts before persistence.
 
-    Runs on every experiment terminal path (se_detect / direct_execute
-    pre-injection-end / reject) ahead of ``save_memory``. Produces the
+    Runs on every experiment terminal path (se_detect / reject) ahead of
+    ``save_memory``. Produces the
     ``postmortem`` and ``issue_report`` state fields; R11 — BOTH keys
     are ALWAYS written (even when None) to overwrite any leftover value
     from a prior experiment that shares this LangGraph thread.

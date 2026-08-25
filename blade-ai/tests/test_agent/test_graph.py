@@ -51,7 +51,6 @@ class TestBuildPipelineGraph:
             "batch_setup",
             "batch_next",
             "agent_loop",
-            "direct_setup",
             "baseline_capture",
             "se_snapshot",
             "phase1_tools",
@@ -59,8 +58,8 @@ class TestBuildPipelineGraph:
             "safety_check",
             "confirmation_gate",
             "extract_planning_metadata",
+            "planning_handoff",
             "execute_loop",
-            "direct_execute",
             "tool_screener",
             "phase2_tools",
             "verifier_loop",
@@ -94,7 +93,7 @@ class TestBuildPipelineGraph:
         assert branch.ends["replan"] == "agent_loop"
 
     def test_preplan_probe_entry_wiring(self):
-        """pipeline_init → preplan_probe → the four-way pipeline routing.
+        """pipeline_init → preplan_probe → the three-way pipeline routing.
 
         The probe node sits between entry init and routing; the routing
         targets themselves are unchanged (regression guard for the
@@ -105,7 +104,7 @@ class TestBuildPipelineGraph:
         branch = graph.branches["preplan_probe"]
         assert set(branch) == {"route_pipeline_start"}
         ends = branch["route_pipeline_start"].ends
-        assert set(ends) == {"agent_loop", "direct_setup", "plan_builder", "batch_setup"}
+        assert set(ends) == {"agent_loop", "plan_builder", "batch_setup"}
         # Replan re-entries keep bypassing the probe node (direct edges).
         assert ("batch_setup", "agent_loop") in set(graph.edges)
         assert ("plan_change_confirm", "agent_loop") in set(graph.edges)
@@ -113,8 +112,8 @@ class TestBuildPipelineGraph:
     def test_terminal_funnel_edges(self):
         """task-349ccf5d: every experiment terminal path funnels through
         terminal_reports BEFORE save_memory, so report generation
-        (postmortem / issue) also runs on the reject and pre-injection
-        end paths — not only the verify path."""
+        (postmortem / issue) also runs on the reject path — not only the
+        verify path."""
         graph = build_pipeline_graph(phase1_tools=[], phase2_tools=[])
         edges = set(graph.edges)
         assert ("se_detect", "terminal_reports") in edges
@@ -124,12 +123,15 @@ class TestBuildPipelineGraph:
         # batch_next / END decision is save_memory's existing edge.
         assert "reject" not in graph.branches
 
-    def test_direct_execute_end_routes_to_terminal_reports(self):
-        """Pre-injection safety rejection ("end") still gets reports."""
+    def test_baseline_flows_straight_into_execute_loop(self):
+        """baseline_capture → se_snapshot → execute_loop is a plain edge
+        chain now that the direct path is gone (no conditional dispatch)."""
         graph = build_pipeline_graph(phase1_tools=[], phase2_tools=[])
-        branch = graph.branches["direct_execute"]["route_after_direct_execute"]
-        assert branch.ends["end"] == "terminal_reports"
-        assert branch.ends["verifier"] == "verifier_loop"
+        edges = set(graph.edges)
+        assert ("baseline_capture", "se_snapshot") in edges
+        assert ("se_snapshot", "execute_loop") in edges
+        assert "se_snapshot" not in graph.branches
+        assert "baseline_capture" not in graph.branches
 
     def test_pipeline_graph_with_tools(self):
         """Pipeline graph should accept non-empty tool lists."""

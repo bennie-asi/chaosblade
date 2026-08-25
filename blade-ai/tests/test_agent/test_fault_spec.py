@@ -2,7 +2,7 @@
 
 Coverage:
   - Each constructor (placeholder / cli_structured / cli_nl / http_request /
-    intent_args / direct_setup) with realistic inputs and edge cases.
+    intent_args) with realistic inputs and edge cases.
   - to_dict / from_dict round-trip.
   - Derived properties (fault_type / is_namespace_wide / is_complete).
   - replace() immutability semantics.
@@ -47,8 +47,8 @@ class TestPlaceholderNl:
         assert spec.scope == ""
         assert spec.names == ()
         assert spec.labels == {}
-        assert spec.blade_target == ""
-        assert spec.blade_action == ""
+        assert spec.fault_target == ""
+        assert spec.fault_action == ""
         assert spec.params == {}
         assert spec.duration_seconds == 0
 
@@ -64,8 +64,8 @@ class TestPlaceholderNl:
 def test_unregistered_scope_is_not_complete():
     spec = FaultSpec(
         scope="typo_scope",
-        blade_target="cpu",
-        blade_action="fullload",
+        fault_target="cpu",
+        fault_action="fullload",
         namespace="default",
     )
 
@@ -89,8 +89,8 @@ class TestFromCliStructured:
             "duration": 600,
         })
         assert spec.scope == "node"
-        assert spec.blade_target == "cpu"
-        assert spec.blade_action == "fullload"
+        assert spec.fault_target == "cpu"
+        assert spec.fault_action == "fullload"
         assert spec.namespace == "default"
         assert spec.names == ("cn-hongkong.10.0.1.120",)
         assert spec.params == {"percent": "80"}
@@ -540,69 +540,17 @@ class TestFromIntentArgs:
 
 
 # ---------------------------------------------------------------------------
-# from_direct_setup
-# ---------------------------------------------------------------------------
-
-
-class TestFromDirectSetup:
-    def test_no_skill_meta_pass_through(self):
-        base = FaultSpec.from_cli_structured({
-            "scope": "pod", "target": "cpu", "action": "fullload",
-            "namespace": "default", "target_name": "pod-a",
-        })
-        spec = FaultSpec.from_direct_setup(base=base, skill_meta=None)
-        assert spec == base
-
-    def test_skill_meta_fills_default_duration(self):
-        # Raw base (not built through an entry constructor) may still
-        # carry duration 0; skill_meta fills it before the recommended
-        # default kicks in.
-        base = FaultSpec(
-            scope="pod", blade_target="cpu", blade_action="fullload",
-            namespace="default", names=("pod-a",),
-        )
-        assert base.duration_seconds == 0
-        spec = FaultSpec.from_direct_setup(
-            base=base, skill_meta={"default_duration": 900},
-        )
-        assert spec.duration_seconds == 900
-        assert spec.scope == base.scope  # other fields untouched
-
-    def test_zero_duration_falls_back_to_recommended(self):
-        # No skill_meta default → recommended fault-type minimum.
-        base = FaultSpec(
-            scope="pod", blade_target="cpu", blade_action="fullload",
-            namespace="default", names=("pod-a",),
-        )
-        spec = FaultSpec.from_direct_setup(base=base, skill_meta=None)
-        assert spec.duration_seconds == 600
-
-    def test_skill_meta_does_not_override_explicit_duration(self):
-        base = FaultSpec.from_cli_structured({
-            "scope": "pod", "target": "cpu", "action": "fullload",
-            "namespace": "default", "target_name": "pod-a",
-            "duration": 900,
-        })
-        spec = FaultSpec.from_direct_setup(
-            base=base, skill_meta={"default_duration": 1200},
-        )
-        # User's 900 wins over skill's 1200 (both above the floor, so
-        # the floor policy stays out of this comparison).
-        assert spec.duration_seconds == 900
-
-
-# ---------------------------------------------------------------------------
 # Derived properties
 # ---------------------------------------------------------------------------
 
 
 class TestDerivedProperties:
     def test_fault_type_full(self):
-        spec = FaultSpec(scope="node", blade_target="cpu", blade_action="fullload")
+        spec = FaultSpec(scope="node", fault_target="cpu", fault_action="fullload")
         assert spec.fault_type == "node-cpu-fullload"
 
     def test_fault_type_partial(self):
-        spec = FaultSpec(scope="", blade_target="cpu", blade_action="")
+        spec = FaultSpec(scope="", fault_target="cpu", fault_action="")
         assert spec.fault_type == "cpu"
 
     def test_fault_type_empty(self):
@@ -622,18 +570,18 @@ class TestDerivedProperties:
         assert not spec.is_namespace_wide
 
     def test_is_complete_requires_scope_target_action(self):
-        assert not FaultSpec(namespace="ns", names=("p",), blade_target="cpu",
-                              blade_action="fullload").is_complete  # no scope
+        assert not FaultSpec(namespace="ns", names=("p",), fault_target="cpu",
+                              fault_action="fullload").is_complete  # no scope
         assert not FaultSpec(namespace="ns", names=("p",), scope="pod",
-                              blade_action="fullload").is_complete  # no target
+                              fault_action="fullload").is_complete  # no target
         assert not FaultSpec(namespace="ns", names=("p",), scope="pod",
-                              blade_target="cpu").is_complete  # no action
+                              fault_target="cpu").is_complete  # no action
 
     def test_is_complete_node_no_namespace_ok(self):
         # cluster-scoped resource doesn't need namespace
         spec = FaultSpec(
             scope="node", names=("n1",),
-            blade_target="cpu", blade_action="fullload",
+            fault_target="cpu", fault_action="fullload",
             duration_seconds=600,
         )
         assert spec.is_complete
@@ -641,7 +589,7 @@ class TestDerivedProperties:
     def test_is_complete_pod_needs_namespace(self):
         spec = FaultSpec(
             scope="pod", names=("p1",),
-            blade_target="cpu", blade_action="fullload",
+            fault_target="cpu", fault_action="fullload",
             duration_seconds=600,
         )
         assert not spec.is_complete  # namespace missing
@@ -651,7 +599,7 @@ class TestDerivedProperties:
         # a duration is never ready to drive execution.
         spec = FaultSpec(
             scope="pod", namespace="ns", names=("p1",),
-            blade_target="cpu", blade_action="fullload",
+            fault_target="cpu", fault_action="fullload",
         )
         assert not spec.is_complete
         assert spec.replace(duration_seconds=600).is_complete
@@ -663,7 +611,7 @@ class TestDerivedProperties:
         # labels and silently blocked namespace-wide flows.
         spec = FaultSpec(
             scope="pod", namespace="ns",
-            blade_target="cpu", blade_action="fullload",
+            fault_target="cpu", fault_action="fullload",
             duration_seconds=600,
         )
         assert spec.is_complete
@@ -682,12 +630,12 @@ class TestImmutability:
             spec.scope = "node"  # type: ignore
 
     def test_replace_returns_new_instance(self):
-        spec = FaultSpec(scope="pod", blade_target="cpu")
+        spec = FaultSpec(scope="pod", fault_target="cpu")
         replaced = spec.replace(scope="node")
         assert replaced is not spec
         assert spec.scope == "pod"  # original untouched
         assert replaced.scope == "node"
-        assert replaced.blade_target == "cpu"  # other fields carried
+        assert replaced.fault_target == "cpu"  # other fields carried
 
     def test_caller_mutation_does_not_leak_into_spec(self):
         # Bug 3: frozen=True only blocks attribute reassignment, not
@@ -700,7 +648,7 @@ class TestImmutability:
         spec = FaultSpec(
             scope="pod", namespace="ns", names=names_list,
             labels=labels, params=params,
-            blade_target="cpu", blade_action="fullload",
+            fault_target="cpu", fault_action="fullload",
         )
         # Mutate the originals
         labels["env"] = "prod"
@@ -777,8 +725,8 @@ class TestSerialization:
         # drop it (and keep duration_seconds) so a revived reviewed
         # spec stays satisfiable by the replay gate.
         legacy = {
-            "scope": "node", "blade_target": "cpu",
-            "blade_action": "fullload", "namespace": "default",
+            "scope": "node", "fault_target": "cpu",
+            "fault_action": "fullload", "namespace": "default",
             "names": ["n1"],
             "params": {"percent": "80", "timeout": "300"},
             "duration_seconds": 300,
@@ -833,7 +781,7 @@ class TestToIntentDict:
         spec = FaultSpec(
             namespace="ns", scope="pod",
             names=("p1", "p2"), labels={"app": "demo"},
-            blade_target="cpu", blade_action="fullload",
+            fault_target="cpu", fault_action="fullload",
             params={"percent": "80"},
         )
         d = spec.to_intent_dict()
@@ -958,8 +906,8 @@ class TestFaultTypeFromState:
                 namespace="ns",
                 scope="pod",
                 names=("pod-a",),
-                blade_target="network",
-                blade_action="loss",
+                fault_target="network",
+                fault_action="loss",
             ).to_dict(),
         }
 
@@ -1005,8 +953,8 @@ class TestLegacyFaultSpecProjection:
             "scope": "node",
             "names": ["node-a"],
             "labels": {},
-            "blade_target": "disk",
-            "blade_action": "fill",
+            "fault_target": "disk",
+            "fault_action": "fill",
             "params": {"percent": "85"},
             "params_flags": [],
             "duration_seconds": 60,

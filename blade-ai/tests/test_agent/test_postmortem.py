@@ -33,13 +33,13 @@ class _Settings:
 class TestShouldGenerate:
     def test_off_when_setting_disabled(self):
         s = _Settings(enabled=False)
-        state = {"confirmed_intent": "inject", "blade_uid": "uid-x"}
+        state = {"confirmed_intent": "inject", "experiment_uid": "uid-x"}
         assert should_generate_postmortem(state, s) is False
 
     def test_off_for_non_inject_intent(self):
         s = _Settings()
         for intent in ("chat", "recover", None, ""):
-            state = {"confirmed_intent": intent, "blade_uid": "uid-x"}
+            state = {"confirmed_intent": intent, "experiment_uid": "uid-x"}
             assert should_generate_postmortem(state, s) is False, intent
 
     def test_blade_uid_alone_no_longer_gates(self):
@@ -48,7 +48,7 @@ class TestShouldGenerate:
         no verification and no failure_detail there is nothing to report
         on, so this shape stays off regardless of the uid."""
         s = _Settings()
-        state = {"confirmed_intent": "inject", "blade_uid": "uid-x"}
+        state = {"confirmed_intent": "inject", "experiment_uid": "uid-x"}
         assert should_generate_postmortem(state, s) is False
 
     def test_on_when_verification_completed(self):
@@ -72,7 +72,7 @@ class TestShouldGenerate:
         ):
             state = {
                 "confirmed_intent": "inject",
-                "blade_uid": "",
+                "experiment_uid": "",
                 "failure_detail": {"category": cat},
             }
             assert should_generate_postmortem(state, s) is True, cat
@@ -84,14 +84,14 @@ class TestShouldGenerate:
         for cat in ("safety_rejected", "user_rejected"):
             state = {
                 "confirmed_intent": "inject",
-                "blade_uid": "",
+                "experiment_uid": "",
                 "failure_detail": {"category": cat},
             }
             assert should_generate_postmortem(state, s) is False, cat
 
     def test_off_when_no_failure_category_and_no_verification(self):
         s = _Settings()
-        state = {"confirmed_intent": "inject", "blade_uid": "", "failure_detail": {}}
+        state = {"confirmed_intent": "inject", "experiment_uid": "", "failure_detail": {}}
         assert should_generate_postmortem(state, s) is False
 
 
@@ -157,8 +157,8 @@ class TestBuildContext:
                 "scope": "pod",
                 "names": ["pod-a"],
                 "labels": {},
-                "blade_target": "network",
-                "blade_action": "loss",
+                "fault_target": "network",
+                "fault_action": "loss",
                 "params": {},
                 "params_flags": [],
                 "duration_seconds": 0,
@@ -436,7 +436,7 @@ class TestSaveMemoryIntegration:
         state = {
             "task_id": "task-disable",
             "confirmed_intent": "inject",
-            "blade_uid": "uid-x",
+            "experiment_uid": "uid-x",
             "messages": [],
         }
         updates = await memory_nodes.save_memory(state)

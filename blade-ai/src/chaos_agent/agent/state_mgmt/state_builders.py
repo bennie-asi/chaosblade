@@ -41,7 +41,6 @@ def build_inject_initial_state(
     ssh_user: str | None = "",
     ssh_key_path: str | None = "",
     ssh_port: int | None = None,
-    direct: bool = False,
     dry_run: bool = False,
     planning_mode: str | None = None,
     messages: list | None = None,
@@ -70,7 +69,6 @@ def build_inject_initial_state(
         "ssh_key_path": ssh_key_path or "",
         "ssh_port": ssh_port if ssh_port else 22,
         "created_at": created_at or now_iso(),
-        "direct": bool(direct),
         "interaction_mode": interaction_mode,
         "dry_run": bool(dry_run),
     }

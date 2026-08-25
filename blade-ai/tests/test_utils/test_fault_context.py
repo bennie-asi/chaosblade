@@ -128,15 +128,6 @@ class TestP0Conditions:
         ids = [r.id for r in results]
         assert "P0-param-safety-burn-lowmem" in ids
 
-    def test_empty_dict_triggers_p0_evidence_snapshot(self):
-        """Empty dict must trigger P0-evidence-snapshot."""
-        results = lookup_adaptations(
-            self.SCOPE, self.TARGET, self.ACTION, {},
-            rule_type="param_override",
-        )
-        ids = [r.id for r in results]
-        assert "P0-evidence-snapshot" in ids
-
     def test_low_memory_triggers_p0(self):
         """240Mi pod must trigger P0 rules."""
         metadata = {"pod_memory_limit_mb": 240}
@@ -146,7 +137,6 @@ class TestP0Conditions:
         )
         ids = [r.id for r in results]
         assert "P0-param-safety-burn-lowmem" in ids
-        assert "P0-evidence-snapshot" in ids
 
     def test_high_memory_does_not_trigger_p0(self):
         """1024Mi pod must NOT trigger P0 rules."""
@@ -157,7 +147,6 @@ class TestP0Conditions:
         )
         ids = [r.id for r in results]
         assert "P0-param-safety-burn-lowmem" not in ids
-        assert "P0-evidence-snapshot" not in ids
 
     def test_threshold_memory_does_not_trigger_p0(self):
         """Pod at exactly 512Mi must NOT trigger P0 rules (not < threshold)."""
@@ -186,22 +175,6 @@ class TestP0Conditions:
         )
         ids = [r.id for r in results]
         assert "P0-param-safety-burn-lowmem" not in ids
-
-    def test_priority_ordering(self):
-        """P0-param-safety-burn-lowmem (priority=10) must come before
-        P0-evidence-snapshot (priority=5)."""
-        metadata = {"pod_memory_limit_mb": 240}
-        results = lookup_adaptations(
-            self.SCOPE, self.TARGET, self.ACTION, metadata,
-            rule_type="param_override",
-        )
-        param_safety_idx = next(
-            i for i, r in enumerate(results) if r.id == "P0-param-safety-burn-lowmem"
-        )
-        evidence_idx = next(
-            i for i, r in enumerate(results) if r.id == "P0-evidence-snapshot"
-        )
-        assert param_safety_idx < evidence_idx
 
 
 # ---------------------------------------------------------------------------

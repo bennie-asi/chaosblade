@@ -65,14 +65,14 @@ class EvidenceProfile:
         if (
             spec is None
             or transport_profile not in (PROFILE_K8S, PROFILE_HOST)
-            or not spec.blade_target
+            or not spec.fault_target
         ):
             return cls("unknown", transport_profile, (), "", enabled=False)
         return cls(
-            profile_id=f"{transport_profile}:{spec.scope}:{spec.blade_target}",
+            profile_id=f"{transport_profile}:{spec.scope}:{spec.fault_target}",
             transport_profile=transport_profile,
             target_names=tuple(spec.names),
-            target=spec.blade_target,
+            target=spec.fault_target,
         )
 
     @property

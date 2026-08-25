@@ -124,7 +124,7 @@ class AgentClient:
             "task_state": task_state,
             "result": result,
             "fault_type": data.get("fault_type", ""),
-            "blade_uid": data.get("blade_uid", ""),
+            "experiment_uid": data.get("experiment_uid", ""),
             "targets": targets,
             "target": target,
             "verification": data.get("verification"),

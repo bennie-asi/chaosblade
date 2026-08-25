@@ -6,11 +6,14 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from chaos_agent.agent.nodes.execute._injection_detection import (
     _extract_drill_steps,
     _injection_intent_steps,
-    _required_kubectl_verbs,
     build_injection_step_selfcheck,
 )
 from chaos_agent.agent.nodes.execute.execute_loop import _detect_terminal_conclusion
 from chaos_agent.agent.providers import FaultProviderRegistry
+from chaos_agent.agent.providers.k8s_native.provider import (  # phase-8: vocabulary moved onto the provider
+    _patch_equivalent_verbs,
+    _required_kubectl_verbs,
+)
 
 
 # --- Skill case fixtures ---
@@ -151,7 +154,7 @@ class TestChineseVerbVocabulary:
     def test_every_mapped_verb_is_a_step_verb(self):
         """A phrase mapping to a verb outside ``step_kubectl_verbs`` is dead
         weight: the self-check only ever reports verbs from that set."""
-        from chaos_agent.agent.providers.k8s_native import K8sNativeProvider
+        from chaos_agent.agent.providers.k8s_native.provider import K8sNativeProvider
 
         mapped = set(K8sNativeProvider.chinese_verb_map.values())
         assert mapped <= set(K8sNativeProvider.step_kubectl_verbs)
@@ -247,10 +250,6 @@ class TestPatchSemanticEquivalence:
             LABEL_SKILL_CASE, msgs, "kubectl_native") is None
 
     def test_patch_replicas_credits_scale(self):
-        from chaos_agent.agent.nodes.execute._injection_detection import (
-            _patch_equivalent_verbs,
-        )
-
         assert _patch_equivalent_verbs(
             '''deploy d -p '{"spec":{"replicas":0}}' ''') == {"scale"}
         assert _patch_equivalent_verbs(
@@ -328,8 +327,8 @@ class TestReadonlyStepsExcluded:
         """
         from chaos_agent.agent.nodes.execute._injection_detection import (
             _injection_intent_steps,
-            _required_kubectl_verbs,
         )
+        from chaos_agent.agent.providers.k8s_native.provider import _required_kubectl_verbs
 
         steps = [
             "删除该节点上的 DaemonSet Pod，观察 Pod 是否被重建",
@@ -405,11 +404,11 @@ class TestDetectTerminalConclusionWiring:
     def test_blade_uid_alone_never_licenses_text_exit(self):
         """A blade_uid without an injection_method attribution must NOT permit
         a text-only exit: after an execute-time replan the UID survives the
-        seam (keep_blade_uid) as a recovery handle, and licensing the exit on
+        seam (keep_experiment_uid) as a recovery handle, and licensing the exit on
         it alone re-opens the task-5193538b empty spin under the new
         contract. The stall nudge must fire instead."""
         state = {
-            "blade_uid": "abc123",
+            "experiment_uid": "abc123",
             "skill_case_content": DAEMONSET_SKILL_CASE,
             "messages": [],
         }
@@ -423,7 +422,7 @@ class TestDetectTerminalConclusionWiring:
         backend (host_blade) exits cleanly — the UID's evidence reached the
         gate via the RESUME attribution, not as a standalone pass."""
         state = {
-            "blade_uid": "abc123",
+            "experiment_uid": "abc123",
             "injection_method": "host_blade",
             "skill_case_content": DAEMONSET_SKILL_CASE,
             "messages": [],
@@ -437,7 +436,7 @@ class TestDetectTerminalConclusionWiring:
         """uid + still-provisional kubectl_native (the pre-UPGRADE transition
         state) no longer bypasses the one-shot step self-check."""
         state = {
-            "blade_uid": "abc123",
+            "experiment_uid": "abc123",
             "injection_method": "kubectl_native",
             "skill_case_content": DAEMONSET_SKILL_CASE,
             "messages": [],

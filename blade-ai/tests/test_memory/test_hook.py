@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from chaos_agent.memory.context_manager import (
     MAX_CONSECUTIVE_COMPACT_FAILURES,
@@ -17,6 +17,10 @@ class TestPreReasoningHookNoCompaction:
     async def test_returns_empty_when_no_compaction(self):
         cm = MagicMock()
         cm.check_context.return_value = ([], ["msg1"], True)  # Nothing to compact
+        # Budget-warning reads these off the context manager; a MagicMock
+        # breaks int()/min() inside calculate_token_warning_state.
+        cm.max_tokens = 128_000
+        cm.compact_ratio = 0.8
         tc = MagicMock()
         tc.compact.return_value = ["msg1"]
 
@@ -63,6 +67,8 @@ class TestPreReasoningHookWithCompaction:
     async def test_tool_compactor_called(self, mock_llm):
         cm = MagicMock()
         cm.check_context.return_value = ([], ["msg1"], True)
+        cm.max_tokens = 128_000
+        cm.compact_ratio = 0.8
         tc = MagicMock()
         tc.compact.return_value = ["msg1"]
 
@@ -74,6 +80,8 @@ class TestPreReasoningHookWithCompaction:
     async def test_context_manager_called(self, mock_llm):
         cm = MagicMock()
         cm.check_context.return_value = ([], ["msg1"], True)
+        cm.max_tokens = 128_000
+        cm.compact_ratio = 0.8
         tc = MagicMock()
         tc.compact.return_value = ["msg1"]
 
@@ -265,6 +273,8 @@ class TestPreReasoningHookCircuitBreaker:
     async def test_check_context_receives_tracking_state(self, mock_llm):
         cm = MagicMock()
         cm.check_context.return_value = ([], ["m"], True)
+        cm.max_tokens = 128_000
+        cm.compact_ratio = 0.8
         tc = MagicMock()
         tc.compact.return_value = ["m"]
 
@@ -279,6 +289,8 @@ class TestPreReasoningHookCircuitBreaker:
     async def test_tracking_state_is_per_task(self, mock_llm):
         cm = MagicMock()
         cm.check_context.return_value = ([], ["m"], True)
+        cm.max_tokens = 128_000
+        cm.compact_ratio = 0.8
         tc = MagicMock()
         tc.compact.return_value = ["m"]
 
@@ -429,6 +441,9 @@ class TestPreReasoningHookContextSizeEmission:
         cm = MagicMock()
         cm.check_context.return_value = ([], ["m"], True)
         cm.max_tokens = 128_000
+        # 0.85 keeps the recomputed trigger (108_800) aligned with the
+        # mocked compact_threshold below — one line, not two.
+        cm.compact_ratio = 0.85
         cm.compact_threshold = 108_800
         tc = MagicMock()
         tc.compact.return_value = ["m"]
@@ -494,3 +509,132 @@ class TestPreReasoningHookContextSizeEmission:
         # current_tokens should be > 0 (the [Compressed History]
         # summary message itself has some content)
         assert ev.detail["current_tokens"] >= 0
+
+
+class TestPostCompactionNotice:
+    """U-shaped Stage B recency: post-compaction behaviour guide.
+
+    The summary message carries data only; the notice teaches the model how
+    to treat what compaction destroyed. Structure is the contract — wording
+    may evolve, the structure below may not.
+    """
+
+    async def test_notice_rides_with_summary(self, mock_llm):
+        from langchain_core.messages import RemoveMessage
+
+        cm = MagicMock()
+        cm.check_context.return_value = (["old1", "old2"], ["recent1"], True)
+        cm.compact_threshold = 0  # force the LLM compression path
+        tc = MagicMock()
+        tc.compact.return_value = ["old1", "old2", "recent1"]
+
+        hook = PreReasoningHook(cm, tc, MagicMock(), llm=mock_llm)
+        result = await hook({
+            "messages": ["old1", "old2", "recent1"],
+            "task_id": "task-notice",
+            "compressed_summary": "",
+        })
+
+        new_messages = [
+            m for m in result["messages"] if not isinstance(m, RemoveMessage)
+        ]
+        # [summary(SystemMessage), notice(HumanMessage)] — the data and the
+        # guidance on how to treat it land in the same state update.
+        assert len(new_messages) == 2
+        summary, notice = new_messages
+        assert type(summary) is SystemMessage
+        assert type(notice) is HumanMessage
+        # Stable id → add_messages REPLACES on repeat compactions instead
+        # of stacking one notice per compaction.
+        assert notice.id == "hint:compaction:notice"
+        # Tag binding is the declared contract, not wording: the reminder
+        # travels inside <system-reminder> so the model connects it back to
+        # the system prompt's binding declaration.
+        assert notice.content.startswith("<system-reminder>")
+
+    def test_notice_id_stable_across_compactions(self):
+        from chaos_agent.memory.hook import _build_compaction_notice
+
+        assert (
+            _build_compaction_notice().id == _build_compaction_notice().id
+        )
+
+
+class TestBudgetWarning:
+    """U-shaped Stage B recency: context budget visible to the model.
+
+    The size indicator was TUI-only; the model had no signal before the
+    compaction trigger fired. These lock the injection mechanism and the
+    WARNING → ERROR escalation, not the wording.
+    """
+
+    async def test_band_injects_budget_hint(self, mock_llm):
+        # max_tokens=1000 floors every threshold at 0, so any usage reads
+        # as in-band; check_context is mocked to "nothing to compact".
+        cm = MagicMock()
+        cm.check_context.return_value = ([], ["m"], True)
+        cm.max_tokens = 1_000
+        cm.compact_ratio = 0.85
+        tc = MagicMock()
+        tc.compact.return_value = ["m"]
+
+        hook = PreReasoningHook(cm, tc, MagicMock(), mock_llm)
+        result = await hook({"messages": ["m"], "task_id": "task-budget"})
+
+        msgs = result["messages"]
+        assert len(msgs) == 1
+        assert msgs[0].id == "hint:context:budget"
+        assert msgs[0].content.startswith("<system-reminder>")
+
+    async def test_below_band_returns_no_messages(self, mock_llm):
+        # 128K window at default ratio: the tiny message list stays NORMAL.
+        cm = MagicMock()
+        cm.check_context.return_value = ([], ["m"], True)
+        cm.max_tokens = 128_000
+        cm.compact_ratio = 0.8
+        tc = MagicMock()
+        tc.compact.return_value = ["m"]
+
+        hook = PreReasoningHook(cm, tc, MagicMock(), mock_llm)
+        result = await hook({"messages": ["m"], "task_id": "task-budget-ok"})
+
+        assert result == {}
+
+    def test_warning_levels_escalate(self):
+        # Production defaults: 128K window, 0.8 ratio → trigger 102_400,
+        # warning band 72_400, error band 82_400. Level comes from the same
+        # calculator that drives the trigger, so both can never disagree.
+        from chaos_agent.memory.hook import _build_budget_warning
+
+        assert _build_budget_warning(50_000, 128_000, 0.8) is None
+
+        warning = _build_budget_warning(75_000, 128_000, 0.8)
+        assert warning is not None
+        assert warning.id == "hint:context:budget"
+        assert "very soon" not in warning.content
+
+        error = _build_budget_warning(90_000, 128_000, 0.8)
+        assert error is not None
+        assert "very soon" in error.content
+
+    async def test_strip_route_does_not_inject_budget_warning(self, mock_llm):
+        # Position contract: the budget warning belongs to the
+        # no-compaction branch only. On the strip route the harness is
+        # ALREADY relieving the pressure — telling the model to converge
+        # while truncation just ran would be a contradictory signal.
+        big_tool = ToolMessage(
+            content="X" * 4000, tool_call_id="t1", id="big-tool",
+        )
+        cm = MagicMock()
+        cm.check_context.return_value = ([big_tool], [], True)
+        cm.compact_threshold = 10_000_000  # strip result fits → strip route
+        cm.max_tokens = 1_000              # any usage would read in-band
+        cm.compact_ratio = 0.85
+        tc = MagicMock()
+        tc.compact.return_value = [big_tool]
+
+        hook = PreReasoningHook(cm, tc, MagicMock(), mock_llm)
+        result = await hook({"messages": [big_tool], "task_id": "t1"})
+
+        msg_ids = [getattr(m, "id", None) for m in result["messages"]]
+        assert "hint:context:budget" not in msg_ids

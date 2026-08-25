@@ -166,10 +166,10 @@ class TestPhaseToolSurface:
         """Phase 1 must NOT bind write_file / search_files / execute_skill_script."""
         # Build the same lists factory would, but inspect them directly.
         from chaos_agent.agent.factory import _build_skill_tools
-        from chaos_agent.tools import (
+        from chaos_agent.agent.providers.chaosblade.cli import (
             blade_create, blade_destroy, blade_status,
-            kubectl, read_knowledge_resource,
         )
+        from chaos_agent.tools import kubectl, read_knowledge_resource
 
         skill_tools = _build_skill_tools(mock_registry)
         by_name = {t.name: t for t in skill_tools}
@@ -196,10 +196,10 @@ class TestPhaseToolSurface:
     def test_phase2_tools_include_guarded_destroy_and_exclude_skill_resource(self, mock_registry):
         """Phase 2 exposes guarded cleanup but not planning-only tools."""
         from chaos_agent.agent.factory import _build_skill_tools
-        from chaos_agent.tools import (
+        from chaos_agent.agent.providers.chaosblade.cli import (
             blade_create, blade_destroy, blade_status, blade_query_k8s,
-            kubectl, read_knowledge_resource,
         )
+        from chaos_agent.tools import kubectl, read_knowledge_resource
 
         skill_tools = _build_skill_tools(mock_registry)
         by_name = {t.name: t for t in skill_tools}
@@ -379,7 +379,12 @@ class TestAppendProviderTools:
             # A provider contributes only to its declared phase.
             assert [t.name for t in _append_provider_tools(base, PLAN)] == ["kubectl"]
         finally:
+            # Phase-8 registry-state hygiene: teardown RESTORES the builtins
+            # (clear-only leaked an empty registry into later tests —
+            # registry-dispatched consumers like the step self-check would
+            # silently resolve nothing).
             FaultProviderRegistry.clear()
+            FaultProviderRegistry.register_builtins()
 
 
 class TestPhaseToolUnionGuard:
@@ -467,7 +472,10 @@ class TestPhaseToolUnionGuard:
                 "recover_verify": [t.name for t in recover_verifier],
             }
         finally:
+            # Phase-8 registry-state hygiene: teardown RESTORES the builtins
+            # (clear-only leaked an empty registry into later tests).
             FaultProviderRegistry.clear()
+            FaultProviderRegistry.register_builtins()
 
     def test_each_phase_binds_expected_tool_set(self, mock_registry):
         sets = self._build_phase_sets(mock_registry)
@@ -482,3 +490,254 @@ class TestPhaseToolUnionGuard:
             assert len(names) == len(set(names)), (
                 f"phase {phase!r} double-binds a tool: {names}"
             )
+
+
+class TestPhaseSpecMatrix:
+    """Declarative phase → tool-surface matrix (PhaseSpec consolidation).
+
+    The five per-phase tool lists previously assembled inline in
+    ``create_agent`` were consolidated into the ``_phase_specs``
+    declaration table + ``_assemble_phase_tools`` loop. These tests pin
+    the consolidated surface to the pre-consolidation baseline (captured
+    with mcp_manager=None) and pin the cross-file safety invariants the
+    table now makes assertable.
+    """
+
+    # Baseline captured from the pre-consolidation per-phase blocks
+    # (mcp_manager=None): member names in exact order — static base
+    # first, then the provider union in registry order.
+    _BASELINE = {
+        "clarification": [
+            "activate_skill", "read_skill_resource", "submit_fault_intent",
+            "submit_batch_intent", "query_active_experiments", "recover_task",
+            "blade_help", "blade_status", "kubectl_read", "host_read",
+        ],
+        "phase1": [
+            "activate_skill", "read_skill_resource", "read_file",
+            "save_fault_plan", "finish_planning", "propose_plan_change",
+            "read_knowledge_resource", "update_progress",
+            "blade_help", "blade_status", "kubectl_read", "host_read",
+        ],
+        "phase2": [
+            "execute_skill_script", "read_knowledge_resource", "time_wait",
+            "request_replan", "update_progress",
+            "blade_create", "blade_destroy", "blade_help", "blade_status",
+            "blade_query_k8s", "kubectl", "host_inject",
+            "blade_python_create", "blade_python_prepare", "blade_python_revoke",
+        ],
+        "verifier": [
+            "read_skill_resource", "execute_skill_script",
+            "read_knowledge_resource", "submit_verification", "time_wait",
+            "update_progress", "kubectl_read", "host_read",
+        ],
+        "recover_verifier": [
+            "read_skill_resource", "execute_skill_script",
+            "read_knowledge_resource", "submit_recover_verification",
+            "time_wait", "update_progress", "kubectl", "host_inject",
+        ],
+    }
+
+    class _Named:
+        def __init__(self, name):
+            self.name = name
+
+    class _FakeToolProvider:
+        carrier = "fake_carrier"
+        injection_methods = ("fake_method",)
+
+        def __init__(self, phase, tools):
+            self._phase = phase
+            self._tools = tools
+
+        def tools(self, phase):
+            return list(self._tools) if phase == self._phase else []
+
+    class _FakeMcpManager:
+        def __init__(self, mapping):
+            self._mapping = mapping
+
+        def tools_for_phase(self, phase):
+            return list(self._mapping.get(phase, []))
+
+    @pytest.fixture()
+    def assembled(self, mock_registry):
+        from chaos_agent.agent.factory import _assemble_phase_tools, _build_skill_tools
+
+        skill_tools = _build_skill_tools(mock_registry)
+        return _assemble_phase_tools(skill_tools)
+
+    @staticmethod
+    def _names(tools):
+        return [getattr(t, "name", None) for t in tools]
+
+    # ── 3.1 member + order baseline ─────────────────────────────────
+
+    def test_assembled_phases_match_baseline(self, assembled):
+        """Member names AND order per phase equal the pre-consolidation baseline."""
+        assert set(assembled) == set(self._BASELINE)
+        for phase, expected in self._BASELINE.items():
+            assert self._names(assembled[phase]) == expected, (
+                f"phase {phase!r} diverged from the pre-consolidation "
+                f"baseline:\n  got      {self._names(assembled[phase])}\n"
+                f"  expected {expected}"
+            )
+
+    # ── 3.2 vocabulary mapping (table = bridge across the three
+    #    vocabularies: phase name ↔ MCP attach_to string ↔ provider
+    #    phase constant) ──────────────────────────────────────────
+
+    def test_phase_specs_vocabulary_mapping(self, mock_registry):
+        from chaos_agent.agent.factory import _build_skill_tools, _phase_specs
+        from chaos_agent.agent.providers import (
+            EXECUTE, PLAN, RECOVER_VERIFY, VERIFY,
+        )
+
+        skill_tools = _build_skill_tools(mock_registry)
+        specs = {s.name: s for s in _phase_specs(skill_tools)}
+        assert set(specs) == {
+            "clarification", "phase1", "phase2", "verifier", "recover_verifier",
+        }
+        assert specs["clarification"].provider_phase == PLAN
+        assert specs["phase1"].provider_phase == PLAN
+        assert specs["phase2"].provider_phase == EXECUTE
+        assert specs["verifier"].provider_phase == VERIFY
+        assert specs["recover_verifier"].provider_phase == RECOVER_VERIFY
+        # MCP attach_to vocabulary: each phase attaches under its own name,
+        # except recover_verifier, which shares the inject verifier's
+        # "verifier" attach point.
+        for name in ("clarification", "phase1", "phase2", "verifier"):
+            assert specs[name].mcp_attach == name
+        assert specs["recover_verifier"].mcp_attach == "verifier"
+
+    # ── 3.3 safety invariants (provider side + assembled side) ──────
+
+    def test_builtin_plan_contribution_excludes_injection_tools(self):
+        """Built-in providers contribute no mutating tool on the PLAN/VERIFY side."""
+        from chaos_agent.agent.providers import (
+            PLAN, VERIFY, FaultProviderRegistry,
+        )
+
+        FaultProviderRegistry.clear()
+        try:
+            if not FaultProviderRegistry.all_providers():
+                FaultProviderRegistry.register_builtins()
+            for provider in FaultProviderRegistry.all_providers():
+                carrier = getattr(provider, "carrier", provider)
+                for phase in (PLAN, VERIFY):
+                    contributed = [
+                        getattr(t, "name", None) for t in provider.tools(phase)
+                    ]
+                    for tool in (
+                        "blade_create", "blade_destroy", "kubectl", "host_inject",
+                    ):
+                        assert tool not in contributed, (
+                            f"provider {carrier!r} leaks {tool!r} into the "
+                            f"{phase!r} provider phase"
+                        )
+        finally:
+            # Registry-state hygiene: teardown RESTORES the builtins.
+            FaultProviderRegistry.clear()
+            FaultProviderRegistry.register_builtins()
+
+    def test_injection_tools_absent_from_readonly_phases(self, assembled):
+        """Read-only phases must not bind any mutating/exec-class tool."""
+        for phase in ("clarification", "phase1", "verifier"):
+            names = set(self._names(assembled[phase]))
+            for tool in (
+                "blade_create", "blade_destroy", "kubectl", "host_inject",
+            ):
+                assert tool not in names, (
+                    f"{tool!r} surfaced in read-only phase {phase!r}"
+                )
+
+    def test_full_kubectl_and_host_inject_only_in_execute_phases(self, assembled):
+        """Full kubectl / host_inject surface on EXECUTE/RECOVER_VERIFY only."""
+        for phase, tools in assembled.items():
+            names = set(self._names(tools))
+            for tool in ("kubectl", "host_inject"):
+                if tool in names:
+                    assert phase in ("phase2", "recover_verifier"), (
+                        f"{tool!r} surfaced in phase {phase!r} (only the "
+                        "EXECUTE/RECOVER_VERIFY phases may bind it)"
+                    )
+        # Positive side: the execute-side phases DO bind the reverse-op
+        # carriers (recovery must be able to run the reverse op).
+        for phase in ("phase2", "recover_verifier"):
+            names = set(self._names(assembled[phase]))
+            assert "kubectl" in names, f"phase {phase!r} lost full kubectl"
+            assert "host_inject" in names, f"phase {phase!r} lost host_inject"
+
+    # ── 3.4 dedup behaviour through the consolidated loop ───────────
+
+    def test_provider_duplicate_of_static_base_not_double_bound(self, mock_registry):
+        """A provider re-declaring a static-base tool name binds it once."""
+        from chaos_agent.agent.factory import _assemble_phase_tools, _build_skill_tools
+        from chaos_agent.agent.providers import EXECUTE, FaultProviderRegistry
+
+        dup = self._FakeToolProvider(
+            EXECUTE,
+            [self._Named("execute_skill_script"), self._Named("brand_new_tool")],
+        )
+        FaultProviderRegistry.clear()
+        FaultProviderRegistry.register(dup)
+        try:
+            skill_tools = _build_skill_tools(mock_registry)
+            out = _assemble_phase_tools(skill_tools)
+            phase2 = self._names(out["phase2"])
+            assert phase2.count("execute_skill_script") == 1, (
+                f"phase2 double-binds execute_skill_script: {phase2}"
+            )
+            # The provider's novel tool still lands on its declared phase...
+            assert "brand_new_tool" in phase2
+            # ...and only there.
+            assert "brand_new_tool" not in self._names(out["phase1"])
+        finally:
+            # Registry-state hygiene: teardown RESTORES the builtins.
+            FaultProviderRegistry.clear()
+            FaultProviderRegistry.register_builtins()
+
+    def test_mcp_attach_appends_and_recover_verifier_shares_verifier(self, mock_registry):
+        """MCP tools land on their attach_to phase; recover_verifier shares "verifier"."""
+        from chaos_agent.agent.factory import _assemble_phase_tools, _build_skill_tools
+
+        mapping = {
+            "clarification": [self._Named("mcp_clarify")],
+            "phase1": [self._Named("mcp_plan")],
+            "phase2": [self._Named("mcp_exec")],
+            "verifier": [self._Named("mcp_verify")],
+        }
+        skill_tools = _build_skill_tools(mock_registry)
+        out = _assemble_phase_tools(skill_tools, self._FakeMcpManager(mapping))
+        names = {ph: self._names(tools) for ph, tools in out.items()}
+        assert "mcp_clarify" in names["clarification"]
+        assert "mcp_plan" in names["phase1"]
+        assert "mcp_exec" in names["phase2"]
+        # recover_verifier shares the inject verifier's MCP attach_to.
+        assert "mcp_verify" in names["verifier"]
+        assert "mcp_verify" in names["recover_verifier"]
+        # No cross-leak: each MCP tool lands only on its attach_to phases.
+        assert "mcp_clarify" not in names["phase1"]
+        assert "mcp_plan" not in names["phase2"]
+
+    def test_mcp_duplicate_of_provider_tool_not_double_bound(self, mock_registry):
+        """Unified order (static → MCP → provider): MCP name collisions dedup.
+
+        The pre-consolidation clarification phase appended MCP tools
+        verbatim AFTER the provider union and could double-bind a
+        colliding name; the consolidated loop runs the MCP attach before
+        the provider union, so ``_append_provider_tools`` dedups the
+        provider's copy against the MCP-contributed name.
+        """
+        from chaos_agent.agent.factory import _assemble_phase_tools, _build_skill_tools
+
+        # host_read is contributed by the PLAN provider union AND by the
+        # (fake) MCP manager on the clarification attach point.
+        manager = self._FakeMcpManager(
+            {"clarification": [self._Named("host_read")]}
+        )
+        skill_tools = _build_skill_tools(mock_registry)
+        out = _assemble_phase_tools(skill_tools, manager)
+        clarification = self._names(out["clarification"])
+        assert clarification.count("host_read") == 1, (
+            f"clarification double-binds host_read: {clarification}"
+        )

@@ -65,7 +65,7 @@ def _approved_pod_a_in_ns():
     return freeze_approved_target(
         target={"namespace": "ns", "names": ["pod-a"]},
         params={"scope": "pod"},
-        blade_scope="pod", blade_target="cpu", blade_action="fullload",
+        fault_scope="pod", fault_target="cpu", fault_action="fullload",
     )
 
 
@@ -81,7 +81,7 @@ def _approved_node_network():
     return freeze_approved_target(
         target={"namespace": "", "names": ["node-a"]},
         params={"scope": "node"},
-        blade_scope="node", blade_target="network", blade_action="drop",
+        fault_scope="node", fault_target="network", fault_action="drop",
     )
 
 
@@ -269,7 +269,7 @@ class TestEnforcingAllow:
             "approved_target": freeze_approved_target(
                 target={"namespace": "ns", "names": ["pod-a"]},
                 params={"scope": "deployment"},
-                blade_scope=None, blade_target="cpu", blade_action=None,
+                fault_scope=None, fault_target="cpu", fault_action=None,
             ),
         }
         delta = await tool_screener(state)
@@ -637,7 +637,7 @@ class TestEnforcingDriftInterrupt:
             "approved_target": _approved_pod_a_in_ns(),
             "fault_spec": {
                 "namespace": "ns", "scope": "pod", "names": ["pod-a"],
-                "labels": {}, "blade_target": "cpu", "blade_action": "fullload",
+                "labels": {}, "fault_target": "cpu", "fault_action": "fullload",
                 "params": {}, "params_flags": [], "duration_seconds": 0,
                 "source": "test", "user_description": "",
             },
@@ -654,6 +654,45 @@ class TestEnforcingDriftInterrupt:
         payload = _mock.call_args[0][0]
         assert payload["type"] == "target_change"
         assert list(payload["proposed"]["names"]) == ["pod-OTHER"]
+
+    @pytest.mark.asyncio
+    @patch("chaos_agent.agent.nodes.planning.tool_screener.interrupt", return_value="approved")
+    async def test_drift_approved_different_kind_passes_without_rewriting_spec(self, _mock):
+        """task-51193464 regression: approving a DIFFERENT-kind operation
+        (creating the PVC the victim pod needs, under a node-scope approval —
+        node secondary_scopes cover pod/deployment but NOT pvc, so this is a
+        genuine drift card) is a one-shot pass-through, NOT a target change.
+        Rewriting only names would freeze the corrupt hybrid anchor
+        (scope=node, names=[<pvc-name>]) that turned the REAL node injection
+        into yet another drift card. The anchor stays as confirmed."""
+        settings.target_guard_enforcing = True
+        state = {
+            "messages": [
+                _ai_with_tool_call("kubectl", {
+                    "subcommand": "patch",
+                    "v_args": (
+                        "pvc terminating-demo-claim -n ns "
+                        "-p '{\"spec\":{}}'"
+                    ),
+                }, call_id="tc-1"),
+            ],
+            "approved_target": _approved_node_network(),
+            "fault_spec": {
+                "namespace": "", "scope": "node", "names": ["node-a"],
+                "labels": {}, "fault_target": "network", "fault_action": "drop",
+                "params": {}, "params_flags": [], "duration_seconds": 0,
+                "source": "test", "user_description": "",
+            },
+        }
+        delta = await tool_screener(state)
+        # Approved → THIS call is allowed through.
+        assert delta["screener_route"] == SCREENER_ROUTE_PASS
+        assert delta["drift_reject_count"] == 0
+        _mock.assert_called_once()
+        # But the spec/anchor rewrite is SKIPPED: approving an auxiliary
+        # resource operation is not a target change.
+        assert "fault_spec" not in delta
+        assert "approved_target" not in delta
 
     @pytest.mark.asyncio
     @patch("chaos_agent.agent.nodes.planning.tool_screener.interrupt", return_value="rejected")
@@ -712,7 +751,7 @@ class TestEnforcingDriftInterrupt:
             "approved_target": _approved_pod_a_in_ns(),
             "fault_spec": {
                 "namespace": "ns", "scope": "pod", "names": ["pod-a"],
-                "labels": {}, "blade_target": "cpu", "blade_action": "fullload",
+                "labels": {}, "fault_target": "cpu", "fault_action": "fullload",
                 "params": {}, "params_flags": [], "duration_seconds": 0,
                 "source": "test", "user_description": "",
             },
@@ -978,7 +1017,7 @@ def _approved_node_disk():
     return freeze_approved_target(
         target={"namespace": "", "names": ["node-a"]},
         params={"scope": "node"},
-        blade_scope="node", blade_target="disk", blade_action="fill",
+        fault_scope="node", fault_target="disk", fault_action="fill",
     )
 
 
@@ -986,7 +1025,7 @@ def _approved_node_process():
     return freeze_approved_target(
         target={"namespace": "", "names": ["node-a"]},
         params={"scope": "node"},
-        blade_scope="node", blade_target="process", blade_action="stop",
+        fault_scope="node", fault_target="process", fault_action="stop",
     )
 
 
@@ -1571,7 +1610,7 @@ class TestCarrierLivenessWindow:
         }
         synthetic_effective = EffectiveTarget(
             scope="node", namespace="", names=("node-a",),
-            blade_target="network", confidence=ConfidenceLevel.HIGH,
+            fault_target="network", confidence=ConfidenceLevel.HIGH,
             raw_command="kubectl exec ...",
         )
         synthetic_artifact = {  # no task_id / confirmed_live_epoch
@@ -1623,7 +1662,7 @@ class TestCarrierLivenessWindow:
         approved = freeze_approved_target(
             target={"namespace": "", "names": nodes},
             params={"scope": "node"},
-            blade_scope="node", blade_target="network", blade_action="drop",
+            fault_scope="node", fault_target="network", fault_action="drop",
         )
         now = time.time()
         artifacts = []
@@ -1664,7 +1703,7 @@ class TestNodeDriftHint:
         return approved_from_dict(freeze_approved_target(
             target={"namespace": "", "names": ["node-a", "node-b"]},
             params={"scope": "node"},
-            blade_scope="node", blade_target="network", blade_action="drop",
+            fault_scope="node", fault_target="network", fault_action="drop",
         ))
 
     def _drift_decision(self, eff_scope: str):
@@ -2244,7 +2283,7 @@ class TestLiveDiscoveryOnlyRetriesRecoverableGates:
         resolved = CarrierResolution.allow(
             EffectiveTarget(
                 scope="node", namespace="", names=("node-a",),
-                blade_target="network", confidence=ConfidenceLevel.HIGH,
+                fault_target="network", confidence=ConfidenceLevel.HIGH,
                 raw_command="kubectl exec ...",
             ),
             {"status": "active", "privileged": True,

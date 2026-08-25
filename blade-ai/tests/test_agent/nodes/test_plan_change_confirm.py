@@ -55,7 +55,7 @@ def test_extracts_complete_transient_proposal_against_current_spec():
     assert proposal is not None
     reason, candidate, revision = proposal
     assert reason.startswith("The original")
-    assert candidate.blade_action == "delay"
+    assert candidate.fault_action == "delay"
     assert revision == 3
 
 
@@ -77,7 +77,7 @@ async def test_approval_replaces_spec_increments_revision_and_resets_runtime_sta
 
     spec = FaultSpec.from_dict(result["fault_spec"])
     assert spec is not None
-    assert spec.blade_action == "delay"
+    assert spec.fault_action == "delay"
     assert spec.revision == 4
     assert result["plan"] is None
     assert result["safety_status"] == "pending"
@@ -94,7 +94,7 @@ async def test_approval_updates_current_batch_item_as_fault_spec():
 
     changed = FaultSpec.from_dict(result["batch_submit_args"]["faults"][0])
     assert changed is not None
-    assert changed.blade_action == "delay"
+    assert changed.fault_action == "delay"
     assert changed.revision == 4
 
 
@@ -122,7 +122,7 @@ async def test_approval_resets_loop_budgets_and_attribution_for_new_contract():
     expected_epoch = len(state["messages"]) + len(result["messages"])
     assert result["attribution_epoch_index"] == expected_epoch
     # No live experiment in the old contract -> no UID handle carried over.
-    assert result["blade_uid"] is None
+    assert result["experiment_uid"] is None
 
 
 @pytest.mark.asyncio
@@ -130,15 +130,32 @@ async def test_approval_keeps_blade_uid_when_experiment_may_be_live():
     """Same keep-handle semantics as the replan seam: an experiment that may
     still be live keeps its UID so recovery can reach it."""
     state = _state()
-    state["blade_uid"] = "d6eaa95514305543"
+    state["experiment_uid"] = "d6eaa95514305543"
     with patch("chaos_agent.agent.nodes.planning.plan_change_confirm.interrupt", return_value="approved"):
         result = await plan_change_confirm(state)
 
-    # keep_blade_uid=True means the reset does NOT touch the UID: the key is
+    # keep_experiment_uid=True means the reset does NOT touch the UID: the key is
     # absent from the result, so LangGraph keeps the state value — same
     # keep-handle semantics as the replan seam.
-    assert "blade_uid" not in result
+    assert "experiment_uid" not in result
     assert result["replan_count"] == 0
+    assert result["injection_method"] is None
+
+
+@pytest.mark.asyncio
+async def test_approval_keeps_native_handle_when_fault_may_be_live():
+    """Parity with the blade keep: a live native mutation (attributed at
+    issue time, no UID) keeps its fault handle across the contract seam —
+    wiping it would orphan a fault the recover graph can no longer identify."""
+    state = _state()
+    state["injection_method"] = "kubectl_native"
+    state["fault_handle"] = {"kind": "native", "method": "kubectl_native"}
+    with patch("chaos_agent.agent.nodes.planning.plan_change_confirm.interrupt", return_value="approved"):
+        result = await plan_change_confirm(state)
+
+    # keep=True: the handle key is absent from the result so LangGraph keeps
+    # the state value; the method is still cleared for re-detection.
+    assert "fault_handle" not in result
     assert result["injection_method"] is None
 
 

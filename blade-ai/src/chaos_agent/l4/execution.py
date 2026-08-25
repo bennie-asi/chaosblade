@@ -6,7 +6,6 @@ import asyncio
 import inspect
 import logging
 import time
-import uuid
 import warnings
 from typing import TYPE_CHECKING
 
@@ -30,7 +29,7 @@ from chaos_agent.l4.events import (
     _normalize_langgraph_event,
 )
 from chaos_agent.l4.pool import _ChaosAgentPool
-from chaos_agent.l4.schemas import L4AgentError, L4TaskResult, PendingCard
+from chaos_agent.l4.schemas import L4TaskResult, PendingCard
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -140,6 +139,7 @@ class _L4ExecutionMixin:
         # do it here before the graph starts executing.
         try:
             from chaos_agent.observability.status_tracker import _tracing_callback
+
             if _tracing_callback is not None:
                 _tracing_callback.set_task_id(task.task_id)
         except Exception:
@@ -149,6 +149,7 @@ class _L4ExecutionMixin:
         # don't go to a throwaway TaskTrace.
         try:
             from chaos_agent.observability.tracer import get_trace
+
             await get_trace(task.task_id)
         except Exception:
             pass
@@ -158,6 +159,17 @@ class _L4ExecutionMixin:
         step_attrs_accumulator: dict = {}
         self._state_transitions_buffer = []
         _pending_phase_completed: dict | None = None  # deferred phase_completed event
+
+        # Phase-7 T2: L4 log mirroring follows the provider-declared
+        # ``log_shipping_tool_names`` union (tools whose runs carry a signal
+        # worth mirroring to the platform log) — replacing the hardcoded
+        # ("blade_create", "blade_status", "kubectl") tuple, so a newly
+        # registered backend joins the mirror without touching L4.
+        from chaos_agent.agent.providers.registry import FaultProviderRegistry
+
+        log_shipping_tools = FaultProviderRegistry.union_tool_names(
+            "log_shipping_tool_names"
+        )
 
         def _emit_deferred_phase_completed() -> None:
             """Emit the buffered phase_completed to the platform.
@@ -195,7 +207,9 @@ class _L4ExecutionMixin:
                     # 的 step 容器，而不是被切碎到顶层。仅当切换到不同 step
                     # 名（如 planning → baseline_capture）时才关闭旧容器、
                     # 新建新容器。
-                    current_step_name = getattr(current_step, "name", None) if current_step else None
+                    current_step_name = (
+                        getattr(current_step, "name", None) if current_step else None
+                    )
                     if current_step_cm and current_step_name == target_step:
                         # 同名 step 已在跑，复用容器。仅记录 transition 用于审计。
                         self._state_transitions_buffer.append(
@@ -267,7 +281,7 @@ class _L4ExecutionMixin:
                 tool_name = event.get("name", "")
                 output = event.get("data", {}).get("output", "")
                 step_attrs_accumulator[f"tool.{tool_name}.status"] = "ok"
-                if tool_name in ("blade_create", "blade_status", "kubectl") and runtime:
+                if tool_name in log_shipping_tools and runtime:
                     try:
                         runtime.tool.execute(
                             "sls_write_logs",
@@ -318,6 +332,7 @@ class _L4ExecutionMixin:
         # --- Bootstrap session for task file persistence ---
         try:
             from chaos_agent.memory.session_store import get_global_session_store
+
             _store = get_global_session_store()
             if _store and not _store.has_active(task.task_id):
                 _store.create_session(task.task_id, operation="inject")
@@ -387,30 +402,39 @@ class _L4ExecutionMixin:
 
         # Emit inject conclusion event.
         if runtime and hasattr(runtime, "emit_event"):
-            from chaos_agent.agent.result.operation_outcome import read_inject_verification
+            from chaos_agent.agent.result.operation_outcome import (
+                read_inject_verification,
+            )
 
             verification = read_inject_verification(state.values) or {}
-            level = verification.get("level", "unknown") if isinstance(verification, dict) else "unknown"
-            blade_uid = state.values.get("blade_uid", "")
+            level = (
+                verification.get("level", "unknown")
+                if isinstance(verification, dict)
+                else "unknown"
+            )
+            experiment_uid = state.values.get("experiment_uid") or ""
             _status_text_map = {
                 "passed": "succeeded",
                 "degraded": "succeeded (degraded)",
                 "failed": "failed",
             }
             status_text = _status_text_map.get(result.status, "failed")
-            runtime.emit_event("conclusion", {
-                "message": (
-                    f"Fault injection {status_text}"
-                    f" | verification level: {level}"
-                    f"{f' | blade_uid: {blade_uid}' if blade_uid else ''}"
-                ),
-                "status": result.status,
-                "level": level,
-                "blade_uid": blade_uid,
-                "trajectory_id": trajectory_id,
-                "summary": result.summary or "",
-                "postmortem": (result.extras or {}).get("postmortem"),
-            })
+            runtime.emit_event(
+                "conclusion",
+                {
+                    "message": (
+                        f"Fault injection {status_text}"
+                        f" | verification level: {level}"
+                        f"{f' | experiment_uid: {experiment_uid}' if experiment_uid else ''}"
+                    ),
+                    "status": result.status,
+                    "level": level,
+                    "experiment_uid": experiment_uid,
+                    "trajectory_id": trajectory_id,
+                    "summary": result.summary or "",
+                    "postmortem": (result.extras or {}).get("postmortem"),
+                },
+            )
 
         return result
 
@@ -427,6 +451,7 @@ class _L4ExecutionMixin:
         # Attribute LLM token usage to this task during recover
         try:
             from chaos_agent.observability.status_tracker import _tracing_callback
+
             if _tracing_callback is not None:
                 _tracing_callback.set_task_id(task.task_id)
         except Exception:
@@ -470,7 +495,9 @@ class _L4ExecutionMixin:
             )
 
         if recover_result:
-            from chaos_agent.agent.result.operation_outcome import read_recover_verification
+            from chaos_agent.agent.result.operation_outcome import (
+                read_recover_verification,
+            )
             from chaos_agent.agent.state import infer_task_state
 
             recover_task_state = infer_task_state(recover_result)
@@ -491,22 +518,31 @@ class _L4ExecutionMixin:
                     "failed": "failed",
                 }
                 recover_text = _recover_status_map.get(recover_task_state, "completed")
-                recover_level = "ok" if recover_task_state == "recovered" else (
-                    "warn" if recover_task_state == "partial_recovered" else "error"
+                recover_level = (
+                    "ok"
+                    if recover_task_state == "recovered"
+                    else (
+                        "warn" if recover_task_state == "partial_recovered" else "error"
+                    )
                 )
-                blade_uid = inject_result.extras.get("blade_uid", "")
-                runtime.emit_event("conclusion", {
-                    "message": (
-                        f"Fault recovery {recover_text}"
-                        f" | recovery level: {recover_task_state}"
-                        f"{f' | blade_uid: {blade_uid}' if blade_uid else ''}"
-                    ),
-                    "status": inject_result.status,
-                    "level": recover_level,
-                    "recovery_level": recover_task_state,
-                    "trajectory_id": trajectory_id,
-                    "summary": inject_result.summary or "",
-                })
+                experiment_uid = (inject_result.extras or {}).get(
+                    "experiment_uid"
+                ) or ""
+                runtime.emit_event(
+                    "conclusion",
+                    {
+                        "message": (
+                            f"Fault recovery {recover_text}"
+                            f" | recovery level: {recover_task_state}"
+                            f"{f' | experiment_uid: {experiment_uid}' if experiment_uid else ''}"
+                        ),
+                        "status": inject_result.status,
+                        "level": recover_level,
+                        "recovery_level": recover_task_state,
+                        "trajectory_id": trajectory_id,
+                        "summary": inject_result.summary or "",
+                    },
+                )
 
         return inject_result
 
@@ -605,7 +641,9 @@ class _L4ExecutionMixin:
             "coverage": 1.0 if fault_type_from_state(values) else 0.5,
             "flake_score": min(1.0, (replan_count + verify_replan_count) / 3.0),
             "assert_confidence": level_confidence.get(ver_level, 0.3),
-            "tool_success_rate": (1.0 if not read_operation_outcome(values).error else 0.5),
+            "tool_success_rate": (
+                1.0 if not read_operation_outcome(values).error else 0.5
+            ),
             "avg_duration_ms": duration_ms,
             "token_efficiency": 0,
             "recovery_rate": (
@@ -623,9 +661,12 @@ class _L4ExecutionMixin:
         try:
             state = await pool.inject_graph.aget_state(config)
             if state and state.values:
-                blade_uid = state.values.get("blade_uid", "")
-                if blade_uid:
-                    from chaos_agent.agent.result.task_snapshot import resolve_recover_initial_state
+                from chaos_agent.agent.state import has_active_fault
+
+                if has_active_fault(state.values):
+                    from chaos_agent.agent.result.task_snapshot import (
+                        resolve_recover_initial_state,
+                    )
 
                     resolution = await resolve_recover_initial_state(
                         task_id,
@@ -676,7 +717,8 @@ class _L4ExecutionMixin:
             except asyncio.TimeoutError:
                 logging.getLogger(__name__).warning(
                     "present_card timeout (%.1fs) on card %s; fail-closed rejected.",
-                    timeout_s, card.card_id,
+                    timeout_s,
+                    card.card_id,
                 )
                 return "rejected"
             except Exception:
@@ -801,7 +843,8 @@ class _L4ExecutionMixin:
                             logger.warning(
                                 "_drive_until_interrupt: on_chat_model_end fired but "
                                 "no usage found. usage_metadata=%r, response_metadata=%r",
-                                um, getattr(output, "response_metadata", None),
+                                um,
+                                getattr(output, "response_metadata", None),
                             )
                     else:
                         logger.warning(
@@ -852,7 +895,9 @@ class _L4ExecutionMixin:
                             "_drive_until_interrupt: AI message has no token info. "
                             "usage_metadata=%r, response_metadata keys=%r",
                             getattr(msg, "usage_metadata", None),
-                            list((getattr(msg, "response_metadata", None) or {}).keys()),
+                            list(
+                                (getattr(msg, "response_metadata", None) or {}).keys()
+                            ),
                         )
                         break
 

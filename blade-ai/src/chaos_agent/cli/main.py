@@ -23,6 +23,7 @@ from chaos_agent.cli.commands.serve import serve_command
 from chaos_agent.cli.commands.uninstall import uninstall_command
 from chaos_agent.cli.commands.update import update_command
 from chaos_agent.cli.commands.version import version_command
+from chaos_agent.cli.commands.web import web_command
 
 
 # TyperGroup subclass that enables -h as an alias for --help
@@ -283,6 +284,7 @@ app.command(name="version", help="Show version information")(version_command)
 app.command(name="update", help="Update blade-ai to the latest version")(update_command)
 app.command(name="uninstall", help="Uninstall blade-ai from the system")(uninstall_command)
 app.command(name="server", help="Start the blade-ai HTTP API server")(serve_command)
+app.command(name="web", help="Start the Web UI locally and open it in a browser")(web_command)
 
 
 # Hidden subcommand: started by the TS TUI in PyInstaller mode to host

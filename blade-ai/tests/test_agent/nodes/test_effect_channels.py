@@ -52,12 +52,12 @@ def fake_exec(monkeypatch):
 
 def _patch_discovery(monkeypatch, result):
     """Patch discover_tool_pod_on_node (lazily imported) to return ``result``."""
-    import chaos_agent.agent.nodes.execute._injection_detection as inj
+    import chaos_agent.tools.pod_discovery as pod_discovery
 
     async def _fake(node_name, kubeconfig, task_id):  # noqa: ANN001
         return result
 
-    monkeypatch.setattr(inj, "discover_tool_pod_on_node", _fake, raising=True)
+    monkeypatch.setattr(pod_discovery, "discover_tool_pod_on_node", _fake, raising=True)
 
 
 async def test_host_scope_returns_host_channel(monkeypatch):

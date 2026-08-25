@@ -363,7 +363,7 @@ class TestSafetyCheckIntegration:
         # value so the flow reaches our health-check insertion point.
         state = {
             "task_id": "t-test",
-            "blade_scope": "node",
+            "fault_scope": "node",
             "skill_name": "k8s-chaos-skills",
             "target": {"namespace": "default", "names": ["n-bad"]},
             "fault_intent": {"namespace": "default"},
@@ -418,7 +418,7 @@ class TestSafetyCheckIntegration:
 
         state = {
             "task_id": "t-test",
-            "blade_scope": "node",
+            "fault_scope": "node",
             "skill_name": "k8s-chaos-skills",
             "target": {"namespace": "default", "names": ["n-bad"]},
             "fault_intent": {"namespace": "default"},
@@ -468,7 +468,7 @@ class TestSafetyCheckIntegration:
 
         state = {
             "task_id": "t-test",
-            "blade_scope": "node",
+            "fault_scope": "node",
             "skill_name": "k8s-chaos-skills",
             "target": {"namespace": "default", "names": ["n"]},
             "fault_intent": {"namespace": "default"},

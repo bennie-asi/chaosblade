@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from chaos_agent.agent.spec.fault_spec import fault_spec_from_legacy_state
 from chaos_agent.agent.spec.skill_identity import read_active_skill_name
+from chaos_agent.agent.state import materialize_fault_handle
 from chaos_agent.agent.state_mgmt.state_lifecycle import (
     ensure_recover_runtime_defaults,
     recover_reset_state,
@@ -43,7 +44,13 @@ def build_recover_initial_from_checkpoint(
         "parent_task_id": inject_task_id,
         "recover_task_id": inject_task_id,
         "operation": "recover",
-        "blade_uid": inject_values.get("blade_uid", "") or "",
+        "experiment_uid": inject_values.get("experiment_uid", ""),
+        # Carrier-agnostic fault handle for the recover graph. Inject graphs
+        # written before the handle existed (legacy checkpoints, persisted
+        # task snapshots) lack the field, so materialize it from whatever
+        # attribution facts survived — the registry hydration seam keeps the
+        # legacy knowledge provider-side instead of in this builder.
+        "fault_handle": materialize_fault_handle(inject_values),
         "skill_name": read_active_skill_name(inject_values),
         "fault_type": inject_values.get("fault_type", "") or "",
         "skill_case_content": inject_values.get("skill_case_content", "") or "",
@@ -52,7 +59,7 @@ def build_recover_initial_from_checkpoint(
         # the primary target). Carried into recover so Layer 1 can undo /
         # reconcile them and Layer 2 must verify each one.
         "side_effects": dict(inject_values.get("side_effects") or {}),
-        "blade_parsed_flags": inject_values.get("blade_parsed_flags") or {},
+        "injection_parsed_params": inject_values.get("injection_parsed_params") or {},
         "inject_verification_summary": (
             inject_values.get("inject_verification_summary", "") or ""
         ),

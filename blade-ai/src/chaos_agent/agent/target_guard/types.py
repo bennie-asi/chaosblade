@@ -7,7 +7,7 @@ Two complementary records and a verdict drive every decision:
   - ``ApprovedTarget`` — frozen at confirmation_gate. The "what the
     user said yes to" record. Includes both the k8s resource identity
     (scope/namespace/names/labels) AND the ChaosBlade fault family
-    (blade_target). Whether the fault family is locked is governed by
+    (fault_target). Whether the fault family is locked is governed by
     ``lock_fault_type`` so operators can dial strictness.
   - ``EffectiveTarget`` — inferred from each in-flight ``tool_call``.
     Reflects what the call would ACTUALLY do, after parsing kubectl
@@ -67,6 +67,19 @@ class GuardVerdict(str, Enum):
     REJECT_STAGNANT = "reject_stagnant"
 
 
+# Sentinel scopes — the guard knows these aren't real k8s kinds. Canonical
+# home since phase-7 T5 (migrated from classifier.py so the provider-side
+# classifiers can import them without touching the classifier module —
+# the classifier lazily imports the provider registry, so a module-level
+# provider → classifier import would be circular through freeze /
+# fault_registry). Consumers may still import them from classifier, which
+# re-imports them for its own heavy use.
+SCOPE_READONLY = "__readonly__"
+SCOPE_BANNED = "__banned__"
+SCOPE_UNKNOWN = "__unknown__"
+SCOPE_ESCAPE = "__escape__"  # container-escape primitives (nsenter/chroot/unshare)
+
+
 class ConfidenceLevel(str, Enum):
     """How sure the classifier is about its EffectiveTarget answer.
 
@@ -99,7 +112,7 @@ class ApprovedTarget:
     Fields:
         scope: K8s resource kind, normalised to canonical singular
             (``pod`` / ``node`` / ``deployment`` / ``service`` / ...).
-            Distinct from blade_target — a fault on a pod's JVM still
+            Distinct from fault_target — a fault on a pod's JVM still
             has scope=pod (the resource being acted on).
         namespace: The k8s namespace. Empty string for cluster-scoped
             resources (node, pv, namespace itself). Empty namespace
@@ -115,16 +128,17 @@ class ApprovedTarget:
             namespace (both ``names`` and ``labels`` empty). The
             guard then accepts any explicit name in that namespace
             without further checking.
-        blade_target: ChaosBlade ``--target`` value (``pod`` /
+        fault_target: fault-carrier target axis value (``pod`` /
             ``node`` / ``cpu`` / ``mem`` / ``jvm`` / ``mysql`` / ...).
-            See ``classifier.BLADE_TARGET_TO_SCOPE`` for the mapping
+            See ``providers.chaosblade.provider.BLADE_TARGET_TO_SCOPE`` (moved out
+            of ``classifier.py`` in phase-7 T5) for the mapping
             to k8s scope.
-        blade_action: ChaosBlade action (``fullload`` / ``burn`` /
+        fault_action: fault action (``fullload`` / ``burn`` /
             ``loss`` / ``delay`` / ...). Whether mismatches on this
             field trigger drift depends on ``lock_fault_type``.
         lock_fault_type: When True (default), the guard treats a
-            change to ``blade_target`` (e.g. ``cpu`` → ``mem``) as
-            drift even if scope/namespace/names match. ``blade_action``
+            change to ``fault_target`` (e.g. ``cpu`` → ``mem``) as
+            drift even if scope/namespace/names match. ``fault_action``
             is NEVER locked by this flag — sub-action tuning
             (fullload→high) is always considered legitimate
             "method switch" autonomy.
@@ -135,8 +149,8 @@ class ApprovedTarget:
     names: tuple[str, ...] = ()
     labels: dict[str, str] = field(default_factory=dict)
     is_namespace_wide: bool = False
-    blade_target: str = ""
-    blade_action: str = ""
+    fault_target: str = ""
+    fault_action: str = ""
     lock_fault_type: bool = True
     # Owner resource names discovered at freeze time. When approved
     # scope=pod, this contains the names of Deployments/DaemonSets/etc.
@@ -220,10 +234,10 @@ class EffectiveTarget:
         names: Resource names the call would touch. Tuple for
             immutability and hashability.
         labels: Label selector the call would use, if any.
-        blade_target: ChaosBlade target name if the call invokes
+        fault_target: fault-carrier target name if the call invokes
             ChaosBlade (either directly via ``blade_create`` or via
             ``kubectl exec POD -- blade create``).
-        blade_action: ChaosBlade action.
+        fault_action: fault action.
         confidence: How sure we are. LOW + UNKNOWN must be treated
             with extra suspicion by the guard (default-deny on
             UNKNOWN; reject-drift threshold tightened on LOW).
@@ -235,8 +249,8 @@ class EffectiveTarget:
     namespace: str
     names: tuple[str, ...] = ()
     labels: dict[str, str] = field(default_factory=dict)
-    blade_target: str = ""
-    blade_action: str = ""
+    fault_target: str = ""
+    fault_action: str = ""
     confidence: ConfidenceLevel = ConfidenceLevel.HIGH
     raw_command: str = ""
     # Tier 1 injection: kubectl exec into a tool pod (chaosblade ns)
@@ -413,4 +427,8 @@ __all__ = [
     "EffectiveTarget",
     "GuardDecision",
     "GuardVerdict",
+    "SCOPE_BANNED",
+    "SCOPE_ESCAPE",
+    "SCOPE_READONLY",
+    "SCOPE_UNKNOWN",
 ]

@@ -66,7 +66,6 @@ async def inject_fault(request: InjectRequest, req: Request):
         task_id=task_id,
         fault_spec=spec,
         needs_confirmation=request.confirm,
-        direct=request.direct,
         kubeconfig=request.kubeconfig or settings.kubeconfig_path,
         kube_context=request.context or settings.kube_context,
         kubewiz_cluster_uuid=getattr(request, "cluster_uuid", "") or settings.kubewiz_cluster_uuid,
@@ -101,25 +100,14 @@ async def inject_fault(request: InjectRequest, req: Request):
         except Exception as e:
             logger.exception(f"Inject failed for task {task_id}")
 
-            # Auto-rollback: if blade_create succeeded but graph crashed later,
-            # we must destroy the experiment to avoid orphaned faults.
-            try:
-                current_state = await agents["pipeline"].aget_state(config)
-                if current_state and current_state.values:
-                    blade_uid = current_state.values.get("blade_uid", "")
-                    kubeconfig = current_state.values.get("kubeconfig", "")
-                    if blade_uid:
-                        logger.warning(
-                            f"Auto-rollback: destroying blade experiment {blade_uid} "
-                            f"after inject failure"
-                        )
-                        from chaos_agent.tools.blade import blade_destroy
-                        destroy_result = await blade_destroy.ainvoke(
-                            {"uid": blade_uid, "kubeconfig": kubeconfig}
-                        )
-                        logger.info(f"Auto-rollback result: {destroy_result}")
-            except Exception as rb_err:
-                logger.error(f"Auto-rollback failed for task {task_id}: {rb_err}")
+            # Auto-rollback: if an injection committed but the graph crashed
+            # later, dispatch the fault handle's rollback (by kind, via the
+            # provider registry) to avoid orphaned faults. Shared seam with
+            # the CLI runner — the single tested implementation lives in
+            # cli/session_finalize.py (no route-local twin copy).
+            from chaos_agent.cli.session_finalize import auto_rollback
+
+            await auto_rollback(agents["pipeline"], config)
 
             return {"error": f"{type(e).__name__}: {e}"}
         finally:
@@ -147,7 +135,7 @@ async def inject_fault(request: InjectRequest, req: Request):
             initial_state,
             task_id,
             result="pending",
-            include_blade_uid=False,
+            include_experiment_uid=False,
         ),
         request_id=getattr(req.state, "request_id", ""),
     )

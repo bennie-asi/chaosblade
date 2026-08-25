@@ -3,7 +3,7 @@
 Each extractor is a pure function ``(stdout: str, state: dict) -> dict``
 that parses one baseline command's stdout and returns a dict of fields
 to merge into ``state["target_metadata"]``. Downstream nodes (FCAT
-adaptations in direct_execute / execute_loop, OOMKill risk checks,
+adaptations in execute_loop, OOMKill risk checks,
 future verify-side diff logic) read those fields by name and skip the
 fresh ``kubectl`` call they would otherwise need.
 
@@ -149,8 +149,7 @@ def extract_pod_top_metrics(stdout: str, state: dict) -> dict[str, Any]:
 
     Returns ``{}`` if no target pod name is available or no row matches
     — callers MUST treat absence as "not collected" and fall back to a
-    fresh ``kubectl top`` (see ``direct_execute._fetch_pod_memory_usage_mb``
-    for the canonical fallback pattern).
+    fresh ``kubectl top`` call.
     """
     from chaos_agent.agent.spec.fault_spec import read_fault_spec
     spec = read_fault_spec(state)

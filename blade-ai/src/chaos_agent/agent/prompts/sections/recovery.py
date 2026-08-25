@@ -67,12 +67,6 @@ def get_recover_core_principles_section() -> str:
 - {SYSTEM_REMINDER_DECLARATION}"""
 
 
-def get_recover_tools_section() -> str:
-    """Tool constraint — general statement, no specific tool listing."""
-    return """### Tool Constraint
-Only call tools that are bound to you in this phase. Tools from previous phases are NOT available and will be rejected."""
-
-
 def get_recover_skill_priority_section() -> str:
     """Skill use-case priority and checklist mapping — middle zone.
 
@@ -167,11 +161,12 @@ Judgement:
   and a clean-attribution tail must never be recorded as partial."""
 
 
-def get_recover_output_format_section(*, layer1_label: str = "blade_destroy") -> str:
+def get_recover_output_format_section(*, layer1_label: str = "deterministic destroy") -> str:
     """Machine-parseable output specification for recovery verification.
 
     Args:
-        layer1_label: "blade_destroy" for ChaosBlade, "recovery execution" for non-CB.
+        layer1_label: "deterministic destroy" for the carrier's programmatic
+            experiment destroy, "recovery execution" for the LLM-driven path.
     """
     return f"""## Output (MANDATORY — submit via the submit_recover_verification tool)
 
@@ -229,7 +224,7 @@ def get_recover_remember_section() -> str:
 # ---------------------------------------------------------------------------
 
 def build_recover_verifier_system_prompt(
-    *, layer1_label: str = "blade_destroy", profile: str = PROFILE_K8S,
+    *, layer1_label: str = "deterministic destroy", profile: str = PROFILE_K8S,
     ledger_section: str = "",
 ) -> str:
     """Build the recovery verifier system prompt using U-shaped composition.
@@ -239,10 +234,11 @@ def build_recover_verifier_system_prompt(
     low-priority information in the middle.
 
     Args:
-        layer1_label: Label for the Layer-1 line — "blade_destroy" for a
-            deterministic ChaosBlade destroy, "recovery execution" for an
-            LLM-driven (kubectl-exec / non-ChaosBlade) recovery. Computed by the
-            caller from the resolved backend's deterministic-Layer-1 flag.
+        layer1_label: Label for the Layer-1 line — "deterministic destroy"
+            for a carrier's programmatic experiment destroy, "recovery
+            execution" for an LLM-driven (kubectl-exec / non-experiment-
+            carrier) recovery. Computed by the caller from the resolved
+            backend's deterministic-Layer-1 flag.
         profile: Channel profile ("k8s"|"host"), accepted for dispatch symmetry.
     """
     from chaos_agent.agent.environment_profiles import get_environment_profile
@@ -262,10 +258,11 @@ def build_recover_verifier_system_prompt(
         # U-shaped attention: Core Principles at BEGINNING (primacy)
         get_recover_role_section(),
         get_recover_core_principles_section(),
-        # Middle zone
+        # Middle zone. No "Tool Constraint" section: the bound-tool list in
+        # the tool schema plus the unknown-tool error feedback already carry
+        # that fact.
         get_experience_section() or "",
-        get_knowledge_summary_section(),
-        get_recover_tools_section(),
+        get_knowledge_summary_section(phase="recover"),
         get_recover_delay_section(),
         environment_fragment,
         get_recover_skill_priority_section(),

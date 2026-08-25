@@ -1,6 +1,7 @@
 """TUI session lifecycle endpoints (M1 of TS TUI rollout).
 
 Provides:
+  - GET    /api/v1/sessions             list live sessions (web sidebar)
   - POST   /api/v1/sessions             create session
   - DELETE /api/v1/sessions/{sid}       destroy session
   - GET    /api/v1/sessions/{sid}/state read state
@@ -107,6 +108,29 @@ class SessionStore:
     def get(self, sid: str) -> dict[str, Any] | None:
         return self._items.get(sid)
 
+    def list(self) -> list[dict[str, Any]]:
+        """Snapshot of all live sessions, newest first.
+
+        Returns a REDUCED field subset, not the raw record: the stored
+        dict carries internals (``conversation_thread_id``,
+        ``first_turn_done``, the raw ``task_ids`` list) that no list
+        consumer should see. ``task_ids`` collapses to ``task_count``.
+        """
+        items = [
+            {
+                "id": sess["id"],
+                "cluster": sess.get("cluster", ""),
+                "namespace": sess.get("namespace", ""),
+                "model_name": sess.get("model_name", ""),
+                "created_at": sess.get("created_at", ""),
+                "task_count": len(sess.get("task_ids") or []),
+            }
+            for sess in self._items.values()
+        ]
+        # created_at is ISO-8601 text, so lexicographic sort == time sort.
+        items.sort(key=lambda s: s["created_at"], reverse=True)
+        return items
+
     def add_task(self, sid: str, task_id: str) -> None:
         """Track a task in the in-memory session record only.
 
@@ -157,6 +181,18 @@ def get_store() -> SessionStore:
 
 
 # -- HTTP handlers ----------------------------------------------------
+
+
+@sessions_router.get("")
+async def list_sessions() -> dict[str, Any]:
+    """List live in-memory sessions (multi-session sidebar in the web UI).
+
+    Process-local by design — matches the store's own lifetime. Plain
+    dict response, consistent with the other session routes (no
+    JSONEnvelope wrapper on this router).
+    """
+    sessions = _GLOBAL_STORE.list()
+    return {"sessions": sessions, "total": len(sessions)}
 
 
 @sessions_router.post("")

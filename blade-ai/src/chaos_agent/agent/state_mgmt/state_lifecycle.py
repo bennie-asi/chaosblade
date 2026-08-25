@@ -117,10 +117,15 @@ _STATE_FIELD_POLICY_LIST: tuple[StateFieldPolicy, ...] = (
     _p("truncated_tool_calls", "confirmation", batch=False, recover=False),
 
     # ── Execution ──────────────────────────────────────────────────
-    _p("blade_uid", "execution", durable=True, batch=None),
+    _p("experiment_uid", "execution", durable=True, batch=None),
+    # Carrier-agnostic handle of the live fault. Same lifecycle as
+    # experiment_uid: durable (must survive compaction), per-fault (reset on
+    # batch advance), inherited by recover (no ``recover=`` → the reset
+    # whitelist keeps it).
+    _p("fault_handle", "execution", durable=True, batch=None),
     # Retired (successfully destroyed) experiment UIDs. Not inherited by the
     # recover graph — the recovered experiment may well be one of them.
-    _p("retired_blade_uids", "execution", durable=True, batch=None, recover=False),
+    _p("retired_experiment_uids", "execution", durable=True, batch=None, recover=False),
     _p("injection_method", "execution", durable=True, batch=None),
     # Combo injection marker — must survive compaction AND be inherited by the
     # recover graph (it drives combo recovery routing there).
@@ -138,8 +143,7 @@ _STATE_FIELD_POLICY_LIST: tuple[StateFieldPolicy, ...] = (
     _p("vehicle_probe_misses", "execution", batch=None, recover=False),
     _p("exec_pod_node_bindings", "execution", batch=None, recover=False),
     _p("selector_name_probes", "execution", batch=None, recover=False),
-    _p("blade_parsed_flags", "execution", durable=True, batch=None),
-    _p("direct", "execution", batch=False, recover=False),
+    _p("injection_parsed_params", "execution", durable=True, batch=None),
     _p("original_replicas", "execution", durable=True, batch=None),
     _p("kubeconfig", "execution", durable=True),
     _p("kube_context", "execution", durable=True),
@@ -157,7 +161,6 @@ _STATE_FIELD_POLICY_LIST: tuple[StateFieldPolicy, ...] = (
     _p("side_effects", "execution", durable=True, batch=None),
     _p("baseline_data", "execution", durable=True, batch=None),
     _p("target_metadata", "execution", durable=True, batch=None),
-    _p("evidence_snapshot", "execution", batch=None),
     _p("disk_burn_post_check", "execution", batch=None),
     _p("disk_fill_post_check", "execution", batch=None),
     _p("se_snapshot", "execution", batch=None),

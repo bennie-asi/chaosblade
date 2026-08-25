@@ -352,7 +352,7 @@ async def capture_primary_metrics(spec, kubeconfig: str) -> dict:
         resolve_feasibility_probe,
     )
 
-    target = getattr(spec, "blade_target", "")
+    target = getattr(spec, "fault_target", "")
     if not target:
         return {}
     probe = resolve_feasibility_probe(profile_for_spec(spec), target)

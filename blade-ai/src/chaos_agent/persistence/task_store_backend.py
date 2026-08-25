@@ -28,7 +28,7 @@ _JSON_COLUMNS: frozenset[str] = frozenset(
 # tasks table — narrow, hot path (16 columns + tenant_id)
 _TASK_COLUMNS: list[str] = [
     "id", "task_id", "task_state", "stage", "phase", "operation",
-    "skill_name", "blade_uid", "namespace", "target_name",
+    "skill_name", "experiment_uid", "namespace", "target_name",
     "tenant_id",
     "error", "finished_at", "duration_ms",
     "gmt_create", "gmt_modified",

@@ -148,10 +148,6 @@ class ChecklistItem(BaseModel):
     description: str = ""
     status: ChecklistItemStatus
     evidence: str = ""
-    # Two-tier verification (Core/Impact): "core" items decide the verdict;
-    # "impact" items are drill findings that never gate it. Empty when the
-    # mode does not classify steps.
-    category: str = ""
 
 
 class Checklist(BaseModel):
@@ -187,6 +183,21 @@ class Layer1Result(BaseModel):
         attempt to recover the Layer 1 result from message history.
         """
         return self.status == Layer1Status.IN_PROGRESS
+
+
+def layer1_to_dict(result: Layer1Result) -> dict:
+    """Convert a Layer1Result to the plain dict used for state storage.
+
+    Canonical home since phase-7 T1 — unifies the recover-side
+    ``recover_layer1_to_dict`` (formerly in
+    ``providers/chaosblade/recover.py``) and the verify-side
+    ``_layer1_to_dict`` (formerly in ``nodes/verify/_verifier_layer1.py``)
+    into one address beside the data class, so both chains and every
+    provider serialize Layer 1 results identically. mode="json" renders
+    the str-Enum status as its plain string value so persistence and
+    comparisons never see enum members.
+    """
+    return result.model_dump(mode="json")
 
 
 class Layer2Result(BaseModel):

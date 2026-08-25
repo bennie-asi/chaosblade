@@ -35,7 +35,7 @@ def replace_fault_spec(state: dict, **field_updates) -> None:
 
         from tests._helpers import replace_fault_spec
         replace_fault_spec(state, namespace="kube-system", names=("coredns",))
-        replace_fault_spec(state, scope="node", blade_target="cpu")
+        replace_fault_spec(state, scope="node", fault_target="cpu")
     """
     from chaos_agent.agent.spec.fault_spec import FaultSpec
     existing = FaultSpec.from_dict(state.get("fault_spec")) or FaultSpec()

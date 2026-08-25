@@ -5,8 +5,8 @@ executable capability definition (v2).
 It asks an LLM to derive, directly from each skill case's markdown — the case
 library is authoritative, no live probing of the blade binary is performed:
 
-- the NL command (``nl_cmd``) and the classic structured/direct command
-  variants (kept for ``blade-ai list`` and other existing consumers)
+- the NL command (``nl_cmd``) and the structured command variant (kept
+  for ``blade-ai list`` and other existing consumers)
 - the machine-consumable capability definition: scope/target/action triple,
   a typed parameter schema (which slot comes from the environment config vs.
   which one the operator fills) and an executability flag
@@ -39,11 +39,11 @@ logger = logging.getLogger(__name__)
 # generating a second language. LLM triple/param derivation has run-to-run
 # jitter; without anchoring the two language artifacts drift apart (different
 # ids) and bilingual consumers can no longer merge cases by id. Prose fields
-# (title/symptom/nl_cmd/direct_hint) stay localized.
+# (title/symptom/nl_cmd) stay localized.
 _STRUCTURAL_FIELDS = (
-    "inject_kind", "scope", "target", "action", "params", "structured_cmd", "direct_cmd",
+    "inject_kind", "scope", "target", "action", "params", "structured_cmd",
 )
-_PROSE_FIELDS = ("title", "fault_symptom", "nl_cmd", "direct_hint")
+_PROSE_FIELDS = ("title", "fault_symptom", "nl_cmd")
 
 # Authoritative case name lives in the md content (``**用例名称** ...``),
 # same line extract_planning_metadata consumes. Filename conventions are only
@@ -55,7 +55,7 @@ _CASE_NAME_RE = re.compile(r"\*\*用例名称\*\*\s*(.+?)\s*$", re.MULTILINE)
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are a blade-ai capability generator. Given a fault drill use-case .md file, derive three injection command variants DIRECTLY from the case content. The case library is authoritative — do not invent fault types, parameters or injection methods that the case does not describe.
+You are a blade-ai capability generator. Given a fault drill use-case .md file, derive the injection command variants DIRECTLY from the case content. The case library is authoritative — do not invent fault types, parameters or injection methods that the case does not describe.
 
 ## Generation rules
 
@@ -70,9 +70,7 @@ For the given use-case .md, output JSON:
     {{ "name": "<param-name>", "kind": "target_resource" | "fault_param", "resolved_from": "environment" | "user", "required": true, "default": "", "description": "what this slot is" }}
   ],
   "nl_cmd": "blade-ai inject -i \"<natural language description with <namespace>, <name>, <kubeconfig> placeholders>\"",
-  "structured_cmd": "blade-ai inject --scope <s> --target <t> --action <a> [--labels app=<app>|-n <node>] [--namespace <ns>] --params <k=v,...> --kubeconfig <kubeconfig>",
-  "direct_cmd": "blade-ai inject --direct --scope <s> --target <t> --action <a> ... --params ... --kubeconfig <kubeconfig>",
-  "direct_hint": ""
+  "structured_cmd": "blade-ai inject --scope <s> --target <t> --action <a> [--labels app=<app>|-n <node>] [--namespace <ns>] --params <k=v,...> --kubeconfig <kubeconfig>"
 }}
 ```
 
@@ -86,10 +84,9 @@ For the given use-case .md, output JSON:
   - fault tuning knobs appearing in `--params k=v` (e.g. cpu-percent, mem-percent, percent, timeout, path, port, domain): kind="fault_param", resolved_from="user", default=the value used in structured_cmd (empty string if a bare boolean flag), description=what it controls.
   - required=false for optional knobs; never invent parameters the case does not use.
 
-### Three command types
+### Command types
 1. **nl_cmd** (always generate): Natural language intent `blade-ai inject -i "..."`, the LLM reads docs and executes
-2. **structured_cmd** (always generate): Structured params (no --direct), LLM executes based on spec + docs (more precise than NL)
-3. **direct_cmd** (blade primitives only): With --direct, deterministic injection skipping LLM; leave empty for control-plane cases
+2. **structured_cmd** (always generate): Structured params, LLM executes based on spec + docs (more precise than NL)
 
 ### inject_kind classification
 - **blade**: The use-case's real injection method is a blade resource stress primitive (cpu/mem/disk/network/process — including host OS-level and python in-process blade experiments)
@@ -108,17 +105,8 @@ For the given use-case .md, output JSON:
 - **inject_kind=blade or mixed**: generate structured_cmd with the blade scope/target/action described by the case
 - **inject_kind=kubectl**: generate structured_cmd with the kubectl-native scope/target/action derived above (the structured intent path routes it to the kubectl-native backend — no blade binary command exists, but the triple IS the capability definition)
 
-### direct_cmd rules (blade primitives only)
-- Same format as structured_cmd but with `--direct` prepended
-- **Only generate when inject_kind=blade or the blade part of mixed**
-- Flags in --params follow the case's injection parameters and standard ChaosBlade flag names — do NOT use abbreviations (e.g., use `network-traffic=out` not bare `out`)
-- Parameter values: use specific values from the .md when available (e.g., path=/var/lib/containerd); otherwise use placeholders <...> or safe defaults (cpu-percent=80, mem-percent=90, percent=90, path=/data etc)
-- For control-plane cases (inject_kind=kubectl): direct_cmd="" and direct_hint="Control-plane fault (kubectl scale/patch), no blade direct command available. Use nl_cmd or structured_cmd instead."
-
 ### mixed handling
-- structured_cmd: full blade structured params
-- direct_cmd: blade part only (if the blade part can independently inject)
-- direct_hint: describe prerequisite/postrequisite kubectl commands (e.g., "Requires: kubectl delete pod <pod> -n <ns> before injection")
+- structured_cmd: full blade structured params (the cooperating kubectl steps are described in the case docs and executed by the LLM at runtime)
 """
 
 # Language-specific tail appended to _SYSTEM_PROMPT. Default is English;
@@ -363,17 +351,9 @@ async def sync_capabilities(
                 "inject_kind": "unknown",
                 "nl_cmd": "",
                 "structured_cmd": "",
-                "direct_cmd": "",
-                "direct_hint": "LLM generation failed. Re-run blade-ai capabilities-sync.",
             }
 
-        # 控制面（kubectl-native）case 没有 blade --direct 确定性命令：
-        # direct_cmd 强制为空。三元组与 structured_cmd 保留——kubectl-native
-        # provider 按三元组注入/反向恢复（providers/k8s_native.py），
-        # 「无 blade 命令」不等于「不可执行」
         inject_kind = result.get("inject_kind", "unknown")
-        if str(inject_kind).lower() == "kubectl":
-            result["direct_cmd"] = ""
 
         completed_count += 1
         _print_progress(completed_count, total_count, task_info["use_case_name"], inject_kind, "ok")
@@ -393,8 +373,6 @@ async def sync_capabilities(
             "params": result.get("params", []) if isinstance(result.get("params"), list) else [],
             "nl_cmd": result.get("nl_cmd", ""),
             "structured_cmd": result.get("structured_cmd", ""),
-            "direct_cmd": result.get("direct_cmd", ""),
-            "direct_hint": result.get("direct_hint", ""),
         }
 
     sem = asyncio.Semaphore(CONCURRENCY)
@@ -538,8 +516,7 @@ def build_registry(cases: list[dict], lang: str = "en") -> dict:
         target = str(c.get("target", "") or "")
         action = str(c.get("action", "") or "")
         inject_kind = str(c.get("inject_kind", "unknown") or "unknown")
-        # executable = 三元组完整：blade 与 kubectl-native 两类后端都按三元组
-        # 注入；direct_cmd 为空（无 blade --direct）不影响可执行性
+        # executable = 三元组完整：blade 与 kubectl-native 两类后端都按三元组注入
         executable = bool(scope and target and action)
         family = _family_of(str(c.get("skill", "")), scope)
         profile = _profile_of(scope) if executable else ("host" if family in ("host", "python") else "k8s")
@@ -580,8 +557,6 @@ def build_registry(cases: list[dict], lang: str = "en") -> dict:
             "use_case_name": c.get("use_case_name", ""),
             "inject_kind": inject_kind,
             "structured_cmd": c.get("structured_cmd", ""),
-            "direct_cmd": c.get("direct_cmd", ""),
-            "direct_hint": c.get("direct_hint", ""),
         })
 
     try:
@@ -669,7 +644,5 @@ def convert_v1_to_v2(v1: dict, lang: str = "en") -> dict:
             "params": _v1_params_from_cmd(structured_cmd, scope),
             "nl_cmd": c.get("nl_cmd", ""),
             "structured_cmd": structured_cmd,
-            "direct_cmd": c.get("direct_cmd", ""),
-            "direct_hint": c.get("direct_hint", ""),
         })
     return build_registry(cases, lang=lang)

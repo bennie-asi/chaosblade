@@ -134,101 +134,19 @@ def _fault_type_from_fault_spec(spec: dict) -> str:
         str(part)
         for part in (
             spec.get("scope", ""),
-            spec.get("blade_target", ""),
-            spec.get("blade_action", ""),
+            spec.get("fault_target", ""),
+            spec.get("fault_action", ""),
         )
         if part
     )
 
 
-def _session_messages_to_langchain(messages: list[dict]) -> list:
-    """Best-effort conversion of SessionStore message dicts back to messages."""
-    if not messages:
-        return []
-
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-
-    tool_call_names: dict[str, str] = {}
-    out: list = []
-
-    for idx, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            continue
-        msg_type = msg.get("type") or ""
-        content = msg.get("content", "")
-        if not isinstance(content, str):
-            content = str(content)
-        msg_id = msg.get("id") if isinstance(msg.get("id"), str) else None
-
-        if msg_type == "ai":
-            tool_calls = msg.get("tool_calls") or []
-            if isinstance(tool_calls, list):
-                for tc in tool_calls:
-                    if not isinstance(tc, dict):
-                        continue
-                    tc_id = tc.get("id")
-                    tc_name = tc.get("name")
-                    if isinstance(tc_id, str) and isinstance(tc_name, str):
-                        tool_call_names[tc_id] = tc_name
-            kwargs = {"content": content}
-            if msg_id:
-                kwargs["id"] = msg_id
-            if isinstance(tool_calls, list) and tool_calls:
-                kwargs["tool_calls"] = tool_calls
-            try:
-                out.append(AIMessage(**kwargs))
-            except Exception:
-                out.append(AIMessage(content=content))
-            continue
-
-        if msg_type == "tool":
-            tool_call_id = msg.get("tool_call_id") or f"session_tool_{idx}"
-            name = msg.get("name") or tool_call_names.get(tool_call_id, "")
-            kwargs = {"content": content, "tool_call_id": tool_call_id}
-            if isinstance(name, str) and name:
-                kwargs["name"] = name
-            if msg_id:
-                kwargs["id"] = msg_id
-            try:
-                out.append(ToolMessage(**kwargs))
-            except Exception:
-                continue
-            continue
-
-        if msg_type == "tool_execution":
-            detail = msg.get("detail") if isinstance(msg.get("detail"), dict) else {}
-            source = detail.get("source") if isinstance(detail.get("source"), str) else ""
-            stdout = detail.get("stdout_preview") if isinstance(detail.get("stdout_preview"), str) else ""
-            text = stdout or content
-            kwargs = {
-                "content": text,
-                "tool_call_id": msg.get("tool_call_id") or f"session_exec_{idx}",
-            }
-            if source:
-                kwargs["name"] = source
-            try:
-                out.append(ToolMessage(**kwargs))
-            except Exception:
-                continue
-            continue
-
-        try:
-            if msg_type == "human":
-                out.append(HumanMessage(content=content, id=msg_id))
-            elif msg_type == "system":
-                out.append(SystemMessage(content=content, id=msg_id))
-        except Exception:
-            continue
-
-    return out
-
-
-def _extract_blade_uid_from_session(
+def _extract_experiment_uid_from_session(
     session: dict | None,
     *,
     prefer_messages: bool = False,
 ) -> str:
-    """Recover blade_uid from task file result/message data."""
+    """Recover the experiment UID from task file result/message data."""
     if not isinstance(session, dict):
         return ""
 
@@ -236,40 +154,26 @@ def _extract_blade_uid_from_session(
 
     def uid_from_result_summary() -> str:
         result_data = _session_result_data(session)
-        blade_uid = result_data.get("blade_uid")
-        return blade_uid if isinstance(blade_uid, str) else ""
+        experiment_uid = result_data.get("experiment_uid")
+        return experiment_uid if isinstance(experiment_uid, str) else ""
 
     def uid_from_messages() -> str:
         if not isinstance(messages, list):
             return ""
         try:
-            from chaos_agent.agent.nodes.execute.execute_loop import _extract_blade_uid_from_messages
+            # Phase-13 D2: registry seam — the per-provider claim over the
+            # best-effort converted history plus the carrier-owned dict
+            # fallback are both orchestrated (and individually contained)
+            # inside the seam; a failure falls through the layers, never
+            # aborts the snapshot rebuild.
+            from chaos_agent.agent.providers.registry import FaultProviderRegistry
 
-            uid = _extract_blade_uid_from_messages(_session_messages_to_langchain(messages))
-            if uid:
-                return uid
+            return FaultProviderRegistry.recover_experiment_uid_from_session(
+                messages
+            )
         except Exception:
-            logger.debug("Failed to extract blade_uid from session messages", exc_info=True)
-
-        from chaos_agent.utils.blade_uid import extract_blade_uid
-
-        for msg in reversed(messages):
-            if not isinstance(msg, dict):
-                continue
-            detail = msg.get("detail") if isinstance(msg.get("detail"), dict) else {}
-            command = detail.get("command") if isinstance(detail.get("command"), str) else ""
-            if "blade" not in command or "create" not in command:
-                continue
-            chunks = [
-                detail.get("stdout_preview"),
-                detail.get("stderr"),
-                msg.get("content"),
-            ]
-            text = "\n".join(c for c in chunks if isinstance(c, str) and c)
-            uid = extract_blade_uid(text)
-            if uid:
-                return uid
-        return ""
+            logger.debug("Failed to extract experiment uid from session messages", exc_info=True)
+            return ""
 
     if prefer_messages:
         return uid_from_messages() or uid_from_result_summary()
@@ -285,6 +189,11 @@ def _build_inject_context_from_session(session: dict | None) -> str:
         return ""
     try:
         from chaos_agent.utils.inject_context import build_inject_context
+        # Phase-13 D2: the conversion moved to the registry home (it is
+        # session-recovery orchestration, not snapshot-private logic).
+        from chaos_agent.agent.providers.registry import (
+            _session_messages_to_langchain,
+        )
 
         return build_inject_context(_session_messages_to_langchain(messages))
     except Exception:
@@ -354,7 +263,7 @@ def _read_jsonl_only_session(task_id: str, task_dir) -> dict | None:
 
     This is intentionally scoped to TaskSnapshot recovery.  The general
     SessionStore.read_session() contract treats .json as the required snapshot,
-    but recover should still mine .jsonl/.jsonl.compacted for blade_uid and
+    but recover should still mine .jsonl/.jsonl.compacted for the experiment uid and
     inject_context when those logs survived a partial write.
     """
     jsonl_path = task_dir / f"{task_id}.jsonl"
@@ -429,7 +338,9 @@ class TaskSnapshot:
     target: dict = field(default_factory=dict)
     params: dict = field(default_factory=dict)
     stored_fault_spec: dict = field(default_factory=dict)
-    blade_uid: str = ""
+    experiment_uid: str = ""
+    injection_method: str = ""
+    fault_handle: dict = field(default_factory=dict)
     skill_name: str = ""
     fault_type: str = ""
     verification: dict | None = None
@@ -473,7 +384,7 @@ class TaskSnapshot:
             _params_from_fault_spec(session_fault_spec)
             or _coerce_json_dict(result_data.get("params"))
         )
-        session_blade_uid = _extract_blade_uid_from_session(
+        session_experiment_uid = _extract_experiment_uid_from_session(
             session,
             prefer_messages=has_increment_log,
         )
@@ -499,6 +410,13 @@ class TaskSnapshot:
         session_side_effects = _coerce_json_dict(result_data.get("side_effects"))
         record_artifacts = _coerce_json_list(record.get("execution_artifacts"))
         session_artifacts = _coerce_json_list(result_data.get("execution_artifacts"))
+        # Attribution facts for recover hydration (R4): the finalize-persisted
+        # result_summary is authoritative when present; the TaskStore record
+        # column is the fallback for tasks finalized before R4.
+        record_injection_method = str(record.get("injection_method") or "")
+        session_injection_method = str(result_data.get("injection_method") or "")
+        record_fault_handle = _coerce_json_dict(record.get("fault_handle"))
+        session_fault_handle = _coerce_json_dict(result_data.get("fault_handle"))
 
         resolved_tui_session_id = tui_session_id
         if not resolved_tui_session_id and isinstance(session, dict):
@@ -509,7 +427,7 @@ class TaskSnapshot:
         if has_increment_log:
             target = session_target or record_target
             params = session_params or record_params
-            blade_uid = session_blade_uid or record.get("blade_uid") or ""
+            experiment_uid = session_experiment_uid or record.get("experiment_uid") or ""
             skill_name = session_skill_name or record_skill_name
             fault_type = session_fault_type or record_fault_type
             verification = result_data.get("verification") or record.get("verification")
@@ -530,10 +448,12 @@ class TaskSnapshot:
             )
             stored_fault_spec = session_fault_spec or record_fault_spec
             execution_artifacts = session_artifacts or record_artifacts
+            injection_method = session_injection_method or record_injection_method
+            fault_handle = session_fault_handle or record_fault_handle
         else:
             target = record_target or session_target
             params = record_params or session_params
-            blade_uid = record.get("blade_uid") or session_blade_uid or ""
+            experiment_uid = record.get("experiment_uid") or session_experiment_uid or ""
             skill_name = record_skill_name or session_skill_name
             fault_type = record_fault_type or session_fault_type
             verification = record.get("verification") or result_data.get("verification")
@@ -551,6 +471,8 @@ class TaskSnapshot:
             ) or session_side_effects
             stored_fault_spec = record_fault_spec or session_fault_spec
             execution_artifacts = record_artifacts or session_artifacts
+            injection_method = record_injection_method or session_injection_method
+            fault_handle = record_fault_handle or session_fault_handle
 
         return cls(
             task_id=task_id,
@@ -561,7 +483,9 @@ class TaskSnapshot:
             target=target,
             params=params,
             stored_fault_spec=stored_fault_spec,
-            blade_uid=blade_uid,
+            experiment_uid=experiment_uid,
+            injection_method=injection_method,
+            fault_handle=fault_handle,
             skill_name=skill_name,
             fault_type=fault_type,
             verification=verification if isinstance(verification, dict) else None,
@@ -577,14 +501,14 @@ class TaskSnapshot:
     @property
     def has_recover_context(self) -> bool:
         """Whether this snapshot has enough information to attempt recovery."""
-        return bool(self.blade_uid) or (
+        return bool(self.experiment_uid) or (
             bool(self.fault_type or self.skill_name) and bool(self.target)
         )
 
     def fault_spec(self) -> dict:
         if self.stored_fault_spec:
             merged = dict(self.stored_fault_spec)
-            scope, blade_target, blade_action = fault_parts_from_name(self.fault_type)
+            scope, fault_target, fault_action = fault_parts_from_name(self.fault_type)
             if self.target:
                 merged["namespace"] = self.target.get("namespace", "") or ""
                 merged["scope"] = (
@@ -596,10 +520,10 @@ class TaskSnapshot:
                 merged["labels"] = dict(self.target.get("labels") or {})
             elif scope and not merged.get("scope"):
                 merged["scope"] = scope
-            if blade_target:
-                merged["blade_target"] = blade_target
-            if blade_action:
-                merged["blade_action"] = blade_action
+            if fault_target:
+                merged["fault_target"] = fault_target
+            if fault_action:
+                merged["fault_action"] = fault_action
             if self.params:
                 merged["params"] = dict(self.params or {})
             else:
@@ -630,7 +554,7 @@ class TaskSnapshot:
             "messages": [],
             "params": dict(self.params or {}),
             "target": dict(self.target or {}),
-            "blade_uid": self.blade_uid,
+            "experiment_uid": self.experiment_uid,
             "skill_name": self.skill_name,
             "fault_type": self.fault_type,
         }
@@ -709,7 +633,11 @@ async def build_recover_initial_from_task_snapshot(
 
     seed = {
         "tui_session_id": snapshot.tui_session_id or checkpoint_values.get("tui_session_id", ""),
-        "blade_uid": snapshot.blade_uid or checkpoint_values.get("blade_uid", "") or "",
+        "experiment_uid": (
+            snapshot.experiment_uid
+            or checkpoint_values.get("experiment_uid", "")
+            or ""
+        ),
         "skill_name": skill_name,
         "fault_type": snapshot.fault_type or checkpoint_values.get("fault_type", ""),
         "skill_case_content": skill_case_content,
@@ -736,9 +664,9 @@ async def build_recover_initial_from_task_snapshot(
             or fault_spec.get("duration_seconds")
             or 0
         ),
-        "blade_scope": checkpoint_values.get("blade_scope", ""),
-        "blade_target": checkpoint_values.get("blade_target", ""),
-        "blade_action": checkpoint_values.get("blade_action", ""),
+        "fault_scope": checkpoint_values.get("fault_scope", ""),
+        "fault_target": checkpoint_values.get("fault_target", ""),
+        "fault_action": checkpoint_values.get("fault_action", ""),
         "kubeconfig": (
             kubeconfig_override
             or snapshot.record.get("kubeconfig")
@@ -748,7 +676,17 @@ async def build_recover_initial_from_task_snapshot(
         "kube_context": snapshot.record.get("kube_context") or checkpoint_values.get("kube_context", "") or "",
         "kubewiz_cluster_uuid": checkpoint_values.get("kubewiz_cluster_uuid", "") or "",
         "kubewiz_profile": checkpoint_values.get("kubewiz_profile", "") or "",
-        "injection_method": snapshot.record.get("injection_method") or checkpoint_values.get("injection_method"),
+        "injection_method": (
+            snapshot.injection_method or checkpoint_values.get("injection_method")
+        ),
+        # Durable fault identity (R4): the finalize-persisted handle wins so a
+        # native fault (no UID) survives into the recover graph; the registry
+        # hydration in build_recover_initial_from_checkpoint fills older tasks.
+        "fault_handle": (
+            dict(snapshot.fault_handle)
+            or checkpoint_values.get("fault_handle")
+            or None
+        ),
         "execution_artifacts": (
             list(snapshot.execution_artifacts)
             or list(checkpoint_values.get("execution_artifacts") or [])
@@ -847,7 +785,7 @@ async def resolve_recover_initial_state(
 def _checkpoint_has_recover_context(values: dict | None) -> bool:
     values = values or {}
     return bool(
-        values.get("blade_uid")
+        values.get("experiment_uid")
         or read_active_skill_name(values)
         or values.get("fault_spec")
         or values.get("target")
@@ -861,9 +799,9 @@ def _merge_snapshot_checkpoint_fault_spec(
     checkpoint_spec = _coerce_json_dict(checkpoint_values.get("fault_spec"))
     merged = dict(checkpoint_spec)
     if snapshot.stored_fault_spec:
-        merged.update(snapshot.stored_fault_spec)
+        merged.update(dict(snapshot.stored_fault_spec))
 
-    scope, blade_target, blade_action = fault_parts_from_name(snapshot.fault_type)
+    scope, fault_target, fault_action = fault_parts_from_name(snapshot.fault_type)
     if snapshot.target:
         merged["namespace"] = snapshot.target.get("namespace", "") or ""
         merged["scope"] = snapshot.target.get("resource_type", "") or scope or merged.get("scope", "")
@@ -872,10 +810,10 @@ def _merge_snapshot_checkpoint_fault_spec(
     elif scope and not merged.get("scope"):
         merged["scope"] = scope
 
-    if blade_target:
-        merged["blade_target"] = blade_target
-    if blade_action:
-        merged["blade_action"] = blade_action
+    if fault_target:
+        merged["fault_target"] = fault_target
+    if fault_action:
+        merged["fault_action"] = fault_action
 
     checkpoint_params = _coerce_json_dict(checkpoint_values.get("params"))
     if snapshot.params:
@@ -912,7 +850,7 @@ def _source_values_from_initial(
     source_values.update({
         "task_id": inject_task_id,
         "tui_session_id": initial.get("tui_session_id", "") or "",
-        "blade_uid": initial.get("blade_uid", "") or "",
+        "experiment_uid": initial.get("experiment_uid", ""),
         "skill_name": read_active_skill_name(initial),
         "fault_type": (
             _fault_type_from_fault_spec(fault_spec)

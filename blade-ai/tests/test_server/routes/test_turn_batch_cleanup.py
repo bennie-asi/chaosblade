@@ -198,7 +198,7 @@ def test_recover_summary_contains_parent_task_and_verification():
                 "task_id": "task-recover",
                 "task_state": "recovered",
                 "fault_type": "pod-pod-delete",
-                "blade_uid": "uid-1",
+                "experiment_uid": "uid-1",
                 "target": {"namespace": "arms-prom", "names": ["pod-a"]},
                 "verification": {
                     "level": "recovered",
@@ -214,7 +214,7 @@ def test_recover_summary_contains_parent_task_and_verification():
     assert text.startswith("[Recover Summary] task_id=task-recover")
     assert "parent_task_id: task-inject" in text
     assert "Type: pod-pod-delete | Target: arms-prom/pod-a" in text
-    assert "Result: recovered | blade_uid: uid-1" in text
+    assert "Result: recovered | experiment_uid: uid-1" in text
     assert "Recovery verification: recovered (L1=passed, L2=passed)" in text
 
 

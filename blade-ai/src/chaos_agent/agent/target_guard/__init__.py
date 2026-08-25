@@ -7,9 +7,11 @@ three concerns:
   - ``types`` — frozen record types (``ApprovedTarget``,
     ``EffectiveTarget``) plus the mutable ``GuardDecision`` and the
     ``GuardVerdict`` / ``ConfidenceLevel`` enums.
-  - ``classifier`` — turns a raw tool_call into an ``EffectiveTarget``.
-    Knows kubectl subcommands, recursive ``kubectl exec`` payloads,
-    and ChaosBlade ``--target`` → k8s-scope mapping.
+  - ``classifier`` — the GENERIC classification layer: the top-level
+    ``infer_effective_target`` entry point plus cross-carrier shared
+    helpers. Carrier-specific vocabulary (blade / kubectl command-line
+    families) lives in the provider domains since phase-7 T5 and is
+    enacted through ``FaultProviderRegistry.classify_tool_target``.
   - ``guard`` — the policy. Compares an ``EffectiveTarget`` against
     the ``ApprovedTarget`` and returns a ``GuardDecision``.
 
@@ -22,7 +24,6 @@ replan + re-confirm. On READONLY / ALLOW it passes through.
 """
 
 from .classifier import (
-    BLADE_TARGET_TO_SCOPE,
     SCOPE_BANNED,
     SCOPE_READONLY,
     SCOPE_UNKNOWN,
@@ -50,7 +51,6 @@ from .types import (
 
 __all__ = [
     "ApprovedTarget",
-    "BLADE_TARGET_TO_SCOPE",
     "CLUSTER_SCOPED_KINDS",
     "ConfidenceLevel",
     "EffectiveTarget",

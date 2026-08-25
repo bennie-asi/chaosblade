@@ -14,6 +14,7 @@ from typing import Optional
 
 from chaos_agent import __version__
 from chaos_agent.agent.factory import create_agent
+from chaos_agent.agent.state import has_active_fault
 from chaos_agent.agent.spec.fault_spec import DurationParamError, FaultSpec
 from chaos_agent.agent.result.operation_summary import build_operation_record
 from chaos_agent.agent.state_mgmt.state_builders import build_inject_initial_state
@@ -33,8 +34,6 @@ from chaos_agent.observability.status_tracker import (
 from chaos_agent.skills.catalog_generator import (
     generate_skill_catalog,
     infer_scope,
-    infer_blade_params,
-    build_direct_cmd,
 )
 from chaos_agent.skills.loader import get_skills_dir
 from chaos_agent.skills.models import SKILL_TYPE_FAULT_INJECTION
@@ -257,7 +256,6 @@ class AgentRunner:
             ssh_key_path=kwargs.get("ssh_key_path", ""),
             ssh_port=kwargs.get("ssh_port"),
             created_at=_ts,
-            direct=kwargs.get("direct", False) if not kwargs.get("input") else False,
             interaction_mode=_interaction_mode,
             dry_run=_dry_run,
             planning_mode=kwargs.get("planning_mode", ""),
@@ -488,7 +486,7 @@ class AgentRunner:
 
                     _outcome = read_operation_outcome(_vals)
                     _is_open = (
-                        not _vals.get("blade_uid", "")
+                        not has_active_fault(_vals)
                         and not _outcome.error
                         and _vals.get("safety_status") != "rejected"
                         and _vals.get("confirmed_intent") not in ("chat",)
@@ -572,7 +570,6 @@ class AgentRunner:
             ssh_key_path=kwargs.get("ssh_key_path", ""),
             ssh_port=kwargs.get("ssh_port"),
             created_at=_ts2,
-            direct=kwargs.get("direct", False) if not kwargs.get("input") else False,
             interaction_mode="cli",
         )
 
@@ -991,9 +988,7 @@ class AgentRunner:
                     yield StreamEvent(type="conversation_turn", content="", task_id=task_id)
                     return
 
-                blade_uid = pv.get("blade_uid", "")
-
-                if blade_uid:
+                if has_active_fault(pv):
                     from chaos_agent.models.schemas import build_inject_envelope
                     from chaos_agent.agent.result.operation_result import build_inject_data_from_state
 
@@ -1006,7 +1001,7 @@ class AgentRunner:
                         task_id=task_id,
                     )
                 else:
-                    # Pipeline ran but no blade_uid (error / rejection)
+                    # Pipeline ran but no active fault (error / rejection)
                     from chaos_agent.agent.result.operation_outcome import read_operation_outcome
                     error_msg = read_operation_outcome(pv).error
                     if error_msg or pv.get("safety_status") == "rejected":
@@ -1258,12 +1253,11 @@ class AgentRunner:
                         stream_evt.task_id = thread_id
                         yield stream_evt
 
-            # Yield a structured result if the pipeline produced a blade_uid.
+            # Yield a structured result if the pipeline produced an active fault.
             final_state = await graph.aget_state(config)
             if final_state and final_state.values:
                 values = final_state.values
-                blade_uid = values.get("blade_uid", "")
-                if blade_uid:
+                if has_active_fault(values):
                     from chaos_agent.models.schemas import build_inject_envelope
                     from chaos_agent.agent.result.operation_result import build_inject_data_from_state
 
@@ -1371,7 +1365,7 @@ class AgentRunner:
         printer_task = asyncio.create_task(_status_printer(status_queue, done_event))
 
         # Pre-declare in case fallback path is taken or an early exception fires.
-        blade_uid = ""
+        experiment_uid = ""
         state_values: dict = {}
 
         try:
@@ -1396,7 +1390,7 @@ class AgentRunner:
 
             initial_state = resolution.initial_state
             state_values = resolution.source_values
-            blade_uid = initial_state.get("blade_uid", "") or ""
+            experiment_uid = initial_state.get("experiment_uid") or ""
             inject_tui_session_id = initial_state.get("tui_session_id", "") or ""
 
             # Mark the inject task as "recovering" in TaskStore so that
@@ -1466,7 +1460,7 @@ class AgentRunner:
                 data=build_recover_cli_failure_data_from_state(
                     inject_task_id,
                     state_values,
-                    blade_uid=blade_uid or "",
+                    experiment_uid=experiment_uid or "",
                     error=f"internal_error: Recovery failed: {msg}",
                 ),
             )
@@ -1584,7 +1578,6 @@ class AgentRunner:
                         "fault_symptom": uc["fault_symptom"],
                         "resource_path": uc["resource_path"],
                         "example_cmd": uc["example_cmd"],
-                        "example_cmd_direct": uc.get("example_cmd_direct", ""),
                     })
             else:
                 # Fallback — skill has no extractable scenarios
@@ -1604,7 +1597,6 @@ class AgentRunner:
                         f'命名空间为<namespace>，目标为<name>，'
                         f'kubeconfig路径为<kubeconfig>"'
                     )
-                blade_params = infer_blade_params(cat, scope=scope)
                 categories_dict[cat]["faults"].append({
                     "fault_type": extract_fault_type(cat),
                     "name": name.replace("-", " ").title(),
@@ -1612,7 +1604,6 @@ class AgentRunner:
                         meta.description.split(".")[0] if meta.description else ""
                     ),
                     "example_cmd": nl_cmd,
-                    "example_cmd_direct": build_direct_cmd(blade_params) if blade_params else "",
                 })
 
         categories = list(categories_dict.values())

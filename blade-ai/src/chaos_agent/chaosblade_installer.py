@@ -8,7 +8,7 @@ tarball from GitHub on first run and extracts it to
 Triggers (NOT pip-install time — pip just unpacks the wheel):
   - ``blade_create`` (tools/blade.py) calls ``ensure_chaosblade_async()``
     before the first mutating injection — the universal chokepoint that
-    covers every path (CLI direct / CLI NL / TUI / server API), off the
+    covers every path (CLI structured / CLI NL / TUI / server API), off the
     event loop via ``asyncio.to_thread``.
   - The CLI (``run_command`` in preflight.py) calls ``ensure_chaosblade``
     pre-emptively with a stderr progress line for inject/recover.
@@ -121,7 +121,7 @@ def _blade_available() -> bool:
     the resolver falls through to its bare ``"blade"`` sentinel with
     nothing on PATH — i.e. a genuine pip-install-with-no-binary state.
     """
-    from chaos_agent.utils.blade_paths import is_executable
+    from chaos_agent.utils.exec_path import is_executable
     return is_executable(settings._resolve_blade_path())
 
 

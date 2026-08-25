@@ -425,6 +425,14 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router)
 
+    # Web UI static hosting — MUST stay last: Starlette matches routes
+    # in registration order, so the catch-all "/" mount only sees
+    # requests no /api/* route claimed. No-op (with a JSON hint at
+    # GET /) when no web/dist bundle resolves.
+    from chaos_agent.server.web import mount_web_ui
+
+    mount_web_ui(app)
+
     return app
 
 

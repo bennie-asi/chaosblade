@@ -576,7 +576,7 @@ class TestAnomalyAnnotationDoesNotChangeControlFlow:
         """Guard 3 — classification still reads the RAW output, by construction."""
         import inspect
 
-        from chaos_agent.tools import blade
+        from chaos_agent.agent.providers.chaosblade import cli as blade
 
         # ``blade_create`` is a StructuredTool; the body lives on its coroutine.
         src = inspect.getsource(blade.blade_create.coroutine)

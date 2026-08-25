@@ -27,7 +27,6 @@ from langchain_core.messages import (
     AIMessage,
     HumanMessage,
     RemoveMessage,
-    SystemMessage,
 )
 
 from chaos_agent.agent.spec.fault_spec import FaultSpec
@@ -38,8 +37,8 @@ from chaos_agent.agent.nodes.planning.intent_confirm import intent_confirm
 def _spec(
     *,
     scope: str = "pod",
-    blade_target: str = "cpu",
-    blade_action: str = "fullload",
+    fault_target: str = "cpu",
+    fault_action: str = "fullload",
     namespace: str = "cms-demo",
     **kwargs,
 ) -> dict:
@@ -50,8 +49,8 @@ def _spec(
     spec = FaultSpec(
         namespace=namespace,
         scope=scope,
-        blade_target=blade_target,
-        blade_action=blade_action,
+        fault_target=fault_target,
+        fault_action=fault_action,
         **kwargs,
     )
     return spec.to_dict()
@@ -269,3 +268,132 @@ class TestIntentConfirmDryRunHandoff:
 
         summary = result.get("handoff_summary", "")
         assert summary.startswith("[Intent Clarification Summary]")
+
+
+# ---------------------------------------------------------------------------
+# Task-row lifecycle writes at the confirmation gate (ghost-row fix)
+# ---------------------------------------------------------------------------
+
+class TestTaskRowLifecycleWrites:
+    """The confirmation gate is the ONLY place that can derive "cancelled"
+    (a rejected intent is not unfinished work) and must un-cancel on
+    reuse-approval (the monotonicity guard would otherwise pin cancelled).
+    Stores go through the conftest-isolated tmp TaskStore singleton.
+    """
+
+    @staticmethod
+    async def _row_state(task_id: str) -> str:
+        from chaos_agent.persistence.task_store import get_task_store
+
+        store = await get_task_store()
+        data = await store.get(task_id)
+        return (data or {}).get("task_state", "")
+
+    @pytest.mark.asyncio
+    async def test_rejected_cancels_task_row(self):
+        state = _state(task_id="inject-confirm1")
+        with patch.object(ic_mod, "interrupt", return_value="rejected"):
+            result = await intent_confirm(state)
+        assert result == {"confirmed_intent": None}
+        assert await self._row_state("inject-confirm1") == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_approved_revives_cancelled_task_row(self):
+        """ID reuse contract: reject then approve the same id — the
+        approval must explicitly un-cancel the row."""
+        from chaos_agent.persistence.task_store import get_task_store
+
+        store = await get_task_store()
+        await store.upsert("inject-confirm1", fault_spec={"target": "pod"})
+        await store.update_task_state("inject-confirm1", "cancelled")
+
+        with patch.object(ic_mod, "interrupt", return_value="approved"):
+            await intent_confirm(_state(task_id="inject-confirm1"))
+
+        assert await self._row_state("inject-confirm1") == "injecting"
+
+    @pytest.mark.asyncio
+    async def test_non_inject_id_is_untouched(self):
+        """Sessions with non inject- ids (tui session anchors) must not
+        get task rows created by the gate."""
+        from chaos_agent.persistence.task_store import get_task_store
+
+        with patch.object(ic_mod, "interrupt", return_value="rejected"):
+            await intent_confirm(_state())  # task_id="t-confirm-1"
+        store = await get_task_store()
+        assert await store.get("t-confirm-1") is None
+
+
+class TestReviveGuards:
+    """_revive_task_row is deliberately conditional — pins the ghost-
+    maker regression found in review: update_task_state on a MISSING row
+    INSERTs a bare injecting row (a fresh ghost), and on a terminal row
+    it would clobber the verdict.
+    """
+
+    @pytest.mark.asyncio
+    async def test_revive_is_noop_when_row_missing(self):
+        """First-ever approval (row not yet created): must NOT insert a
+        bare injecting row — the row is born naturally on first sync."""
+        from chaos_agent.persistence.task_store import get_task_store
+
+        with patch.object(ic_mod, "interrupt", return_value="approved"):
+            await intent_confirm(_state(task_id="inject-fresh1"))
+
+        store = await get_task_store()
+        assert await store.get("inject-fresh1") is None
+
+    @pytest.mark.asyncio
+    async def test_revive_is_noop_on_terminal_verdict(self):
+        """A verdict row (injected) must never be clobbered to injecting."""
+        from chaos_agent.persistence.task_store import get_task_store
+
+        store = await get_task_store()
+        await store.upsert("inject-done1", skill_name="pod-kill", experiment_uid="abc",
+                           verification={"layer1": {"status": "passed"},
+                                         "layer2": {"status": "passed"}})
+        assert (await store.get("inject-done1"))["task_state"] == "injected"
+
+        with patch.object(ic_mod, "interrupt", return_value="approved"):
+            await intent_confirm(_state(task_id="inject-done1"))
+
+        assert (await store.get("inject-done1"))["task_state"] == "injected"
+
+    @pytest.mark.asyncio
+    async def test_reject_clears_needs_confirm_flag(self):
+        """_cancel_task_row contract: rejection also clears needs_confirm,
+        so no later flush re-derives waiting_input for a dead intent."""
+        from chaos_agent.persistence.task_store import get_task_store
+
+        store = await get_task_store()
+        await store.upsert("inject-rej1", fault_spec={"target": "pod"}, needs_confirm=1)
+
+        with patch.object(ic_mod, "interrupt", return_value="rejected"):
+            await intent_confirm(_state(task_id="inject-rej1"))
+
+        data = await store.get("inject-rej1")
+        assert data["task_state"] == "cancelled"
+        assert data["needs_confirm"] == 0
+
+
+class TestEarlyRejectionTerminalWrite:
+    """The spec-incomplete early rejection (before the card is even
+    rendered) runs the same terminal write as an explicit card rejection:
+    the row may already carry fault_spec evidence from clarification,
+    so without the write it would project "injecting" forever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_incomplete_spec_cancels_task_row(self):
+        from chaos_agent.persistence.task_store import get_task_store
+
+        state = _state(task_id="inject-incomplete1",
+                       fault_spec=_spec(scope="typo_scope"))
+        result = await intent_confirm(state)
+
+        assert result["confirmed_intent"] is None
+        store = await get_task_store()
+        data = await store.get("inject-incomplete1")
+        assert data is not None
+        assert data["task_state"] == "cancelled"
+        assert data["needs_confirm"] == 0

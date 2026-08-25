@@ -118,7 +118,7 @@ class TestKubectlTimeoutReaping:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
         monkeypatch.setattr(
-            "chaos_agent.utils.blade_paths.resolve_exec_path",
+            "chaos_agent.utils.exec_path.resolve_exec_path",
             lambda name: "/usr/local/bin/kubectl",
         )
 

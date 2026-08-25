@@ -52,7 +52,6 @@ class TestInjectRequest:
         assert req.confirm is False
         assert req.labels is None
         assert req.input is None
-        assert req.direct is False
 
     def test_custom_values(self):
         req = InjectRequest(
@@ -65,13 +64,11 @@ class TestInjectRequest:
             params={"time": 3000},
             params_flags=["read", "write"],
             confirm=True,
-            direct=True,
         )
         assert req.duration == 120
         assert req.params == {"time": 3000}
         assert req.params_flags == ["read", "write"]
         assert req.confirm is True
-        assert req.direct is True
 
     def test_missing_required_field_raises(self):
         with pytest.raises(Exception):
@@ -175,16 +172,6 @@ class TestInjectRequest:
         with pytest.raises(Exception):
             InjectRequest(scope="pod", target="cpu")
 
-    def test_direct_with_input_raises(self):
-        """direct mode is not compatible with input."""
-        with pytest.raises(Exception):
-            InjectRequest(input="kill the pod", direct=True)
-
-    def test_direct_without_full_structured_raises(self):
-        """direct mode requires all structured params."""
-        with pytest.raises(Exception):
-            InjectRequest(scope="pod", target="cpu", action="fullload", direct=True)
-
     def test_invalid_scope_raises(self):
         """Invalid scope value should raise validation error."""
         with pytest.raises(Exception):
@@ -248,7 +235,7 @@ class TestInjectResponse:
         resp = InjectResponse(task_id="task-1")
         assert resp.result == "pending"
         assert resp.fault_type == ""
-        assert resp.blade_uid == ""
+        assert resp.experiment_uid == ""
         assert resp.targets == []
         assert resp.verification is None
         assert resp.error == ""
@@ -258,14 +245,14 @@ class TestInjectResponse:
             task_id="task-1",
             result="injected",
             fault_type="pod-cpu-fullload",
-            blade_uid="uid-123",
+            experiment_uid="uid-123",
             targets=[TargetInfo(name="my-pod", namespace="default")],
             verification={"level": "verified", "layer1": "passed", "layer2": "passed"},
         )
         assert resp.result == "injected"
         assert len(resp.targets) == 1
         assert resp.targets[0].name == "my-pod"
-        assert resp.blade_uid == "uid-123"
+        assert resp.experiment_uid == "uid-123"
         assert resp.verification["level"] == "verified"
 
 class TestRecoverResponse:
@@ -276,7 +263,7 @@ class TestRecoverResponse:
     def test_defaults(self):
         resp = RecoverResponse(task_id="task-1")
         assert resp.result == "pending"
-        assert resp.blade_uid == ""
+        assert resp.experiment_uid == ""
         assert resp.targets == []
         assert resp.verification is None
         assert resp.error == ""
@@ -285,7 +272,7 @@ class TestRecoverResponse:
         resp = RecoverResponse(
             task_id="task-1",
             result="recovered",
-            blade_uid="uid-123",
+            experiment_uid="uid-123",
             targets=[TargetInfo(name="pod-1", namespace="default")],
         )
         assert resp.result == "recovered"

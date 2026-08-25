@@ -54,10 +54,12 @@ class AdaptationDirective:
     """Unique rule identifier, e.g. 'P0-param-safety-burn-lowmem'."""
 
     target_node: str
-    """Node that should apply this rule: direct_execute | execute_loop | safety_check | baseline_capture | verifier."""
+    """Node that should apply this rule: execute_loop | safety_check | baseline_capture | verifier."""
 
     mode: str
-    """Execution mode: 'direct' | 'llm' | 'both'.  Defect-1 fix: LLM mode must be covered."""
+    """Execution mode: 'llm' | 'both'. Only the LLM path remains after the
+    deterministic direct-execute bypass was removed; consumers apply rules
+    whose mode is 'llm' or 'both' ('direct' is a legacy value no consumer applies)."""
 
     rule_type: str
     """Category for partition filtering (Defect-7 fix):
@@ -85,7 +87,7 @@ class AdaptationDirective:
 # Shared utility functions
 # ---------------------------------------------------------------------------
 
-_BURN_DEFAULT_SIZE = 100  # 100MB blocks (matches direct_execute._BURN_DEFAULT_SIZE)
+_BURN_DEFAULT_SIZE = 100  # 100MB blocks (matches the burn default in the execute path)
 _BURN_MINIMUM_SIZE = 20  # 最小可观测 burn 大小（fail-safe 默认值）
 _OOMKILL_RISK_THRESHOLD_MB = 512
 
@@ -160,14 +162,14 @@ def lookup_adaptations(
 
 
 # ---------------------------------------------------------------------------
-# Default FCAT rule table (5 rules, v3)
+# Default FCAT rule table (4 rules, v3)
 # ---------------------------------------------------------------------------
 
 _FAULT_CONTEXT_ADAPTATIONS: list[AdaptationDirective] = [
     # P0: param safety boundary guard (generic pattern — Defect-2 fix)
     AdaptationDirective(
         id="P0-param-safety-burn-lowmem",
-        target_node="direct_execute",
+        target_node="execute_loop",
         mode="both",
         rule_type="param_override",
         condition=lambda s, t, a, m: (
@@ -180,33 +182,7 @@ _FAULT_CONTEXT_ADAPTATIONS: list[AdaptationDirective] = [
             "safety_rationale": "burn --size exceeds pod memory safety boundary",
         },
         priority=10,
-        combines_with=["P0-evidence-snapshot"],
         description="Low-memory pod: auto-reduce burn --size to prevent OOMKill",
-    ),
-
-    # P0-evidence-snapshot: capture evidence after blade_create (Defect-4 fix)
-    AdaptationDirective(
-        id="P0-evidence-snapshot",
-        target_node="direct_execute",
-        mode="both",
-        rule_type="param_override",
-        condition=lambda s, t, a, m: (
-            s == "pod" and t == "disk" and a == "burn"
-            and (m.get("pod_memory_limit_mb") is None
-                 or m.get("pod_memory_limit_mb") < _OOMKILL_RISK_THRESHOLD_MB)
-        ),
-        action={
-            "evidence_capture": True,
-            "snapshot_commands": ["ls -lah /tmp", "df -h"],
-            "snapshot_delay_seconds": 3,
-            "safety_rationale": (
-                "low-mem pod may OOMKill during burn, "
-                "capture evidence before potential crash"
-            ),
-        },
-        priority=5,
-        combines_with=["P0-param-safety-burn-lowmem"],
-        description="Low-memory pod: capture quick evidence snapshot after blade_create",
     ),
 
     # P1: same-target same-action overlay injection -> force confirm

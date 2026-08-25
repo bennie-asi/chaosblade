@@ -14,7 +14,9 @@ from chaos_agent.agent.nodes.verify._verifier_hints import (
     _BASELINE_INTEGRITY_PROMPT,
     _get_fault_verification_hints,
 )
-from chaos_agent.agent.nodes.verify._verifier_layer1 import Layer1Result
+# Phase-4 T6: verdict-direct (was a forward through the _verifier_layer1
+# shim pre-cleanup).
+from chaos_agent.agent.result.verdict import Layer1Result
 from chaos_agent.agent.prompts.reminder import wrap_system_reminder
 from chaos_agent.agent.nodes.verify._verifier_layer2_parse import (
     _extract_verification_step_descriptions,
@@ -95,9 +97,9 @@ def _verification_cycle_needs_context(state: AgentState) -> bool:
 
 def _build_baseline_tool_messages(
     baseline: dict,
-    blade_target: str,
-    blade_action: str,
-    blade_parsed: dict | None = None,
+    fault_target: str,
+    fault_action: str,
+    injection_parsed: dict | None = None,
 ) -> list:
     """Build synthetic AIMessage + ToolMessage pairs for pre-injection baseline data.
 
@@ -167,7 +169,7 @@ def _build_baseline_tool_messages(
     # ── Pair 2: Extracted key metrics + comparison semantics ──
     # Pre-extracted metrics so LLM doesn't need to parse raw kubectl output
     # to find key numbers.  Includes mandatory comparison format instructions.
-    key_metrics = _extract_baseline_key_metrics(baseline, blade_target, blade_action)
+    key_metrics = _extract_baseline_key_metrics(baseline, fault_target, fault_action)
     metrics_parts = []
     if key_metrics:
         metrics_lines = "\n".join(f"- {k}: {v}" for k, v in key_metrics.items())
@@ -176,7 +178,7 @@ def _build_baseline_tool_messages(
             f"{metrics_lines}"
         )
 
-    # Comparison semantics — the causal narrative that makes baseline USAGE mandatory
+    # Comparison semantics — the causal narrative that motivates baseline usage
     semantics = (
         "### Baseline Comparison Rules\n"
         "You now have PRE-INJECTION baseline data (captured BEFORE the fault was injected). "
@@ -188,11 +190,13 @@ def _build_baseline_tool_messages(
         "- A significant change from baseline (e.g., disk 10%→13%, CPU 100m→800m, "
         "RestartCount 7→8) is STRONG evidence the fault is in effect.\n"
         "- If metrics are SIMILAR to baseline, the fault may not be working.\n\n"
-        "**FORMAT REQUIREMENT (mandatory when Pre-Injection Baseline is available)**:\n"
-        "Each checklist step's evidence MUST include baseline comparison in the format:\n"
+        "**FORMAT REQUIREMENT (when Pre-Injection Baseline is available)**:\n"
+        "For steps that decide whether the injection took effect, include baseline "
+        "comparison in the evidence in the format:\n"
         "  \"baseline: <metric from above> → post-injection: <metric you observe NOW> (Δ<change>)\"\n"
-        "Steps that omit baseline comparison when baseline data is available "
-        "will be flagged as INCOMPLETE and may trigger re-verification.\n"
+        "Steps without a baseline comparison weaken their own evidence. Propagated-effect "
+        "steps (OOM, latency, business impact) may omit it — mark them "
+        "'expected'/'not_applicable' when no observation is in hand.\n"
         "In your VERIFICATION_RESULT, set BaselineUsed: true.\n"
     )
     metrics_parts.append(semantics)
@@ -269,7 +273,7 @@ def _build_convergence_hint(count: int) -> str:
 def _build_layer2_messages(
     state: AgentState,
     layer1: Layer1Result,
-    blade_uid: str,
+    experiment_uid: str,
     skill_name: str,
     kubeconfig: str,
     count: int,
@@ -300,9 +304,9 @@ def _build_layer2_messages(
     # State-derived variables needed by _build_baseline_tool_messages.
     from chaos_agent.agent.spec.fault_spec import read_fault_spec as _rfs_vm
     _spec_vm = _rfs_vm(state)
-    _blade_target = _spec_vm.blade_target if _spec_vm else ""
-    _blade_action = _spec_vm.blade_action if _spec_vm else ""
-    _blade_parsed = state.get("blade_parsed_flags") or {}
+    _fault_target = _spec_vm.fault_target if _spec_vm else ""
+    _fault_action = _spec_vm.fault_action if _spec_vm else ""
+    _injection_parsed = state.get("injection_parsed_params") or {}
 
     _baseline = state.get("baseline_data")
     if _baseline and _baseline.get("success_count", 0) > 0:
@@ -312,13 +316,13 @@ def _build_layer2_messages(
         )
         if not _baseline_in_state:
             messages.extend(_build_baseline_tool_messages(
-                _baseline, _blade_target, _blade_action, _blade_parsed,
+                _baseline, _fault_target, _fault_action, _injection_parsed,
             ))
     if new_cycle is None:
         new_cycle = _verification_cycle_needs_context(state)
     if new_cycle:
         context = _build_first_iteration_context(
-            state, layer1, blade_uid, skill_name, kubeconfig,
+            state, layer1, experiment_uid, skill_name, kubeconfig,
             tool_pod_name, convergence_hint,
         )
         messages.append(HumanMessage(
@@ -344,7 +348,7 @@ def _build_layer2_messages(
             f"- Step 2: passed/failed/skipped — brief evidence\n"
             f"- ...\n\n"
             f"VERIFICATION_RESULT:\n"
-            f"- Layer1 (blade_status): passed/failed/skipped\n"
+            f"- Layer1 (experiment status): passed/failed/skipped\n"
             f"- Layer2 (fault-specific): passed/failed/skipped - evidence summary\n"
             f"- Overall: verified/partial/unverified\n"
             f"- BaselineUsed: true/false (whether pre-injection baseline was compared in evidence)\n"
@@ -361,7 +365,7 @@ def _build_layer2_messages(
 def _build_first_iteration_context(
     state: AgentState,
     layer1: Layer1Result,
-    blade_uid: str,
+    experiment_uid: str,
     skill_name: str,
     kubeconfig: str,
     tool_pod_name: str | None,
@@ -376,9 +380,8 @@ def _build_first_iteration_context(
     from chaos_agent.agent.spec.fault_spec import read_fault_spec as _rfs_vm
     _spec_vm = _rfs_vm(state)
     _params = dict(_spec_vm.params) if _spec_vm else {}
-    _blade_target = _spec_vm.blade_target if _spec_vm else ""
-    _blade_action = _spec_vm.blade_action if _spec_vm else ""
-    _blade_parsed = state.get("blade_parsed_flags") or {}
+    _fault_target = _spec_vm.fault_target if _spec_vm else ""
+    _fault_action = _spec_vm.fault_action if _spec_vm else ""
 
     # First iteration: inject full Layer 1 context
     target = {
@@ -389,9 +392,9 @@ def _build_first_iteration_context(
     }
     params = _params
     injection_method = state.get("injection_method")
-    blade_scope = _spec_vm.scope if _spec_vm else ""
-    blade_target = _blade_target
-    blade_action = _blade_action
+    fault_scope = _spec_vm.scope if _spec_vm else ""
+    fault_target = _fault_target
+    fault_action = _fault_action
 
     # Build Layer 1 context section (adapted for skipped vs passed)
     _is_self_destructive = (
@@ -401,7 +404,7 @@ def _build_first_iteration_context(
     if _is_self_destructive:
         layer1_context = (
             "## Layer 1 Result (SKIPPED — self-destructive fault)\n"
-            f"blade_status unreachable: {layer1.details}\n\n"
+            f"Layer 1 tool check unreachable: {layer1.details}\n\n"
             "## WARNING: Target node is NotReady\n"
             "The target node lost connectivity — this is likely the "
             "injection effect itself (e.g. containerd/kubelet stopped). "
@@ -418,23 +421,23 @@ def _build_first_iteration_context(
             "This is a self-destructive fault: the injection destroyed "
             "the node's communication channel. Verify the EFFECT of the "
             "fault (node NotReady, pods in abnormal state) rather than "
-            "the injection mechanism (blade_status).\n"
+            "the injection mechanism (Layer 1 tool check).\n"
         )
     elif layer1.status == "skipped":
         layer1_context = (
             "## Layer 1 Result\n"
-            "Layer 1 skipped: non-ChaosBlade fault (no blade_uid). "
+            "Layer 1 skipped: no experiment UID for this fault. "
             "Proceed directly to Layer 2 verification.\n\n"
         )
         layer2_instruction = (
-            "This is a non-ChaosBlade fault injection. "
+            "This fault was injected natively (no experiment carrier). "
             "Perform Layer 2 verification: use the available observation "
             "tools to verify the fault is actually in effect on the target.\n"
         )
     else:
         layer1_context = (
             f"## Layer 1 Result (already completed)\n"
-            f"blade_status for UID {blade_uid}: {layer1.status}\n"
+            f"Layer 1 for experiment {experiment_uid}: {layer1.status}\n"
             f"Details: {layer1.raw_output[:500]}\n\n"
         )
         if layer1.expired:
@@ -476,14 +479,14 @@ def _build_first_iteration_context(
 
     # Build fault metadata section
     fault_metadata = ""
-    if blade_scope or blade_target or blade_action or injection_method:
+    if fault_scope or fault_target or fault_action or injection_method:
         parts = []
-        if blade_scope:
-            parts.append(f"Scope: {blade_scope}")
-        if blade_target:
-            parts.append(f"Target: {blade_target}")
-        if blade_action:
-            parts.append(f"Action: {blade_action}")
+        if fault_scope:
+            parts.append(f"Scope: {fault_scope}")
+        if fault_target:
+            parts.append(f"Target: {fault_target}")
+        if fault_action:
+            parts.append(f"Action: {fault_action}")
         if injection_method:
             parts.append(f"Injection method: {injection_method}")
         fault_metadata = " | ".join(parts)
@@ -534,13 +537,13 @@ def _build_first_iteration_context(
             f"against them. Verify ONLY the approved anchor: {_anchor_desc}.\n"
         )
     # Structured key parameters from parsed flags (e.g. path, percent, size)
-    blade_parsed = state.get("blade_parsed_flags") or {}
-    if blade_parsed:
-        context += f"Blade key parameters: {blade_parsed}\n"
+    injection_parsed = state.get("injection_parsed_params") or {}
+    if injection_parsed:
+        context += f"Injection key parameters: {injection_parsed}\n"
     if fault_metadata:
         context += f"{fault_metadata}\n"
     # Timeout info: duration is auto-boosted, only add informational note
-    _timeout_val = blade_parsed.get("timeout")
+    _timeout_val = injection_parsed.get("timeout")
     if _timeout_val:
         try:
             _timeout_sec = int(str(_timeout_val).strip())
@@ -573,7 +576,7 @@ def _build_first_iteration_context(
             "(metrics + events + conditions) before concluding 'verified'.\n"
         )
     # Tool pod context: provide accurate information about tool pod capabilities
-    if blade_scope == "node" and tool_pod_name:
+    if fault_scope == "node" and tool_pod_name:
         # The tool pod namespace is deployment-specific (task-e9bae269: the
         # pods lived in `default`, not `chaosblade`). It is never recorded in
         # state, so never assert one — instruct the LLM to resolve it first.
@@ -594,7 +597,7 @@ def _build_first_iteration_context(
             f"fall back to bare `/proc/loadavg`). If this tool pod is unavailable or "
             f"lacks /host access, fall back to a node debug pod (busybox image) "
             f"and exec into it.\n"
-            f"- **UID Dual Mapping**: The experiment UID ({blade_uid}) is the CRD resource name. "
+            f"- **UID Dual Mapping**: The experiment UID ({experiment_uid}) is the CRD resource name. "
             f"Inside the tool pod, the injection tool's local status subcommand searches the LOCAL "
             f"experiment database and typically returns 'record not found' for an experiment "
             f"created through the cluster API — NEVER use it for this check (it causes a "
@@ -603,7 +606,7 @@ def _build_first_iteration_context(
             f"tool itself; knowledge docs provide reference forms).\n"
         )
     # Programmatic post-check: injection engine already verified the fill effect
-    # during direct_execute. This is authoritative — present it BEFORE verification
+    # during injection. This is authoritative — present it BEFORE verification
     # instructions so the LLM can use it as primary evidence.
     _post_check = state.get("disk_fill_post_check") or params.get("disk_fill_post_check")
     if not _is_host_channel and _post_check and isinstance(_post_check, dict):
@@ -636,7 +639,7 @@ def _build_first_iteration_context(
             "worked — cross-validate with other checks.\n"
         )
     # Programmatic post-check: injection engine already verified the burn I/O effect
-    # during direct_execute. This is authoritative — present it BEFORE verification
+    # during injection. This is authoritative — present it BEFORE verification
     # instructions so the LLM can use it as primary evidence.
     _burn_check = state.get("disk_burn_post_check") or params.get("disk_burn_post_check")
     if not _is_host_channel and _burn_check and isinstance(_burn_check, dict):
@@ -684,22 +687,6 @@ def _build_first_iteration_context(
                 f"The fault may not be in effect despite blade query reporting Success. "
                 f"Cross-validate with other checks (ps | grep dd, iostat).\n"
             )
-    # P0-evidence-snapshot: pre-crash evidence for low-memory pods
-    _evidence_snap = state.get("evidence_snapshot")
-    if _evidence_snap and isinstance(_evidence_snap, dict):
-        context += (
-            "\n## Evidence Snapshot (already captured)\n"
-            "The injection engine captured a quick evidence snapshot 3s after blade_create\n"
-            "(for low-memory pods at risk of OOMKill before verification):\n"
-        )
-        for _snap_cmd, _snap_data in _evidence_snap.items():
-            _snap_rc = _snap_data.get("rc", "?")
-            _snap_out = (_snap_data.get("stdout") or "")[:300]
-            context += f"- `{_snap_cmd}` → rc={_snap_rc}\n```\n{_snap_out}\n```\n"
-        context += (
-            "Use this as supplementary evidence. If the pod has since OOMKilled and restarted,\n"
-            "this snapshot preserves the pre-crash state.\n"
-        )
     context += (
         "\n## Injection Verification Instructions\n"
     )
@@ -722,7 +709,9 @@ def _build_first_iteration_context(
             "verification strategy below. Where it conflicts with the skill "
             "case's generic steps, the planner's environment-specific "
             "conclusions prevail (e.g. an anticipated negative result). The "
-            "skill case still defines which steps to verify.\n\n"
+            "skill case still defines which steps to verify; the adaptation "
+            "stays within the case's verification steps (no extra observation "
+            "rounds or repeat windows).\n\n"
             f"<planner-verification>\n{plan_verification}\n</planner-verification>\n\n"
         )
     if skill_case:
@@ -740,8 +729,8 @@ def _build_first_iteration_context(
                 f"Multiple skill cases are provided above. You MUST:\n"
                 f"1. Read ALL candidates carefully\n"
                 f"2. Choose the ONE most relevant to the actual fault "
-                f"(scope={blade_scope}, target={blade_target}, "
-                f"action={blade_action})\n"
+                f"(scope={fault_scope}, target={fault_target}, "
+                f"action={fault_action})\n"
                 f"3. State which candidate you chose and why "
                 f"(one sentence)\n"
                 f"4. Follow THAT candidate's **注入验证** steps as your "
@@ -757,10 +746,11 @@ def _build_first_iteration_context(
                 f"evidence\n"
                 f"3. If a step cannot be executed, mark as skipped "
                 f"with reason. Steps observing the injection itself "
-                f"taking effect decide the verdict; propagated effects "
-                f"(OOM, latency, business impact) are drill FINDINGS — "
-                f"record faithfully (absence included), never downgrade "
-                f"the verdict\n"
+                f"taking effect decide the verdict. Propagated effects "
+                f"(OOM, latency, business impact) are NOT verdict "
+                f"criteria: record evidence already in hand, otherwise "
+                f"mark 'expected'/'not_applicable' — never wait, retry "
+                f"or sample for them\n"
                 f"4. **MANDATORY OUTPUT**: You MUST output a "
                 f"'VERIFICATION_CHECKLIST:' section BEFORE your final "
                 f"'VERIFICATION_RESULT:' section.\n"
@@ -774,58 +764,47 @@ def _build_first_iteration_context(
             has_section = _has_injection_verification_section(skill_case)
 
         if not is_multi_candidate and step_descs:
-            # ═══ Mode 1: TEMPLATE — structured steps, two-tier verdict ═══
-            # Core/Impact split (first principles): every successful injection
-            # has decisive anchor evidence (the mutation itself, measured on
-            # the right target) — that alone decides the verdict. Propagation
-            # effects described by the case (OOM, latency, business impact)
-            # are drill FINDINGS: recorded faithfully (absence included — a
-            # negative observation is resilience evidence), but never gate
-            # the verdict.
+            # ═══ Mode 1: TEMPLATE — structured steps, single-tier verdict ═══
+            # Verifier answers ONE claim: did the injection take effect
+            # on the target. Steps observing that decide the verdict.
+            # Steps describing propagated effects (OOM, latency, business
+            # impact) are NOT verdict criteria — evidence already in hand
+            # is recorded faithfully, never waited or sampled for.
             template_lines = []
             for i, desc in enumerate(step_descs, start=1):
                 template_lines.append(
-                    f"- Step {i}: [category] [status] — {desc}"
+                    f"- Step {i}: [status] — {desc}"
                 )
             template_str = "\n".join(template_lines)
             context += (
-                f"### Verification Strategy (Two-Tier: Core / Impact)\n"
+                f"### Verification Strategy (Template)\n"
                 f"Steps from the skill case:\n"
                 f"{template_str}\n\n"
-                f"Classify each step FIRST:\n"
-                f"- `[CORE]` — a direct, measurable consequence of the\n"
-                f"  injection itself on the target, consistent with the\n"
-                f"  actual injection parameters. If direct measurement is\n"
-                f"  impossible, verify the mechanism anchor instead (the\n"
-                f"  rule/config/process state installed on the right\n"
-                f"  target) and label the evidence tier. CORE steps alone\n"
-                f"  decide the verdict.\n"
-                f"- `[IMPACT]` — propagated effects the case describes\n"
-                f"  (OOM/eviction, latency, business impact). These are\n"
-                f"  drill FINDINGS, never verdict criteria.\n\n"
-                f"Obligations:\n"
-                f"- `[CORE]`: MUST verify with evidence.\n"
-                f"- `[IMPACT]`: one cheap observation, then record\n"
-                f"  faithfully whatever you see — absence included (e.g.\n"
-                f"  'expected — no OOMKilled: node stable under 80%\n"
-                f"  pressure'). Whether the phenomenon is even expected\n"
-                f"  depends on the actual injection parameters. If the\n"
-                f"  step's target cannot be instantiated here (placeholder\n"
-                f"  like '应用 A'), mark it `not_applicable` with the\n"
-                f"  reason; do NOT fabricate a target.\n\n"
+                f"Step handling:\n"
+                f"- Steps observing the injection itself taking effect on "
+                f"the target decide the verdict — they are your priority.\n"
+                f"- Steps describing propagated effects (OOM/eviction, "
+                f"latency, business impact) are NOT verdict criteria: if "
+                f"evidence is already in hand, record it faithfully "
+                f"(absence included); otherwise mark 'expected' or "
+                f"'not_applicable' — NEVER add waiting, retries or extra "
+                f"sampling to observe them. If the step's target cannot "
+                f"be instantiated here (placeholder like '应用 A'), mark "
+                f"it 'not_applicable' with the reason; do NOT fabricate "
+                f"a target.\n\n"
                 f"Rules:\n"
-                f"1. Line format: `Step N: [CORE|IMPACT] <status> — <evidence>`,\n"
+                f"1. Line format: `Step N: <status> — <evidence>`,\n"
                 f"   keeping the case's step numbering.\n"
                 f"2. <status> ∈ passed, failed, skipped,\n"
                 f"   recovered_before_observation, expected, not_applicable.\n"
-                f"3. Every status needs evidence; `expected` without an\n"
-                f"   observation is invalid — use `skipped` if unchecked.\n"
+                f"3. Every status needs evidence; for injection-effect "
+                f"steps `expected` without an observation is invalid — \n"
+                f"   use `skipped` if unchecked.\n"
                 f"4. ANSWER all {len(step_descs)} steps — any status with a\n"
                 f"   reason counts; silent omission is the only violation.\n"
-                f"5. Verdict: 'passed' requires ALL CORE steps passed; a\n"
-                f"   failed CORE step means the fault may not be in effect\n"
-                f"   ('failed'/'partial'). IMPACT never downgrades the\n"
-                f"   verdict — findings go into the report.\n"
+                f"5. Verdict: 'passed' requires ALL injection-effect steps\n"
+                f"   passed; a failed injection-effect step means the fault\n"
+                f"   may not be in effect ('failed'/'partial').\n"
                 f"6. Different method than specified? Note '(deviation: <why>)'.\n"
             )
         elif not is_multi_candidate and has_section:
@@ -847,9 +826,11 @@ def _build_first_iteration_context(
                 "<reason>\" instead of fabricating a target\n"
                 "3. Do NOT add checks that are not mentioned in the skill case\n"
                 "4. Verdict principle: steps observing the injection itself "
-                "taking effect decide the verdict; propagated effects (OOM, "
-                "latency, business impact) are drill FINDINGS — record "
-                "faithfully (absence included), never downgrade the verdict\n"
+                "taking effect decide the verdict. Propagated effects (OOM, "
+                "latency, business impact) are NOT verdict criteria: record "
+                "evidence already in hand, otherwise mark "
+                "'expected'/'not_applicable' — never wait, retry or sample "
+                "for them\n"
                 "5. **Programmatic note**: Step coverage validation is "
                 "DISABLED for this mode — we trust your extraction\n"
                 "6. **MANDATORY OUTPUT**: You MUST output a "
@@ -877,8 +858,9 @@ def _build_first_iteration_context(
                 "taking effect decide the verdict — ALL pass → 'passed'; ANY "
                 "fails → 'failed'; decisive steps skipped without alternatives "
                 "→ 'partial'. Propagated effects (OOM, latency, business "
-                "impact) are drill FINDINGS — record faithfully (absence "
-                "included), never downgrade the verdict.\n"
+                "impact) are NOT verdict criteria: record evidence already "
+                "in hand, otherwise mark 'expected'/'not_applicable' — never "
+                "wait, retry or sample for them.\n"
                 "5. **MANDATORY OUTPUT**: You MUST output a "
                 "'VERIFICATION_CHECKLIST:' section BEFORE your final "
                 "'VERIFICATION_RESULT:' section. This checklist will be "
@@ -890,11 +872,14 @@ def _build_first_iteration_context(
         context += (
             "**Checklist Status Choice**:\n"
             "- The checklist reports OBSERVED FACTS, not predictions.\n"
-            "- Did you perform the check? Yes → 'passed'/'failed'/'expected' "
-            "by what you OBSERVED. No → 'skipped'.\n"
-            "- 'expected': you CHECKED and the phenomenon is absent, and the "
-            "actual injection parameters make that the anticipated outcome. "
-            "Requires the observation.\n"
+            "- Steps observing the injection effect: did you perform the "
+            "check? Yes → 'passed'/'failed' by what you OBSERVED; No → "
+            "'skipped'.\n"
+            "- 'expected': the phenomenon is absent and the actual "
+            "injection parameters make that the anticipated outcome. For "
+            "propagated-effect steps (OOM, latency, business impact) this "
+            "is valid WITHOUT observation; for injection-effect steps it "
+            "requires the observation.\n"
             "- 'not_applicable': the step's target cannot exist in this "
             "environment (placeholder target, unnamed service). Do NOT "
             "fabricate a target.\n"
@@ -903,11 +888,11 @@ def _build_first_iteration_context(
             "by the time you checked — distinct from 'failed' (checked, fault absent).\n\n"
         )
         # ChaosBlade-specific: layer boundary
-        if blade_uid:
+        if experiment_uid:
             context += (
                 "Note — Layer boundary: VERIFICATION_CHECKLIST must ONLY contain Layer 2 "
                 "checks (observable fault effects). Do NOT include Layer 1 items "
-                "(blade_status, experiment registration).\n\n"
+                "(Layer 1 tool check, experiment registration).\n\n"
             )
     else:
         context += (
@@ -935,10 +920,12 @@ def _build_first_iteration_context(
         "the conclusion that the fault is in effect. For each item, either:\n"
         "(a) Dismiss it with factual basis (not speculation), or\n"
         "(b) Accept it as valid counter-evidence.\n"
-        "If ANY CORE verification criterion is demonstrably NOT met, you MUST "
-        "conclude Layer2 as 'partial' or 'failed' — NOT 'passed'. "
-        "(Absence of propagated IMPACT effects is a drill finding, "
-        "NOT counter-evidence against the fault being in effect.)\n\n"
+        "If ANY criterion for the injection taking effect is demonstrably "
+        "NOT met, you MUST conclude Layer2 as 'partial' or 'failed' — NOT "
+        "'passed'. "
+        "(Absence of propagated effects (OOM, latency, business impact) is "
+        "NOT counter-evidence against the fault being in effect — record it "
+        "as 'expected'/'not_applicable', never wait or sample for it.)\n\n"
     )
     context += (
         "**EVIDENCE CONVERGENCE (CRITICAL)**: fault effects take time to propagate — "
@@ -962,8 +949,8 @@ def _build_first_iteration_context(
     )
     # Add fault-specific verification hints when metadata is available
     verification_hints = _get_fault_verification_hints(
-        blade_scope, blade_target, blade_action,
-        parsed_flags=blade_parsed,
+        fault_scope, fault_target, fault_action,
+        parsed_flags=injection_parsed,
     )
     if verification_hints:
         context += (
@@ -987,9 +974,9 @@ def _build_first_iteration_context(
     # ── Conditional rules (only when relevant) ──
     if baseline and baseline.get("success_count", 0) > 0:
         context += f"{_BASELINE_INTEGRITY_PROMPT}\n\n"
-    if blade_uid:
+    if experiment_uid:
         context += (
-            "**Layer 1 Limitation**: Layer 1 only checks whether the ChaosBlade experiment "
+            "**Layer 1 Limitation**: Layer 1 only checks whether the fault experiment "
             "is registered. It does NOT verify that the fault effect is observable. "
             "Your Layer 2 verification is the ONLY way to confirm the fault is working.\n\n"
         )
@@ -1013,13 +1000,13 @@ def _build_first_iteration_context(
         f"(DNS, node-level), any Running pod with shell access can serve "
         f"as a test target.\n\n"
     )
-    if blade_scope == "node":
+    if fault_scope == "node":
         context += (
             "### Debug Pod Cleanup\n"
             "If you create any pods during verification (e.g., temporary test pods), "
             "you MUST delete them before finishing verification. Add cleanup as a "
             "final step in your checklist.\n"
-            "Note: framework-managed host-access pods (the ChaosBlade tool pods "
+            "Note: framework-managed host-access pods (the carrier tool pods "
             "surfaced in the hints above) are DaemonSet-managed and MUST NOT be "
             "deleted.\n"
         )

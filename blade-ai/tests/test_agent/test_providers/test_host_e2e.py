@@ -22,7 +22,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from chaos_agent.agent.providers import FaultProviderRegistry
-from chaos_agent.agent.providers.host_shell import HostShellProvider
+from chaos_agent.agent.providers.host_shell.provider import HostShellProvider
 
 
 @pytest.fixture(autouse=True)
@@ -45,20 +45,20 @@ def test_host_inject_detects_as_host_native_on_host_channel():
     msgs = [_host_inject_ok()]
     # Only a resolved host channel (is_host=True) with no blade_uid classifies
     # a raw-command carrier as host_native.
-    assert FaultProviderRegistry.detect_method(msgs, None, is_host=True) == "host_native"
+    assert FaultProviderRegistry.detect_method(msgs, is_host=True) == "host_native"
 
 
 def test_host_inject_not_host_native_off_host_channel():
     FaultProviderRegistry.register_builtins()
     msgs = [_host_inject_ok()]
-    assert FaultProviderRegistry.detect_method(msgs, None, is_host=False) is None
+    assert FaultProviderRegistry.detect_method(msgs, is_host=False) is None
 
 
 def test_failed_host_inject_is_not_a_carrier():
     FaultProviderRegistry.register_builtins()
     msgs = [ToolMessage(content="Error: host_inject blocked", name="host_inject",
                         tool_call_id="h1")]
-    assert FaultProviderRegistry.detect_method(msgs, None, is_host=True) is None
+    assert FaultProviderRegistry.detect_method(msgs, is_host=True) is None
 
 
 # -- 2. detect → recover (no-LLM verdict, no code-side reversal) -------------
@@ -84,18 +84,20 @@ async def test_host_recover_is_no_llm_unrecovered_verdict():
     mock_exec.assert_not_awaited()
     assert result.recovered is False
     assert result.level == "unrecovered"
-    assert result.blade_uid == ""
+    assert result.experiment_uid == ""
     assert result.layer1["status"] == "skipped"
     assert result.layer2["status"] == "skipped"
     assert result.failure is not None
     assert result.warnings  # non-empty warning that recovery is unverified
 
 
-async def test_host_recover_carries_blade_uid_through():
-    # A blade_uid passed through kwargs is echoed back (defensive: the caller
-    # may have recovered it from message history).
-    result = await HostShellProvider().recover({}, None, blade_uid="abc123")
-    assert result.blade_uid == "abc123"
+async def test_host_recover_uid_less_renders_empty_uid():
+    # Phase-6: the handle is the single identity source — a UID-less host
+    # carrier with no handle renders experiment_uid empty (the legacy
+    # ``kwargs['blade_uid']`` echo was retired along with old-checkpoint
+    # support).
+    result = await HostShellProvider().recover({}, None)
+    assert result.experiment_uid == ""
     assert result.recovered is False
 
 

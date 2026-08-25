@@ -1,0 +1,19 @@
+# Golden 03 — safety reject: namespace is on the runtime blacklist. The
+# gate must reject before any execution routing, with the namespace named
+# in the reason.
+name: safety-blacklist-ns-reject
+description: 黑名单命名空间注入被安全门拒绝
+surface: safety
+input:
+  skill_name: pod-cpu-fullload
+  fault_spec:
+    scope: pod
+    fault_target: cpu
+    fault_action: fullload
+    namespace: kube-system
+    names: ["coredns"]
+  settings_patch:
+    safety_blacklist_namespaces: "kube-system,kube-public"
+expected:
+  safety_status: rejected
+  safety_reason_contains: ["kube-system", "blacklist"]

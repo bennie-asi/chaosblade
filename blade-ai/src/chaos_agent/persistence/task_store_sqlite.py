@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     phase           TEXT NOT NULL DEFAULT 'planning',
     operation       TEXT NOT NULL DEFAULT 'inject',
     skill_name      TEXT,
-    blade_uid       TEXT,
+    experiment_uid  TEXT,
     namespace       TEXT,
     target_name     TEXT,
     tenant_id       TEXT DEFAULT '',
@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS task_details (
     postmortem          TEXT,
     target_health_report TEXT,
     feasibility_report  TEXT,
+    baseline_data       TEXT,
+    inject_context      TEXT,
+    skill_use_case      TEXT,
+    injection_method    TEXT,
+    kubectl_exec_pod_name TEXT,
+    injection_start_time TEXT,
     execution_artifacts TEXT,
     model_name          TEXT,
     total_token_input   INTEGER NOT NULL DEFAULT 0,
@@ -188,104 +194,14 @@ class SQLiteBackend:
     # -- schema --------------------------------------------------------------
 
     async def _ensure_schema_on_conn(self, conn: aiosqlite.Connection) -> None:
-        """Execute DDL on a given connection (avoids recursion with _get_conn)."""
+        """Execute DDL on a given connection (avoids recursion with _get_conn).
+
+        phase-14 G6 (fresh-database ruling): the startup migration segments
+        are retired — the DDL alone builds the full terminal schema, so this
+        is a pure DDL execution with no ALTER / backfill steps. Databases
+        created before phase-14 are no longer upgradeable in place.
+        """
         await conn.executescript(_SCHEMA_DDL)
-        # Migrations: add columns introduced after initial schema
-        try:
-            await conn.execute("ALTER TABLE task_details ADD COLUMN fault_spec TEXT")
-        except Exception:
-            pass
-        try:
-            await conn.execute("ALTER TABLE task_details ADD COLUMN failure_reason TEXT")
-        except Exception:
-            pass  # Column already exists
-        try:
-            await conn.execute("ALTER TABLE task_details ADD COLUMN baseline_data TEXT")
-        except Exception:
-            pass
-        try:
-            await conn.execute("ALTER TABLE task_details ADD COLUMN inject_context TEXT")
-        except Exception:
-            pass
-        try:
-            await conn.execute("ALTER TABLE task_details ADD COLUMN skill_use_case TEXT")
-        except Exception:
-            pass
-        try:
-            # R18 — postmortem dict (JSON-serialised: path/markdown/summary).
-            # Stored so future SQL queries can aggregate / filter by
-            # postmortem content without having to walk
-            # ~/.blade-ai/postmortems/ on disk.
-            await conn.execute("ALTER TABLE task_details ADD COLUMN postmortem TEXT")
-        except Exception:
-            pass
-        try:
-            await conn.execute("ALTER TABLE task_details ADD COLUMN target_health_report TEXT")
-        except Exception:
-            pass
-        try:
-            await conn.execute("ALTER TABLE task_details ADD COLUMN feasibility_report TEXT")
-        except Exception:
-            pass
-        try:
-            await conn.execute("ALTER TABLE task_details ADD COLUMN injection_method TEXT")
-        except Exception:
-            pass
-        try:
-            await conn.execute("ALTER TABLE task_details ADD COLUMN execution_artifacts TEXT")
-        except Exception:
-            pass
-        try:
-            await conn.execute("ALTER TABLE task_details ADD COLUMN kubectl_exec_pod_name TEXT")
-        except Exception:
-            pass
-        try:
-            # ``injection_start_time`` — the only field written exactly when an
-            # injection command is *issued* (execute_loop / direct_execute set
-            # it write-once and never clear it, unlike ``injection_method``).
-            # ``select_active_tasks`` needs it to tell "confirmed but never
-            # executed" apart from "really injected".
-            await conn.execute("ALTER TABLE task_details ADD COLUMN injection_start_time TEXT")
-            # One-shot backfill, deliberately INSIDE this try: it runs only on
-            # the migration that adds the column (on later startups the ALTER
-            # raises and we skip).
-            #
-            # ❗ 不要把它拆成独立的 try / 让它每次启动都跑：回填条件
-            # （injection_start_time IS NULL 且有意图）恰好也匹配「方案已确认
-            # 但命令从未发出」的**新行**，每次启动重跑会给它们盖上时间戳，
-            # 永久废掉 select_active_tasks 的"已发出"判据。一次性回填失败最多
-            # 让存量行暂时不可恢复（一次性窗口），而重复回填是永久性失效。
-            #
-            # 原子性：本方法所有语句共享末尾的单次 ``conn.commit()``，因此
-            # ALTER 与 UPDATE 要么同时生效、要么都不生效 —— 不存在"列加上了
-            # 但回填没跑"的中间态。
-            #
-            # Pre-existing rows have no recorded issue time, so assume they were
-            # issued and stamp ``tasks.gmt_create`` — that keeps their current
-            # recoverable status. Excluding them instead would hide real
-            # in-flight injections, i.e. re-create the "注入了却恢复不了" bug
-            # this column exists to avoid.
-            await conn.execute(
-                "UPDATE task_details SET injection_start_time = COALESCE("
-                "  (SELECT t.gmt_create FROM tasks t WHERE t.task_id = task_details.task_id),"
-                "  gmt_create)"
-                " WHERE injection_start_time IS NULL"
-                "   AND (target IS NOT NULL OR fault_spec IS NOT NULL)"
-            )
-        except Exception:
-            pass
-        try:
-            # LLM model frozen at task finalize time — synced from the
-            # session record by ``_finalize_session_store`` so the metric
-            # envelope can report which model ran the drill.
-            await conn.execute("ALTER TABLE task_details ADD COLUMN model_name TEXT")
-        except Exception:
-            pass
-        # Migration: add tenant_id column to tasks table for multi-tenant isolation
-        try:
-            await conn.execute("ALTER TABLE tasks ADD COLUMN tenant_id TEXT DEFAULT ''")
-        except Exception:
-            pass
         await conn.commit()
 
     async def ensure_schema(self) -> None:
@@ -340,7 +256,7 @@ class SQLiteBackend:
         # 卡在安全门、从未发出命令"的行会进可恢复列表，被恢复流程误选后报
         # 「找不到该任务的注入状态记录」。
         #
-        # ❗ 不得换成 skill_name / target_name / blade_uid / injection_method /
+        # ❗ 不得换成 skill_name / target_name / experiment_uid / injection_method /
         #    safety_status 任一判据 —— 每一条都曾（或经验证会）造成
         #    「注入了却恢复不了」，完整踩坑记录见
         #    task_store_postgresql.select_active_tasks。

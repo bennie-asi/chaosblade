@@ -19,11 +19,10 @@ from chaos_agent.agent.result.verdict import Layer1Result
 
 
 class TestVerifyReplanEligible:
-    """The verify-replan verdict gate, incl. the direct-mode exclusion.
+    """The verify-replan verdict gate: unverified + Layer 2 failed.
 
-    Direct runs carry the user-specified injection verbatim and skip
-    Phase 1, so re-planning would substitute a different injection for
-    the one ordered — the verdict must finalize as-is instead.
+    Budget gating stays at the call site; the gate itself judges the
+    verdict alone.
     """
 
     @staticmethod
@@ -31,21 +30,16 @@ class TestVerifyReplanEligible:
         return {"level": level, "layer2": {"status": l2}}
 
     def test_unverified_l2_failed_is_eligible(self):
-        assert _verify_replan_eligible({}, self._verification()) is True
-
-    def test_direct_mode_is_excluded(self):
-        assert _verify_replan_eligible(
-            {"direct": True}, self._verification()
-        ) is False
+        assert _verify_replan_eligible(self._verification()) is True
 
     def test_verified_level_is_not_eligible(self):
         assert _verify_replan_eligible(
-            {}, self._verification(level="verified", l2="passed")
+            self._verification(level="verified", l2="passed")
         ) is False
 
     def test_l2_not_failed_is_not_eligible(self):
         assert _verify_replan_eligible(
-            {}, self._verification(l2="partial")
+            self._verification(l2="partial")
         ) is False
 
 
@@ -258,7 +252,7 @@ class TestCleanupResiduals:
 
     @pytest.mark.asyncio
     async def test_no_blade_uid_returns_empty(self):
-        state = {"blade_uid": ""}
+        state = {"experiment_uid": ""}
         cleaned = await _cleanup_residuals(state, "/fake/kubeconfig")
         assert cleaned == []
 
@@ -270,9 +264,9 @@ class TestCleanupResiduals:
 
     @pytest.mark.asyncio
     async def test_with_blade_uid_cleans_up(self):
-        state = {"blade_uid": "test-uid-123"}
+        state = {"experiment_uid": "test-uid-123"}
         with patch(
-            "chaos_agent.tools.blade.blade_destroy"
+            "chaos_agent.agent.providers.chaosblade.cli.blade_destroy"
         ) as mock_destroy:
             mock_destroy.ainvoke = AsyncMock(
                 return_value='{"status": "success"}'
@@ -288,9 +282,9 @@ class TestCleanupResiduals:
 
     @pytest.mark.asyncio
     async def test_blade_destroy_failure_recorded(self):
-        state = {"blade_uid": "failing-uid"}
+        state = {"experiment_uid": "failing-uid"}
         with patch(
-            "chaos_agent.tools.blade.blade_destroy"
+            "chaos_agent.agent.providers.chaosblade.cli.blade_destroy"
         ) as mock_destroy:
             mock_destroy.ainvoke = AsyncMock(
                 side_effect=RuntimeError("connection refused")
@@ -376,6 +370,8 @@ class TestApplyStepCoverageAnswerBased:
         }
 
     def test_justified_discretionary_answers_do_not_downgrade(self):
+        # Residual 'category' keys (historical checkpoints) are inert under
+        # the single-tier contract — coverage logic never reads them.
         items = [
             {"step": 1, "status": "passed", "category": "core",
              "evidence": "memory 81% via kubectl top"},
@@ -418,18 +414,18 @@ class TestApplyStepCoverageAnswerBased:
         assert v["layer2"]["status"] == "partial"
 
 
-class TestEnforceDiskBurnFactsImpactExclusion:
-    """Burn override must not flip IMPACT findings or let them gate level."""
+class TestEnforceDiskBurnFactsDiscretionarySteps:
+    """Burn override flips non-passed steps; discretionary statuses survive."""
 
-    def test_impact_items_survive_override_and_do_not_gate_level(self):
+    def test_override_flips_failed_spares_expected_and_does_not_gate_level(self):
         verification = {
             "level": "partial",
             "layer2": {"status": "failed", "details": ""},
             "warnings": [],
             "checklist": {"items": [
-                {"step": 1, "status": "failed", "category": "core",
+                {"step": 1, "status": "failed",
                  "evidence": "no I/O delta seen"},
-                {"step": 2, "status": "failed", "category": "impact",
+                {"step": 2, "status": "expected",
                  "evidence": "no latency increase observed"},
             ]},
         }
@@ -440,38 +436,40 @@ class TestEnforceDiskBurnFactsImpactExclusion:
         }}
         applied = _enforce_disk_burn_facts(verification, state)
         assert applied
-        core_item, impact_item = verification["checklist"]["items"]
-        # CORE step overridden by the programmatic I/O evidence.
-        assert core_item["status"] == "passed"
-        assert "OVERRIDE" in core_item["evidence"]
-        # IMPACT finding preserved verbatim — never a fake pass.
-        assert impact_item["status"] == "failed"
-        assert "OVERRIDE" not in impact_item["evidence"]
+        injection_item, propagated_item = verification["checklist"]["items"]
+        # Injection-effect step overridden by the programmatic I/O evidence.
+        assert injection_item["status"] == "passed"
+        assert "OVERRIDE" in injection_item["evidence"]
+        # Discretionary statuses ('expected') are preserved verbatim —
+        # never flipped into fake passes.
+        assert propagated_item["status"] == "expected"
+        assert "OVERRIDE" not in propagated_item["evidence"]
         assert verification["layer2"]["status"] == "passed"
-        # IMPACT failure does not gate the level.
+        # 'expected' is not in the failed set → does not gate the level.
         assert verification["level"] == "verified"
 
 
-class TestSubmitArgsImpactEvidenceExclusion:
-    """IMPACT absence-phrasing evidence must not force auto-downgrade."""
+class TestSubmitArgsAbsenceEvidenceDowngrade:
+    """Absence phrasing on ANY failed step forces the objective downgrade."""
 
-    def test_impact_absence_evidence_does_not_force_downgrade(self):
-        # CORE step failed (benign, timing lag) + IMPACT finding whose
-        # evidence carries an absence phrase. Only CORE evidence may
-        # trigger the objective-measurement auto-downgrade.
+    def test_absence_evidence_on_any_failed_step_forces_downgrade(self):
+        # Single-tier contract: propagated-effect steps are protected by
+        # the prompt contract (mark 'expected'/'not_applicable'), not by a
+        # category guard — 'failed' with absence evidence is objective
+        # counter-measurement wherever it appears.
         args = {
             "overall": "verified",
             "layer2_status": "passed",
             "primary_evidence_observed": True,
             "checklist": [
-                {"step": 1, "status": "failed", "category": "core",
+                {"step": 1, "status": "failed",
                  "evidence": "timing lag; retry confirmed effect later"},
-                {"step": 2, "status": "failed", "category": "impact",
+                {"step": 2, "status": "failed",
                  "evidence": "no observable business impact"},
             ],
         }
         result = _verification_from_submit_args(args)
-        assert result["layer2"]["status"] == "passed"
+        assert result["layer2"]["status"] == "partial"
         assert any("inconsistency" in w for w in result["warnings"])
 
 

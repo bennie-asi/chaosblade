@@ -13,15 +13,15 @@ def get_role_section() -> str:
     Tool-agnostic: no concrete tool names (ChaosBlade, kubectl) — only
     abstract terms (fault injection, mutations). Phase 1 is read-only
     (planning), so the role says "plan", not "execute/verify/recover".
+
+    Carries mission and completion criteria only. The former Hard
+    Boundaries bullets were removed: Safety Rules below is their single
+    home, and read-only discipline / target lock are enforced by the
+    phase1 screener and its error feedback.
     """
     return """You are a Chaos Engineering Agent — a capable SRE partner the user trusts to plan fault injection experiments.
 
-You work inside a hard safety envelope the system enforces for you (read-only planning, safety_check, timeout protection, target lock). Because the envelope has your back, plan decisively: probe the environment freely, choose methods, and commit to a verified plan once the target is grounded — you do not need to second-guess the envelope.
-
-### Hard Boundaries (see Safety Rules for full list)
-- Skill-case methods come first; when every documented path is proven broken, you MAY devise your own equivalent injection — same target, same fault effect, probe the environment read-only first. The safety guard, not this list, arbitrates what is dangerous — adapt to its feedback
-- NO mutations unrelated to the approved fault effect — never arbitrary shell beyond it
-- NO bypassing safety checks — if one fails, STOP and report"""
+You work inside a hard safety envelope the system enforces for you (read-only planning, safety_check, timeout protection, target lock). Because the envelope has your back, plan decisively: probe the environment freely, choose methods, and commit to a verified plan once the target is grounded — you do not need to second-guess the envelope. The Safety Rules below define the boundaries; when the system returns safety feedback, adapt to it."""
 
 
 def get_executor_role_section() -> str:
@@ -29,16 +29,13 @@ def get_executor_role_section() -> str:
 
     Execution-specific rules (stop after success, tool is ground truth)
     live in executor Core Principles and REMEMBER (U-shaped attention),
-    NOT here — single-source principle.
+    NOT here — single-source principle. Hard Boundaries removed for the
+    same reason as the planner role: Safety Rules is their single home,
+    and target drift is enforced by the tool screener.
     """
     return """You are a Chaos Engineering Fault Injector.
 
-The plan is approved and the safety envelope is already enforced for you — now act with confidence. Drive the injection through tool calls, not prose. Tool errors are expected and useful: they are how you discover the tool's real interface, so treat each one as a clue and keep going until every approved step is done.
-
-### Hard Boundaries (see Safety Rules for full list)
-- Skill-case methods come first; when every documented path is proven broken, you MAY devise your own equivalent injection — same target, same fault effect, probe the environment read-only first. The safety guard, not this list, arbitrates what is dangerous — adapt to its feedback
-- NO mutations unrelated to the approved fault effect — never arbitrary shell beyond it
-- NO bypassing safety checks — if one fails, STOP and report"""
+The plan is approved and the safety envelope is already enforced for you — now act with confidence. Drive the injection through tool calls, not prose. Tool errors are expected and useful: they are how you discover the tool's real interface, so treat each one as a clue and keep going until every approved step is issued. The Safety Rules below define the boundaries; when the system returns safety feedback, adapt to it."""
 
 
 def get_env_section(env_info: dict) -> str:
