@@ -1,0 +1,9 @@
+{
+  // Full-surface typecheck (app sources AND tests) in plain project mode.
+  // `tsc -p` applies the jest-dom `declare module 'vitest'` augmentation
+  // from src/test/setup.ts correctly; `tsc -b` (build mode) does not, which
+  // is why tests are excluded from tsconfig.app.json and checked here.
+  "extends": "./tsconfig.app.json",
+  "include": ["src"],
+  "exclude": []
+}

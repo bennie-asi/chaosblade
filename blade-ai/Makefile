@@ -1,5 +1,6 @@
 .PHONY: build wheel wheel-platform clean dev server install run test dist package checksums \
-        dev-tui build-tui install-tui test-tui typecheck-tui clean-tui download-node diagrams
+        test-core typecheck-core \
+        dev-tui build-tui install-tui test-tui typecheck-tui clean-tui dev-web build-web test-web clean-web clean-frontend download-node diagrams
 
 # Pinned Node.js version for bundling into the standalone binary.
 NODE_VERSION ?= 24.16.0
@@ -10,7 +11,7 @@ NODE_VERSION ?= 24.16.0
 # platform-matching tarballs when missing so a fresh checkout builds
 # without a manual step. build-tui is a prerequisite — blade-ai.spec
 # force-bundles tui/dist/cli.js and fails loud at Analysis time if absent.
-build: build-tui download-node
+build: build-tui build-web download-node
 	@set -e; \
 	HOST=$$(uv run python -c "from chaos_agent.chaosblade_installer import _detect_platform; print(_detect_platform())"); \
 	CUR=$$(cat vendor/chaosblade/.arch 2>/dev/null || echo none); \
@@ -54,11 +55,12 @@ download-node:
 	fi
 
 # Build the UNIVERSAL pip wheel (blade_ai-*-py3-none-any.whl). The TS TUI
-# bundle is force-included by pyproject.toml, so it must exist BEFORE
-# `uv build` — depend on build-tui to guarantee that. Skills are
-# force-included from skills/ (always in-tree); ChaosBlade is NOT bundled —
-# universal-wheel users fetch it at first injection. Platform-agnostic.
-wheel: build-tui
+# bundle and Web UI bundle are force-included by pyproject.toml, so they
+# must exist BEFORE `uv build` — depend on build-tui/build-web to
+# guarantee that. Skills are force-included from skills/ (always in-tree);
+# ChaosBlade is NOT bundled — universal-wheel users fetch it at first
+# injection. Platform-agnostic.
+wheel: build-tui build-web
 	uv build --wheel
 	@echo "Built universal wheel in dist/"
 
@@ -74,7 +76,7 @@ wheel: build-tui
 # matching platform tag — nothing here runs it. Valid TARGET values are the
 # keys of _CHECKSUMS: darwin_arm64 / darwin_amd64 / linux_amd64 / linux_arm64.
 # The arch→tag map lives in chaosblade_installer (single source of truth).
-wheel-platform: build-tui
+wheel-platform: build-tui build-web
 	@set -e; \
 	TARGET="$(TARGET)"; \
 	if [ -z "$$TARGET" ]; then \
@@ -129,6 +131,18 @@ server:
 	uv run blade-ai-server
 
 # --------------------------------------------------------------------
+# @blade-ai/core — shared frontend core (P0+)
+# --------------------------------------------------------------------
+
+# Shared client/reducer/commands/i18n consumed by tui/ and web/.
+# No build step: consumers compile the TS sources directly.
+test-core:
+	cd core && npm test
+
+typecheck-core:
+	cd core && npm run typecheck
+
+# --------------------------------------------------------------------
 # TS TUI (M1+)
 # --------------------------------------------------------------------
 
@@ -143,7 +157,9 @@ start-tui:
 
 # Bundle the TS TUI to tui/dist/cli.js (single ESM file).
 # Auto-installs node_modules on a fresh checkout so `make wheel` works
-# end-to-end without a manual `npm install` first.
+# end-to-end without a manual `npm install` first. The JS packages are an
+# npm workspace rooted at the repo root (package.json ``workspaces``);
+# install always runs from the root so tui/ and web/ share one lockfile.
 #
 # No-npm fallback policy (the Python TUI was removed, so there is no
 # runtime fallback — whoever launches an empty bundle gets a silent
@@ -173,9 +189,9 @@ build-tui:
 			mkdir -p tui/dist && touch tui/dist/cli.js; \
 		fi; \
 	else \
-		if [ ! -d tui/node_modules ]; then \
-			echo "tui/node_modules missing — running npm install..."; \
-			cd tui && npm install; \
+		if [ ! -d node_modules ]; then \
+			echo "node_modules missing — running npm install (workspace root)..."; \
+			npm install; \
 		fi; \
 		cd tui && npm run build; \
 	fi
@@ -195,6 +211,53 @@ typecheck-tui:
 clean-tui:
 	cd tui && npm run clean
 	rm -rf tui/node_modules
+
+# --------------------------------------------------------------------
+# Web UI (S0+)
+# --------------------------------------------------------------------
+
+# Vite dev server for the Web UI; proxies /api to BLADE_AI_SERVER
+# (defaults to http://127.0.0.1:8080). Start `make server` first.
+dev-web:
+	cd web && npm run dev
+
+# Bundle the Web UI to web/dist (Vite). Same no-npm fallback policy
+# as build-tui: SDK-only wheel pipelines (internal CI, blade-ai.release)
+# get an EMPTY placeholder dir that merely satisfies the hatch
+# force-include (pyproject.toml maps web/dist into the wheel). The
+# server degrades gracefully without the bundle (GET / reports it
+# missing), unlike the TUI which has no runtime fallback.
+build-web:
+	@if ! command -v npm >/dev/null 2>&1; then \
+		if [ -s web/dist/index.html ]; then \
+			echo "npm not found — reusing the existing pre-built web/dist"; \
+		else \
+			echo "npm not found — creating an EMPTY web/dist placeholder."; \
+			echo "  This path serves SDK-only wheel pipelines (e.g. the internal CI in"; \
+			echo "  blade-ai.release): the placeholder merely satisfies the hatch"; \
+			echo "  force-include; the server serves GET / with a 'bundle not found'"; \
+			echo "  notice instead of the Web UI."; \
+			mkdir -p web/dist; \
+		fi; \
+	else \
+		if [ ! -d node_modules ]; then \
+			echo "node_modules missing — running npm install (workspace root)..."; \
+			npm install; \
+		fi; \
+		cd web && npm run build; \
+	fi
+
+test-web:
+	cd web && npm test
+
+# Web has no `npm run clean` script (vite build empties outDir itself);
+# clean the bundle dir directly, mirroring clean-tui's node_modules wipe.
+clean-web:
+	rm -rf web/dist
+	rm -rf web/node_modules
+
+# Wipe both frontend build trees (tui + web) in one go.
+clean-frontend: clean-tui clean-web
 
 # Re-render the architecture diagram PNG from its SVG source at 3x
 # intrinsic resolution (SVG is the editable source; PNG is a build

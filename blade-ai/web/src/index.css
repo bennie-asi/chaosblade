@@ -1,0 +1,153 @@
+@import "tailwindcss";
+
+/*
+ * Forge design tokens — single light theme, true-neutral zero-saturation
+ * gray skeleton + forge-orange accent. No dark mode (design decision,
+ * docs/design/blade-ai-web-ui-design.md §5).
+ *
+ * Tailwind 4 maps these to utilities: bg-forge-bg, text-forge-text,
+ * border-forge-border, rounded-card, shadow-card, font-sans, …
+ */
+@theme {
+  /* 基底 —— 真中性零饱和纯灰(R=G=B,不暖不冷) */
+  --color-forge-bg: #fafafa;
+  --color-forge-sidebar: #f4f4f5;
+  --color-forge-card: #ffffff;
+  --color-forge-border: #e4e4e7;
+  --color-forge-code: #f4f4f5;
+
+  /* 文字 —— 中性墨阶 */
+  --color-forge-text: #18181b;
+  --color-forge-text-secondary: #52525b;
+  --color-forge-text-faint: #a1a1aa;
+
+  /* 强调 —— 炉火橙,收敛为锐色(仅发送键/当前态/关键动作/聚焦框) */
+  --color-forge-accent: #ea580c;
+  --color-forge-accent-hover: #c2410c;
+  --color-forge-accent-soft: #fff7ed;
+
+  /* 主按钮 —— 深墨 */
+  --color-forge-ink: #18181b;
+
+  /* 确认门禁卡 —— 淡琥珀软边(对齐 mock confirm-card; 通过态不卡片化,
+     按 TUI 契约 collapse 为单行 chip,故无 confirmed-border token) */
+  --color-forge-amber-border: #f0dec8;
+
+  /* 语义色 —— 小圆点 + 文字配对,禁色块 pill */
+  --color-success: #15803d;
+  --color-success-dot: #22c55e;
+  --color-warning: #b45309;
+  --color-warning-dot: #f59e0b;
+  --color-danger: #dc2626;
+  --color-info: #2563eb;
+
+  /* 圆角:克制 */
+  --radius-card: 10px;
+  --radius-button: 8px;
+  --radius-input: 10px;
+
+  /* 阴影:单层极轻,中性调 */
+  --shadow-card: 0 1px 2px rgba(24, 24, 27, 0.05);
+  --shadow-float: 0 4px 16px rgba(24, 24, 27, 0.09);
+
+  /* 字体 */
+  --font-sans: "Geist", "Inter", "PingFang SC", "Noto Sans SC", system-ui,
+    sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
+}
+
+/* ⌘K palette entry — 150ms pop per design doc §5.3 (动效克制). */
+@keyframes palette-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.palette-in {
+  animation: palette-in 150ms ease-out;
+}
+
+/* Thinking-fold shimmer — a slow gradient sweep across the "Thinking…"
+ * label (design doc §5.3 动效克制: the ONLY sanctioned shimmer; 1.6s
+ * period keeps it calm on the light theme). Text-clip gradient: no
+ * colour blocks, just a light wave passing through the glyphs. */
+@keyframes thinking-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.thinking-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-forge-text-faint) 25%,
+    var(--color-forge-text-secondary) 50%,
+    var(--color-forge-text-faint) 75%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: thinking-shimmer 1.6s linear infinite;
+}
+
+/* Timeline entry — one calm rise per new node-progress line, same
+ * 150ms budget as palette-in (design doc §5.3 动效克制). */
+@keyframes timeline-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.timeline-in {
+  animation: timeline-in 150ms ease-out;
+}
+
+/* 动效克制的底线:尊重系统减弱动态偏好——面板弹出、思考 shimmer 与
+ * 时间线滑入全部退化为静态呈现。 */
+@media (prefers-reduced-motion: reduce) {
+  .palette-in,
+  .thinking-shimmer,
+  .timeline-in {
+    animation: none;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-forge-bg);
+  color: var(--color-forge-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 指针示能:Tailwind preflight 让 button 继承 UA 默认箭头光标,
+ * 可点击元素悬停时得不到「小手」反馈。这里在 base 层统一补上——
+ * base 层优先级最低,组件里 disabled:cursor-default 等工具类
+ * 仍可正常反悔;disabled 元素保持箭头(不可点的诚实信号)。 */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  a[href],
+  summary {
+    cursor: pointer;
+  }
+}
