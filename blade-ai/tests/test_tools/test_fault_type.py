@@ -2,6 +2,7 @@
 
 import pytest
 
+from chaos_agent.config.settings import blade_ai_context
 from chaos_agent.utils.fault_type import (
     _DEFAULT_MIN_DURATION,
     _FAULT_TYPE_MIN_DURATION,
@@ -66,3 +67,27 @@ class TestEnsureMinDuration:
 
     def test_default_min_duration_is_600(self):
         assert _DEFAULT_MIN_DURATION == 600
+
+
+class TestExperimentTimeoutWiring:
+    """settings.experiment_timeout feeds the unspecified-timeout default."""
+
+    def test_configured_above_floor_used_when_unspecified(self):
+        with blade_ai_context(experiment_timeout=1800):
+            assert ensure_min_duration(None, "pod", "cpu", "fullload") == 1800
+
+    def test_configured_above_floor_used_for_unknown_fault_type(self):
+        with blade_ai_context(experiment_timeout=1800):
+            assert ensure_min_duration(0, None, None, None) == 1800
+
+    def test_configured_below_floor_clamped_to_600(self):
+        with blade_ai_context(experiment_timeout=300):
+            assert ensure_min_duration(None, "pod", "cpu", "fullload") == 600
+            assert ensure_min_duration(0, None, None, None) == 600
+
+    def test_explicit_timeout_unaffected_by_configured_default(self):
+        with blade_ai_context(experiment_timeout=1800):
+            # Explicit value above the floor passes through untouched.
+            assert ensure_min_duration(900, "pod", "cpu", "fullload") == 900
+            # Explicit value below the floor lifts to the floor, not the default.
+            assert ensure_min_duration(60, "pod", "cpu", "fullload") == 600

@@ -96,7 +96,7 @@ class _HostTargetingArgs(StrictToolArgs):
 class _HostReadArgs(_HostTargetingArgs):
     tool_display_name = "host_read"
 
-    command: str = Field(description="One read-only diagnostic command, no shell metacharacters.")
+    command: str = Field(description="One read-only diagnostic command, no unquoted shell operators.")
     timeout: int = Field(default=30, description="Max seconds to wait.")
     task_id: str = Field(default="", description="Internal task id; leave unset.")
 
@@ -230,17 +230,15 @@ async def host_read(command: str, timeout: int = 30, task_id: str = "") -> str:
     call (no node/host/pod parameter; passing one is refused). To observe a
     specific Kubernetes node, use ``kubectl_read``.
 
-    Host equivalent of ``kubectl_read``: inspects host state (disk usage,
-    load, process list, network rules) to verify a host fault's effect or
-    its recovery. READ-ONLY BY ENFORCEMENT — mutating commands
-    (``ip link set``, ``systemctl stop``, ``iptables -A``, ``dd`` …) are
-    REJECTED with the specific reason.
+    Host equivalent of ``kubectl_read``: inspects host state (disk / load /
+    processes / network rules) to verify a host fault's effect or recovery.
 
     Safety: validated by the shared read-only classifier — the leading
     binary must be a read-only diagnostic (df / ps / ls / cat / top /
     iostat / free / ss / netstat / ip show / systemctl status / …),
-    dual-use tools are checked at argument level, shell metacharacters
-    (pipe / redirect / chain / substitution) rejected; anything else
+    dual-use tools are checked at argument level, UNQUOTED shell operators
+    (pipe / redirect / chain / substitution) rejected — a quoted literal
+    like 'a|b' is fine; anything else
     returns the specific reason without executing.
 
     When to use:
@@ -263,8 +261,9 @@ async def host_read(command: str, timeout: int = 30, task_id: str = "") -> str:
         return (
             f"Error: host_read rejected this command — it is not read-only: "
             f"{reason}.\n"
-            "host_read runs ONE read-only diagnostic with NO shell "
-            "metacharacters (no pipe / redirect / ; / && / substitution). To fix:\n"
+            "host_read runs ONE read-only diagnostic with no UNQUOTED shell "
+            "operators (no pipe / redirect / ; / && / substitution; a quoted "
+            "literal like 'a|b' is fine). To fix:\n"
             "- Use a single read-only diagnostic "
             "(df/ps/ls/cat/top/iostat/free/ss/netstat/ip show/systemctl status/…) "
             "without a pipe.\n"

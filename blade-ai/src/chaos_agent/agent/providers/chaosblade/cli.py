@@ -1,5 +1,9 @@
 """ChaosBlade CLI tool wrappers for LangGraph @tool functions.
 
+Lives INSIDE the ChaosBlade provider package (phase-11 carrier-import-
+boundary): the generic layer reaches these wrappers only through the
+provider's ``tools(phase)`` surface, never via ``chaos_agent.tools``.
+
 Tool signatures faithfully map ChaosBlade K8s scenario parameters so the LLM
 can naturally pass --namespace, --names, --labels, --kubeconfig etc. when needed.
 Scene-specific flags (e.g. --time, --cpu-count) remain in the generic `flags` param.
@@ -145,10 +149,10 @@ async def blade_create(
     # Universal first-use trigger: pip-install users get a pure-Python wheel
     # with no blade binary. Ensure it exists before the first mutating
     # injection — off the event loop, best-effort. If the download fails
-    # (offline), the host blade path below fails and callers (direct_execute)
+    # (offline), the host blade path below fails and callers (execute_loop)
     # fall back to kubectl exec into a cluster tool pod. This is the ONE
-    # chokepoint every injection path funnels through (CLI direct, CLI NL,
-    # TUI, server API), so it's the single place that needs the trigger.
+    # chokepoint every injection path funnels through (CLI, TUI, server
+    # API), so it's the single place that needs the trigger.
     #
     # Host scope runs blade on the REMOTE host (not locally), so the bundled
     # local blade is irrelevant — skip the download to avoid needless work
@@ -208,7 +212,7 @@ async def blade_create(
 
     # Auto-inject --timeout if not present, or boost if below minimum
     # This is the BOTTOM layer of the three-layer duration guarantee,
-    # ensuring ALL paths (CLI, direct_execute, NL execute_loop) are covered.
+    # ensuring ALL injection paths (every blade_create call) are covered.
     from chaos_agent.utils.fault_type import ensure_min_duration, normalize_timeout_flag
 
     timeout_value = normalize_timeout_flag(cmd)
@@ -241,7 +245,7 @@ async def blade_create(
     if result.exit_code != 0:
         # Combine both streams: JSON (including 54000) may land on stdout
         # while error details go to stderr.  Include both so callers can
-        # parse the blade_uid from either stream.
+        # parse the experiment_uid from either stream.
         parts = []
         if result.stdout and result.stdout.strip():
             parts.append(result.stdout.strip())

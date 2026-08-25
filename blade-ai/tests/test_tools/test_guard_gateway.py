@@ -14,6 +14,9 @@ uniform :class:`GuardFeedback` shape out of both layers. These tests pin:
 
 from __future__ import annotations
 
+import json
+import logging
+
 from chaos_agent.agent.target_guard.types import (
     ApprovedTarget,
     ConfidenceLevel,
@@ -57,6 +60,31 @@ class TestCheckCommand:
         assert fb.allowed is False
         assert fb.constraint == ViolatedConstraint.UNKNOWN_BINARY
         assert fb.offending == "python"
+
+    def test_rejection_is_audited(self, caplog):
+        # Design 4.7: both execution call sites raise on rejection before
+        # their own audit_log can fire — the gateway audits the rejection
+        # here so the guard's interception never leaves no trace.
+        # (Sample command is an unknown binary — `rm` now sits IN the
+        # whitelist and is narrowed by `_check_rm`, which would change the
+        # audited constraint away from the one pinned below.)
+        with caplog.at_level(logging.INFO):
+            fb = self.gw.check_command(["curl", "http://example.com"])
+        assert fb.allowed is False
+        rejection_records = [
+            json.loads(r.message)
+            for r in caplog.records
+            if '"rejected": true' in r.message
+        ]
+        assert len(rejection_records) == 1
+        assert rejection_records[0]["command"] == ["curl", "http://example.com"]
+        assert rejection_records[0]["constraint"] == "unknown_binary"
+
+    def test_allowed_command_not_audited_as_rejection(self, caplog):
+        with caplog.at_level(logging.INFO):
+            fb = self.gw.check_command(["kubectl", "get", "pods"])
+        assert fb.allowed is True
+        assert all('"rejected": true' not in r.message for r in caplog.records)
 
 
 class TestDecisionToFeedback:

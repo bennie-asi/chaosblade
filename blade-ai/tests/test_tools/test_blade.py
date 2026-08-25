@@ -1,6 +1,14 @@
 """Tests for ChaosBlade CLI tool wrappers."""
 
-from chaos_agent.tools.blade import _build_kubeconfig_arg, _get_host_blade_path, blade_create, blade_destroy, blade_help, blade_query_k8s, blade_status
+from chaos_agent.agent.providers.chaosblade.cli import (
+    _build_kubeconfig_arg,
+    _get_host_blade_path,
+    blade_create,
+    blade_destroy,
+    blade_help,
+    blade_query_k8s,
+    blade_status,
+)
 
 
 class TestBuildKubeconfigArg:
@@ -561,7 +569,7 @@ class TestBladeHelp:
         assert call_kwargs.get("timeout") == 10
 
     async def test_help_exception(self, mocker):
-        import chaos_agent.tools.blade as blade_mod
+        import chaos_agent.agent.providers.chaosblade.cli as blade_mod
         mocker.patch.object(blade_mod, "_get_blade_path", return_value="blade")
         mocker.patch.object(blade_mod, "execute_via_transport", side_effect=RuntimeError("no blade"))
         result = await blade_help.ainvoke({"subcommand": "create"})

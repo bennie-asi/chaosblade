@@ -5,7 +5,8 @@ Three separate judgments used to answer this question with divergent
 vocabularies:
 
   - ``k8s_native._is_readonly_exec_probe`` — ``detect()`` injection attribution.
-  - ``classifier._classify_kubectl_exec`` — the guard SCOPE for the screeners.
+  - ``providers.k8s_native.classifier._classify_kubectl_exec`` — the guard SCOPE for
+    the screeners (moved out of ``target_guard/classifier.py`` in phase-7 T5).
   - ``_baseline_profiles.validate_command`` — ``host_read`` + baseline capture.
 
 This module unifies them. The core per-command judgment
@@ -18,8 +19,9 @@ the same judgment applies everywhere. Two thin adapters sit on top:
     (matches the former ``_is_readonly_exec_probe`` behaviour exactly, plus the
     dual-use arg guards below).
   - :func:`is_readonly_host_command` — a bare host command (no ``POD --``); a
-    single read-only diagnostic with NO shell metacharacters (pipe / redirect /
-    chain / substitution), matching the former host-profile
+    single read-only diagnostic with NO UNQUOTED shell operators (pipe /
+    redirect / chain / substitution — quoted literals like ``'a|b'`` are
+    fine), matching the former host-profile
     ``validate_command`` policy.
 
 Dual-use tools (``iptables`` / ``nft`` / ``tc`` / ``ip`` / ``systemctl`` /
@@ -40,66 +42,196 @@ from __future__ import annotations
 import re
 import shlex
 
+# The raw-string public surfaces (``host_command_rejection_reason`` /
+# ``contains_shell_metachar`` / ``kubectl_exec_rejection_reason`` /
+# ``is_readonly_argv``, plus their boolean views) run on the bashfacts
+# structural judge in ``_readonly_facts`` — the ONLY engine since the
+# engine flip deleted the legacy substring/shlex chain. The argv-level
+# classifiers below (``_classify_argv`` / ``_classify_inner``) are NOT
+# legacy residue: the facts judge reuses them for argv-semantics policy
+# (binary/flag matching — see design 4.2 fact/policy split), and
+# ``is_readonly_inner_tokens`` remains the token fallback for callers
+# with no raw command text (the classifier's synthetic arg shapes).
+
+
+def _facts_engine():
+    """Lazy-import the facts engine (it imports THIS module's
+    ``_classify_argv``, so a top-level import here would be circular)."""
+    from chaos_agent.tools import _readonly_facts
+
+    return _readonly_facts
+
+
+# 4.5 fail-closed matrix: an internal error inside the facts engine must be
+# reported TRUTHFULLY (never disguised as the command's syntax problem) and
+# always fails closed. No fix-path suggestion pairs with it — the guard's
+# own problem has no user-side fix.
+_INTERNAL_ERROR_REASON = (
+    "guard parser internal error; refusing fail-closed "
+    "— very likely not your command's problem"
+)
+
+
+def _facts_verdict(thunk, *, on_error):
+    """Run a facts-engine verdict behind the 4.5 internal-error net."""
+    try:
+        return thunk()
+    except Exception:  # the guard must never crash its caller
+        return on_error
+
+
 # One ``sh -c "<script>"`` wrapper is peeled to reach the real entry token
 # (mirrors ``target_guard.carriers._host_entry_tokens``; replicated here so this
 # module stays in the ``tools`` layer with no agent-package import). Nested
 # shells beyond one layer are unusual for a probe and keep failing closed.
 _SHELL_WRAPPERS = ("sh", "bash", "ash", "dash", "/bin/sh", "/bin/bash")
 
-# Pure read-only diagnostics (no mutating form). Union of the k8s exec-probe
-# vocabulary and the host baseline diagnostic whitelist. Dual-use binaries are
-# NOT listed here — they get argument-level guards in ``_classify_argv``.
-_READONLY_BINARIES = frozenset({
-    # identity / capability inspection
-    "which", "type", "command", "test", "[", "uname", "id", "hostname",
-    "whoami", "getent", "env", "printenv", "nproc",
-    # no-op keep-alive (debug-pod entrypoint ``-- sleep 3600``; changes nothing)
-    "sleep", "true", "echo",
-    # filesystem inspection
-    "ls", "stat", "readlink", "realpath", "file", "readelf", "cat", "head",
-    "tail", "wc", "find", "du", "df", "lsblk", "blkid",
-    # text filters (read-only stages of a probe pipeline, e.g. ps aux | grep)
-    "grep", "egrep", "fgrep", "sort", "uniq", "cut", "tr", "awk",
-    # process / resource inspection
-    "ps", "top", "free", "uptime", "vmstat", "iostat", "mpstat", "sar",
-    "pidof", "pgrep", "lsof", "lsmod",
-    # network inspection
-    "ss", "netstat", "ping", "ping6", "nslookup", "dig", "host",
-    "wget", "curl",
-    # path / reachability probes (send packets, mutate nothing — same class as
-    # ``ping``). ``traceroute`` maps hops; ``arping`` resolves a MAC.
-    "traceroute", "traceroute6", "arping",
-    # host inspection probes reached through a privileged debug pod: hardware /
-    # kernel / filesystem / hashing facts that are read-only REGARDLESS of args
-    # in this name-only set. Added after task-3a360709 surfaced read-only host
-    # probes rejected as escape mutations. Commands with a mutating sibling are
-    # deliberately EXCLUDED here and handled per-argument below: date (-s),
-    # route (add/del), ethtool (-s/-K), swapon (bare = enable), conntrack (-D),
-    # arp (-d/-s), numactl (runs a wrapped command).
-    "findmnt", "mountpoint", "lsns",
-    "lscpu", "lspci", "getcap", "getenforce", "sestatus",
-    "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
-    "base64", "strings", "hexdump", "xxd", "od", "nm", "ldd", "objdump",
-    # extended session / locale / hardware facts (all dump state, none write):
-    # who/w/last enumerate logins, groups/locale/getconf print facts,
-    # dmidecode/lshw inspect hardware, whereis locates files.
-    # Evidence (strace on al8 host): who/w/last/groups/getconf/whereis/locale/
-    # dmidecode/traceroute/arping are fully CLEAN. lshw creates+unlinks a
-    # transient probe marker (/var/run/fb-<pid>) that is removed before exit —
-    # no residual state. numastat has no binary in the target env; verified by
-    # upstream source audit (numactl numastat.c): every fopen is mode "r"
-    # (/proc/meminfo, sysfs numastat/meminfo, /proc/<pid>/smaps), the only
-    # popen("resize") fires solely when stdout is a TTY — never in exec output.
-    "who", "w", "last", "groups", "locale", "getconf",
-    "numastat", "dmidecode", "lshw", "whereis",
-})
+# Read-only diagnostics — the TAIL allowlist of ``_classify_argv`` (union
+# of the k8s exec-probe vocabulary and the host baseline diagnostic
+# whitelist). Dual-use probe binaries (curl/wget/find/awk/ss...) ARE listed
+# here, but the argument-level guards in ``_classify_argv`` run FIRST —
+# only their guard-cleared shapes reach this allow pass. Binaries with a
+# mutating sibling and no probe vocabulary are deliberately EXCLUDED
+# instead and allowed per-argument below (see the host-probe exclusion note).
+_READONLY_BINARIES = frozenset(
+    {
+        # identity / capability inspection
+        "which",
+        "type",
+        "command",
+        "test",
+        "[",
+        "uname",
+        "id",
+        "hostname",
+        "whoami",
+        "getent",
+        "env",
+        "printenv",
+        "nproc",
+        # no-op keep-alive (debug-pod entrypoint ``-- sleep 3600``; changes nothing)
+        "sleep",
+        "true",
+        "echo",
+        # filesystem inspection
+        "ls",
+        "stat",
+        "readlink",
+        "realpath",
+        "file",
+        "readelf",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "find",
+        "du",
+        "df",
+        "lsblk",
+        "blkid",
+        # text filters (read-only stages of a probe pipeline, e.g. ps aux | grep)
+        "grep",
+        "egrep",
+        "fgrep",
+        "sort",
+        "uniq",
+        "cut",
+        "tr",
+        "awk",
+        # process / resource inspection
+        "ps",
+        "top",
+        "free",
+        "uptime",
+        "vmstat",
+        "iostat",
+        "mpstat",
+        "sar",
+        "pidof",
+        "pgrep",
+        "lsof",
+        "lsmod",
+        # network inspection
+        "ss",
+        "netstat",
+        "ping",
+        "ping6",
+        "nslookup",
+        "dig",
+        "host",
+        "wget",
+        "curl",
+        # path / reachability probes (send packets, mutate nothing — same class as
+        # ``ping``). ``traceroute`` maps hops; ``arping`` resolves a MAC.
+        "traceroute",
+        "traceroute6",
+        "arping",
+        # host inspection probes reached through a privileged debug pod: hardware /
+        # kernel / filesystem / hashing facts that are read-only REGARDLESS of args
+        # in this name-only set. Added after task-3a360709 surfaced read-only host
+        # probes rejected as escape mutations. Commands with a mutating sibling are
+        # deliberately EXCLUDED here and handled per-argument below: date (-s),
+        # route (add/del), ethtool (-s/-K), swapon (bare = enable), conntrack (-D),
+        # arp (-d/-s), numactl (runs a wrapped command).
+        "findmnt",
+        "mountpoint",
+        "lsns",
+        "lscpu",
+        "lspci",
+        "getcap",
+        "getenforce",
+        "sestatus",
+        "md5sum",
+        "sha1sum",
+        "sha256sum",
+        "sha512sum",
+        "cksum",
+        "base64",
+        "strings",
+        "hexdump",
+        "xxd",
+        "od",
+        "nm",
+        "ldd",
+        "objdump",
+        # extended session / locale / hardware facts (all dump state, none write):
+        # who/w/last enumerate logins, groups/locale/getconf print facts,
+        # dmidecode/lshw inspect hardware, whereis locates files.
+        # Evidence (strace on al8 host): who/w/last/groups/getconf/whereis/locale/
+        # dmidecode/traceroute/arping are fully CLEAN. lshw creates+unlinks a
+        # transient probe marker (/var/run/fb-<pid>) that is removed before exit —
+        # no residual state. numastat has no binary in the target env; verified by
+        # upstream source audit (numactl numastat.c): every fopen is mode "r"
+        # (/proc/meminfo, sysfs numastat/meminfo, /proc/<pid>/smaps), the only
+        # popen("resize") fires solely when stdout is a TTY — never in exec output.
+        "who",
+        "w",
+        "last",
+        "groups",
+        "locale",
+        "getconf",
+        "numastat",
+        "dmidecode",
+        "lshw",
+        "whereis",
+    }
+)
 # Binaries that ARE the injection in an exec context even though their names
 # are not fault verbs: load generators, device-mapper, port-occupying
 # listeners. Their presence alone marks a mutation.
-_MUTATING_BINARIES = frozenset({
-    "stress", "stress-ng", "dd", "fallocate", "fio", "dmsetup",
-    "nc", "ncat", "socat",
-})
+_MUTATING_BINARIES = frozenset(
+    {
+        "stress",
+        "stress-ng",
+        "dd",
+        "fallocate",
+        "fio",
+        "dmsetup",
+        "nc",
+        "ncat",
+        "socat",
+    }
+)
 # Container-escape primitives reach the host. In a BARE host command they are
 # always treated as a mutation (see ``_classify_argv``): ``is_readonly_argv``
 # feeds ``host_inject``'s ``skip_guard``, and neither primitive is in
@@ -112,10 +244,21 @@ _ESCAPE_PRIMITIVES = ("chroot", "nsenter", "unshare")
 # Flags that consume a SEPARATE value token, so the parser must skip two tokens.
 # Getting these wrong shifts the parser's idea of where the real command starts.
 _CHROOT_VALUE_FLAGS = frozenset({"--userspec", "--groups"})
-_NSENTER_VALUE_FLAGS = frozenset({
-    "-t", "--target", "-S", "--setuid", "-G", "--setgid",
-    "-r", "--root", "-w", "--wd", "--wdns",
-})
+_NSENTER_VALUE_FLAGS = frozenset(
+    {
+        "-t",
+        "--target",
+        "-S",
+        "--setuid",
+        "-G",
+        "--setgid",
+        "-r",
+        "--root",
+        "-w",
+        "--wd",
+        "--wdns",
+    }
+)
 
 
 def _unwrap_escape(tokens: list[str]) -> list[str] | None:
@@ -151,12 +294,12 @@ def _unwrap_escape(tokens: list[str]) -> list[str] | None:
         # rest[i] is NEWROOT; the command follows it.
         if i + 1 >= len(rest):
             return None
-        return rest[i + 1:]
+        return rest[i + 1 :]
     # nsenter / unshare: an explicit ``--`` separates flags from the command;
     # without it, the command starts at the first token that is neither a flag
     # nor a value consumed by a flag taking an argument.
     if "--" in rest:
-        inner = rest[rest.index("--") + 1:]
+        inner = rest[rest.index("--") + 1 :]
         return inner or None
     i = 0
     while i < len(rest):
@@ -170,10 +313,18 @@ def _unwrap_escape(tokens: list[str]) -> list[str] | None:
         i += 1
     return None
 
+
 # Dual-use arg guards ------------------------------------------------------
 _IPTABLES_READONLY_FIRST = (
-    "-L", "-S", "--list", "--list-rules", "--version", "-V",
-    "--help", "-h", "version",
+    "-L",
+    "-S",
+    "--list",
+    "--list-rules",
+    "--version",
+    "-V",
+    "--help",
+    "-h",
+    "version",
 )
 # Global options that PRECEDE the command verb and consume a value (``-t nat``)
 # or stand alone (``-4``/``-6``/``-w``). The first-token check used to stop at
@@ -195,20 +346,51 @@ _BLADE_READONLY_VERBS = frozenset({"status", "query", "version", "-h", "--help"}
 # ``exec`` (``ip netns exec ns1 <cmd>``) runs an ARBITRARY command inside a
 # namespace; it appears in no read-only ip invocation, so keying on the bare
 # token has zero false positives.
-_IP_MUTATING = frozenset({
-    "set", "add", "del", "delete", "change", "replace", "flush", "append",
-    "exec",
-})
-_SYSTEMCTL_READONLY_VERBS = frozenset({
-    "status", "is-active", "is-enabled", "is-failed", "is-system-running",
-    "show", "cat", "list-units", "list-unit-files", "list-dependencies",
-    "list-timers", "list-sockets", "list-jobs",
-})
-_MOUNT_MUTATING_FLAGS = ("-o", "--options", "--bind", "--move", "-B", "-M",
-                         "--rbind", "--make-shared", "--remount",
-                         # ``mount -a`` mounts everything in fstab — a mutation
-                         # even with no positional target.
-                         "-a", "--all")
+_IP_MUTATING = frozenset(
+    {
+        "set",
+        "add",
+        "del",
+        "delete",
+        "change",
+        "replace",
+        "flush",
+        "append",
+        "exec",
+    }
+)
+_SYSTEMCTL_READONLY_VERBS = frozenset(
+    {
+        "status",
+        "is-active",
+        "is-enabled",
+        "is-failed",
+        "is-system-running",
+        "show",
+        "cat",
+        "list-units",
+        "list-unit-files",
+        "list-dependencies",
+        "list-timers",
+        "list-sockets",
+        "list-jobs",
+    }
+)
+_MOUNT_MUTATING_FLAGS = (
+    "-o",
+    "--options",
+    "--bind",
+    "--move",
+    "-B",
+    "-M",
+    "--rbind",
+    "--make-shared",
+    "--remount",
+    # ``mount -a`` mounts everything in fstab — a mutation
+    # even with no positional target.
+    "-a",
+    "--all",
+)
 # ``-a`` also bundles (``mount -av``), so the cluster is scanned too.
 _MOUNT_MUTATING_SHORT_CHARS = frozenset("a")
 _MOUNT_VALUELESS_SHORT = frozenset("avrwnfli")
@@ -218,8 +400,13 @@ _DMESG_MUTATING_SHORT_CHARS = frozenset("Cc")
 _DMESG_VALUELESS_SHORT = frozenset("CcTxkurtHwdePS")
 # journalctl reads the journal; only its maintenance verbs write to it.
 _JOURNALCTL_MUTATING_FLAGS = (
-    "--rotate", "--flush", "--sync", "--relinquish-var",
-    "--vacuum-size", "--vacuum-time", "--vacuum-files",
+    "--rotate",
+    "--flush",
+    "--sync",
+    "--relinquish-var",
+    "--vacuum-size",
+    "--vacuum-time",
+    "--vacuum-files",
 )
 # sysctl reads unless a write form is present: ``-w``, ``key=value``, loading
 # from a file (``-p``), or applying every config file (``--system``).
@@ -234,16 +421,40 @@ _DATE_MUTATING_FLAGS = ("-s", "--set")
 _ROUTE_MUTATING_VERBS = frozenset({"add", "del", "delete", "flush", "change"})
 # ethtool inspects (bare / ``-i``/``-S``/``-k``/``-g``/``-a``/``-c``) unless a
 # CHANGE flag is present. The change flags are the upper-case-ish setters.
-_ETHTOOL_MUTATING_FLAGS = frozenset({
-    "-s", "--change", "-K", "--features", "--offload",
-    "-G", "--set-ring", "-A", "--pause", "-C", "--coalesce",
-    "-L", "--set-channels", "-P", "--set-eeprom", "--reset",
-})
+_ETHTOOL_MUTATING_FLAGS = frozenset(
+    {
+        "-s",
+        "--change",
+        "-K",
+        "--features",
+        "--offload",
+        "-G",
+        "--set-ring",
+        "-A",
+        "--pause",
+        "-C",
+        "--coalesce",
+        "-L",
+        "--set-channels",
+        "-P",
+        "--set-eeprom",
+        "--reset",
+    }
+)
 # conntrack reads with ``-L``/``-S``/``-G``; ``-D``/``-F``/``-U`` delete or
 # flush the connection-tracking table (a fault, not an observation).
-_CONNTRACK_MUTATING_FLAGS = frozenset({
-    "-D", "--delete", "-F", "--flush", "-U", "--update", "-I", "--create",
-})
+_CONNTRACK_MUTATING_FLAGS = frozenset(
+    {
+        "-D",
+        "--delete",
+        "-F",
+        "--flush",
+        "-U",
+        "--update",
+        "-I",
+        "--create",
+    }
+)
 # swapon ENABLES swap by default (a mutation); only ``-s``/``--show``/
 # ``--summary`` are the read-only listing form. ``swapoff`` is never read-only.
 _SWAPON_READONLY_FLAGS = frozenset({"-s", "--show", "--summary"})
@@ -254,25 +465,52 @@ _ARP_MUTATING_FLAGS = frozenset({"-d", "--delete", "-s", "--set"})
 # value positional (what is being SET) is present. ``ifconfig eth0`` /
 # ``ifconfig -a`` are display forms; ``ifconfig eth0 down`` /
 # ``ifconfig eth0 10.0.0.1 netmask ...`` change state.
-_IFCONFIG_MUTATING_KEYWORDS = frozenset({
-    "up", "down", "arp", "-arp", "promisc", "-promisc", "multicast",
-    "mtu", "netmask", "dstaddr", "broadcast", "metric", "media",
-})
+_IFCONFIG_MUTATING_KEYWORDS = frozenset(
+    {
+        "up",
+        "down",
+        "arp",
+        "-arp",
+        "promisc",
+        "-promisc",
+        "multicast",
+        "mtu",
+        "netmask",
+        "dstaddr",
+        "broadcast",
+        "metric",
+        "media",
+    }
+)
 # crontab INSTALLS a crontab by default; only ``-l``/``--list`` reads.
 # (``-r`` removes, ``-e`` edits, a positional file installs — all mutate.)
 _CRONTAB_READONLY_FLAGS = frozenset({"-l", "--list"})
 # timedatectl reads unless it SETS the clock — set-time IS the clock-drift
 # fault in this project, so it must never pass as a probe.
-_TIMEDATECTL_MUTATING_VERBS = frozenset({
-    "set-time", "set-timezone", "set-local-rtc", "set-ntp",
-})
+_TIMEDATECTL_MUTATING_VERBS = frozenset(
+    {
+        "set-time",
+        "set-timezone",
+        "set-local-rtc",
+        "set-ntp",
+    }
+)
 # resolvectl / systemd-resolve read with ``status``; the set-*/revert/flush
 # verbs rewrite resolver state (a network mutation).
-_RESOLVECTL_MUTATING_VERBS = frozenset({
-    "revert", "set-dns", "set-domain", "set-llmnr", "set-mdns",
-    "set-dns-over-tls", "set-dnssec", "flush-caches",
-    "reset-statistics", "reset-server-features",
-})
+_RESOLVECTL_MUTATING_VERBS = frozenset(
+    {
+        "revert",
+        "set-dns",
+        "set-domain",
+        "set-llmnr",
+        "set-mdns",
+        "set-dns-over-tls",
+        "set-dnssec",
+        "flush-caches",
+        "reset-statistics",
+        "reset-server-features",
+    }
+)
 # fdisk / parted list partitions only with ``-l``/``--list``; a bare device
 # argument opens the interactive (mutating) partition editor.
 _DISK_READONLY_FLAGS = frozenset({"-l", "--list"})
@@ -280,37 +518,115 @@ _DISK_READONLY_FLAGS = frozenset({"-l", "--list"})
 # every other subcommand computes / writes / connects. java RUNS bytecode by
 # default; only its version banner is a safe probe (note the single-dash
 # ``-version``, not covered by the ``--version`` metadata rule).
-_JAVA_READONLY_PROBES = frozenset({
-    "-version", "--version", "-showversion", "-fullversion",
-})
+_JAVA_READONLY_PROBES = frozenset(
+    {
+        "-version",
+        "--version",
+        "-showversion",
+        "-fullversion",
+    }
+)
 # Package managers: query forms read, everything else installs / removes.
-_DPKG_READONLY_FLAGS = frozenset({
-    "-l", "--list", "-s", "--status", "-S", "--search", "-L", "--listfiles",
-    "-W", "--show", "-p", "--print-avail",
-})
-_APK_READONLY_VERBS = frozenset({
-    "info", "search", "list", "policy", "version", "audit", "manifest",
-})
+_DPKG_READONLY_FLAGS = frozenset(
+    {
+        "-l",
+        "--list",
+        "-s",
+        "--status",
+        "-S",
+        "--search",
+        "-L",
+        "--listfiles",
+        "-W",
+        "--show",
+        "-p",
+        "--print-avail",
+    }
+)
+_APK_READONLY_VERBS = frozenset(
+    {
+        "info",
+        "search",
+        "list",
+        "policy",
+        "version",
+        "audit",
+        "manifest",
+    }
+)
 # find — read-only only WITHOUT its action primitives. ``-exec``/``-ok`` run an
 # arbitrary command per match (the ``+`` terminator needs no shell metachar,
 # so the string-level screens cannot see it), ``-delete`` removes whole trees,
 # ``-fprint*``/``-fls`` write result files.
-_FIND_MUTATING_FLAGS = frozenset({
-    "-exec", "-execdir", "-ok", "-okdir", "-delete",
-    "-fls", "-fprint", "-fprintf",
-})
+_FIND_MUTATING_FLAGS = frozenset(
+    {
+        "-exec",
+        "-execdir",
+        "-ok",
+        "-okdir",
+        "-delete",
+        "-fls",
+        "-fprint",
+        "-fprint0",
+        "-fprintf",
+    }
+)
 # awk is a programming language, not a text filter: ``system(...)`` runs an
-# arbitrary command, and ``-f``/``-i``/``@load`` execute program FILES. Its
-# in-program redirect (``print > file``) and command pipes contain ``>``/``|``
-# and are already caught by the string-level metachar screens every call
-# surface applies (host_read's raw-string check, host_inject's read-only
-# branch, and the exec-inner control-op scan), so they are not re-checked at
-# argv level here.
-_AWK_MUTATING_FLAGS = frozenset({"-f", "--file", "-i", "--include"})
+# arbitrary command, and ``-f``/``-i``/``@load`` execute program FILES.
+# gawk's ``-E``/``--exec`` executes a program FILE exactly like ``-f`` (the
+# CGI-safe spelling); omitting it leaves the same arbitrary-program channel
+# one flag over.
+_AWK_MUTATING_FLAGS = frozenset({"-f", "--file", "-i", "--include", "-E", "--exec"})
 # Short forms take an ATTACHED value too (``-f/tmp/prog.awk``), which an
 # exact-match check would wave through.
-_AWK_MUTATING_SHORT_PREFIXES = ("-f", "-i")
+_AWK_MUTATING_SHORT_PREFIXES = ("-f", "-i", "-E")
 _AWK_MUTATING_RE = re.compile(r"system\s*\(|@load")
+# In-program constructs are judged on MERIT, not on characters. Only two
+# constructs inside an awk program make it non-read-only:
+#   print/printf ... > / >> target   writes or appends a file
+#   ... | command / |& coproc         executes a command (incl. cmd | getline)
+# Everything else the legacy raw-string screens used to refuse is read-only
+# and stays allowed: comparisons (``NR>1``, ``print (a>b)``), string/regex
+# CONTENT (``"a>b"``, ``/a|b/``), comments, logical ``||``, ``-F'|'`` field
+# separators, and input redirection — ``getline < file`` only READS, the same
+# capability ``cat`` already has on this allowlist. awk's own grammar makes
+# the precise call possible: an unparenthesized ``>`` in a print statement IS
+# the redirect operator (a comparison must be parenthesized to print), and a
+# bare ``|`` at statement level has no meaning other than a command pipe.
+# See _awk_program_mutation / _awk_program_arg_mutation below.
+# Statement keywords: a ``/`` right after one opens a regex constant (no left
+# operand is possible); after an identifier it is division.
+_AWK_STATEMENT_KEYWORDS = frozenset(
+    {
+        "print",
+        "printf",
+        "getline",
+        "if",
+        "else",
+        "while",
+        "for",
+        "do",
+        "switch",
+        "case",
+        "default",
+        "break",
+        "continue",
+        "next",
+        "nextfile",
+        "exit",
+        "return",
+        "delete",
+        "function",
+        "func",
+        "BEGIN",
+        "END",
+        "in",
+    }
+)
+# awk option rules for locating the program WORD: ``-F``/``-v`` carry inert
+# string values (skipped), ``-e``/``--source`` carry program text.
+_AWK_VALUE_FLAGS = frozenset({"-F", "-v", "--field-separator", "--assign"})
+_AWK_PROGRAM_FLAGS = frozenset({"-e", "--source"})
 # Short options that take NO value, per binary. Needed to read a bundled
 # cluster correctly: an option that TAKES a value swallows the rest of the
 # token as that value, so ``-XGET`` is "method GET", not "flags X/G/E/T".
@@ -325,10 +641,26 @@ _WGET_VALUELESS_SHORT = frozenset("qvdbcNSkKmrpxEHn46hV")
 # ``--dump-header``/``--trace*``/``--remote-name``) or move data off-box
 # (``--data*``/``--form*``/``--upload*``/``--config``).
 _CURL_MUTATING_LONG_PREFIXES = (
-    "--output", "--remote-name", "--data", "--form", "--upload", "--config",
-    "--cookie-jar", "--dump-header", "--trace",
+    "--output",
+    "--remote-name",
+    "--data",
+    "--form",
+    "--upload",
+    "--config",
+    "--cookie-jar",
+    "--dump-header",
+    "--trace",
 )
 _CURL_MUTATING_SHORT_CHARS = frozenset("oOdFTKcD")
+# Verb discipline: ``-X``/``--request`` names the HTTP METHOD, and a drill
+# target is often a REST endpoint (the apiserver itself). DELETE/POST/PUT/
+# PATCH mutate the REMOTE side with zero local footprint, which the write/
+# upload scan above cannot see. Only the idempotent read verbs stay
+# probe-grade; a missing verb (``-X`` at argv end) fails closed with them.
+_CURL_READONLY_VERBS = frozenset({"GET", "HEAD", "OPTIONS"})
+_CURL_VERB_CLUSTER = re.compile(
+    r"^-[" + re.escape("".join(_CURL_VALUELESS_SHORT)) + r"]*X(.*)$"
+)
 #: Discard sinks. ``-o /dev/null`` (curl) and ``-O /dev/null`` (wget) throw the
 #: body away rather than writing a file, which is how a latency probe asks for
 #: timing without the payload: ``curl -s -o /dev/null -w '%{time_total}'``. Both
@@ -355,7 +687,10 @@ _DD_MUTATING_OPERANDS = ("seek", "conv", "oflag")
 # ``--body-file``/``--upload-file`` transmit data off-box. Both matter even
 # with ``--spider``, which is why they are checked before it.
 _WGET_MUTATING_LONG_PREFIXES = (
-    "--post", "--body-file", "--upload-file", "--output-file",
+    "--post",
+    "--body-file",
+    "--upload-file",
+    "--output-file",
 )
 _WGET_MUTATING_SHORT = frozenset({"-o", "-a"})
 # wget metadata-only flags: they print and exit BEFORE any URL parsing, so no
@@ -392,9 +727,16 @@ _SS_MUTATING_FLAGS = frozenset({"-K", "--kill"})
 # listing them would let the cluster scan run into that value and reject a
 # namespace named e.g. "K8s".
 _SS_VALUELESS_SHORT = frozenset("tuwxnlapemios46rZzdgHSbEM")
-_UNIQ_VALUE_FLAGS = frozenset({
-    "-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars",
-})
+_UNIQ_VALUE_FLAGS = frozenset(
+    {
+        "-f",
+        "-s",
+        "-w",
+        "--skip-fields",
+        "--skip-chars",
+        "--check-chars",
+    }
+)
 # Container-runtime CLIs are dual-use. Only LEAF inspection verbs are read-only;
 # ``exec`` is deliberately excluded because its inner command is unbounded, and
 # lifecycle verbs (rm/kill/stop/...) mutate workloads.
@@ -405,29 +747,79 @@ _UNIQ_VALUE_FLAGS = frozenset({
 # --set`` as "read-only". Listing forms have their own leaf verbs (``images``,
 # ``ps``), so nothing legitimate is lost.
 _RUNTIME_CLIS = ("crictl", "docker", "nerdctl", "podman", "ctr")
-_RUNTIME_READONLY_VERBS = frozenset({
-    "ps", "images", "inspect", "inspecti", "inspectp",
-    "logs", "stats", "statsp", "version", "info", "pods", "top",
-    "imagefsinfo", "port", "events",
-})
+_RUNTIME_READONLY_VERBS = frozenset(
+    {
+        "ps",
+        "images",
+        "inspect",
+        "inspecti",
+        "inspectp",
+        "logs",
+        "stats",
+        "statsp",
+        "version",
+        "info",
+        "pods",
+        "top",
+        "imagefsinfo",
+        "port",
+        "events",
+    }
+)
 # Runtime-CLI global flags that consume a separate value; their value must not
 # be mistaken for the verb (e.g. ``crictl --runtime-endpoint unix://... ps``).
-_RUNTIME_VALUE_FLAGS = frozenset({
-    "-r", "--runtime-endpoint", "-i", "--image-endpoint",
-    "-t", "--timeout", "-c", "--config", "-H", "--host",
-    "--context", "--log-level", "-n", "--namespace", "--address",
-    "--tlscacert", "--tlscert", "--tlskey", "-D", "--debug-dir",
-})
+_RUNTIME_VALUE_FLAGS = frozenset(
+    {
+        "-r",
+        "--runtime-endpoint",
+        "-i",
+        "--image-endpoint",
+        "-t",
+        "--timeout",
+        "-c",
+        "--config",
+        "-H",
+        "--host",
+        "--context",
+        "--log-level",
+        "-n",
+        "--namespace",
+        "--address",
+        "--tlscacert",
+        "--tlscert",
+        "--tlskey",
+        "-D",
+        "--debug-dir",
+    }
+)
 # Wrappers that prefix a real command; the wrapped command decides the verdict.
 _COMMAND_WRAPPERS = ("timeout", "stdbuf", "nice", "ionice", "env", "watch")
 # Wrapper flags consuming a separate value — skipping only the flag would leave
 # its value to be mistaken for the wrapped command.
-_WRAPPER_VALUE_FLAGS = frozenset({
-    "-n", "-c", "-p", "-o", "-i", "-e", "-k", "-s", "-u",
-    "--kill-after", "--signal", "--unset", "--chdir",
-    "--class", "--classdata", "--pid", "--output", "--input", "--error",
-    "--interval",
-})
+_WRAPPER_VALUE_FLAGS = frozenset(
+    {
+        "-n",
+        "-c",
+        "-p",
+        "-o",
+        "-i",
+        "-e",
+        "-k",
+        "-s",
+        "-u",
+        "--kill-after",
+        "--signal",
+        "--unset",
+        "--chdir",
+        "--class",
+        "--classdata",
+        "--pid",
+        "--output",
+        "--input",
+        "--error",
+        "--interval",
+    }
+)
 # ``timeout``'s DURATION positional: a number with an optional unit suffix.
 _DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
 
@@ -435,15 +827,6 @@ _DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
 # than a single probe — fail closed to non-read-only. ``|`` is handled
 # separately (pipeline of read-only stages is allowed for exec probes).
 _SHELL_CONTROL_OPS = (">", "<", "`", "$(", "&&", "||", ";", "&", "\n")
-# Metacharacters rejected outright for a bare host command. A host channel
-# hands the command to a remote shell (``ssh -- host "<str>"`` /
-# ``wiz task exec --command "<str>"``), but ``wrap_command`` ``shlex.quote``s
-# EVERY token first, so a ``|`` arrives as the quoted literal ``'|'`` — a
-# non-functional argument rather than a pipeline operator. Rejecting these
-# up front turns a silently useless command into an actionable error.
-# (Because a remote shell IS in the loop, shell BUILTINS such as
-# ``command -v`` do work — see the capability-probe guidance in host_cmd.)
-_HOST_METACHARS = ("|", ">", "<", ";", "&", "`", "$(", "\n")
 
 
 def _host_entry_tokens(inner: list[str]) -> list[str]:
@@ -476,13 +859,13 @@ def _strip_wrappers(tokens: list[str]) -> list[str]:
         while i < len(rest):
             tok = rest[i]
             if tok in _WRAPPER_VALUE_FLAGS:
-                i += 2       # flag consuming a separate value (``nice -n 5``)
+                i += 2  # flag consuming a separate value (``nice -n 5``)
             elif tok.startswith("-") or "=" in tok:
-                i += 1       # valueless flag, or an ``env VAR=VAL`` assignment
+                i += 1  # valueless flag, or an ``env VAR=VAL`` assignment
             elif binary == "timeout" and _DURATION_RE.match(tok):
-                i += 1       # timeout's DURATION positional
+                i += 1  # timeout's DURATION positional
             else:
-                break        # first real token of the wrapped command
+                break  # first real token of the wrapped command
         rest = rest[i:]
         if not rest:
             return tokens  # nothing wrapped — judge the wrapper itself
@@ -565,6 +948,149 @@ def _drop_discard_output(
     return out
 
 
+def _awk_program_mutation(program: str) -> str | None:
+    """First write/execute construct in an awk program, or None.
+
+    Quote/regex/comment/paren-aware scan that judges by CONSTRUCT, not by
+    character. Only two in-program constructs make awk non-read-only:
+
+      - an output redirect: ``>``/``>>`` at paren-depth 0 inside a
+        print/printf statement (awk's own grammar makes this exact — an
+        unparenthesized ``>`` there IS the redirect operator; printing a
+        comparison requires parentheses, so ``print (a>b)`` stays allowed);
+      - a command pipe: a bare ``|`` or ``|&`` at depth 0 — awk has no other
+        single-pipe operator, so this is always ``print | cmd``,
+        ``cmd | getline``, or a coproc (``||`` is logical OR, skipped).
+
+    Input redirection (``getline < file``) only READS — the same capability
+    ``cat`` has on this allowlist — and stays allowed along with
+    comparisons, string/regex content, and comments. Division-vs-regex uses
+    the lexer rule (a ``/`` with no possible left operand opens a regex
+    constant), and a backslash-newline continuation does not end a
+    statement. Anything unbalanced fails CLOSED — awk would refuse the
+    program anyway.
+    """
+    depth = 0
+    i, n = 0, len(program)
+    stmt_print = False  # a print/printf statement is open at depth 0
+    prev_operand = False  # previous significant char could end an operand
+    while i < n:
+        ch = program[i]
+        if ch == "\\" and i + 1 < n and program[i + 1] == "\n":
+            i += 2  # line continuation, not a stmt end
+            continue
+        if ch == '"':
+            i += 1
+            while i < n:
+                if program[i] == "\\":
+                    i += 2
+                    continue
+                if program[i] == '"':
+                    break
+                i += 1
+            if i >= n:
+                return "an unbalanced string literal"
+            i += 1
+            prev_operand = True  # a string is an operand
+            continue
+        if ch == "/" and not prev_operand:
+            i += 1  # regex constant — never division here
+            while i < n:
+                if program[i] == "\\":
+                    i += 2
+                    continue
+                if program[i] == "/":
+                    break
+                i += 1
+            if i >= n:
+                return "an unbalanced regex"
+            i += 1
+            prev_operand = True
+            continue
+        if ch == "#":
+            j = program.find("\n", i)
+            i = n if j < 0 else j  # a comment runs to end of line
+            continue
+        if ch in "([":
+            depth += 1
+            prev_operand = False
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+            prev_operand = True
+        elif ch == "|" and depth == 0:
+            if i + 1 < n and program[i + 1] == "|":
+                i += 2  # logical OR, not a pipe
+                prev_operand = False
+                continue
+            return "an in-program command pipe (print | cmd / cmd | getline)"
+        elif ch == ">" and depth == 0 and stmt_print:
+            return "an in-program output redirect (print > file)"
+        elif ch in ";{}\n" and depth == 0:
+            stmt_print = False
+            prev_operand = False
+        elif ch.isalpha() or ch == "_":
+            j = i + 1
+            while j < n and (program[j].isalnum() or program[j] == "_"):
+                j += 1
+            if depth == 0:
+                word = program[i:j]
+                stmt_print = word in ("print", "printf")
+                prev_operand = word not in _AWK_STATEMENT_KEYWORDS
+            else:
+                prev_operand = True
+            i = j
+            continue
+        elif ch.isdigit():
+            prev_operand = True
+        elif not ch.isspace():
+            prev_operand = False  # operators/delimiters open an operand
+        i += 1
+    return None
+
+
+def _awk_program_arg_mutation(args: list[str]) -> str | None:
+    """Scan the program WORDs of an awk argv for write/execute constructs.
+
+    Program text is located with awk's own option rules: ``-F``/``-v`` values
+    are inert strings (skipped — a ``-F'|'`` separator is not a pipe),
+    ``-e``/``--source`` carry program text, ``--`` ends option processing,
+    and every other non-flag token is treated as program text. File and
+    ``var=value`` operands are scanned too — over-scanning there only fails
+    closed (a filename carrying these shapes was refused before).
+    """
+    i, n = 0, len(args)
+    options_done = False
+    while i < n:
+        arg = args[i]
+        if not options_done and arg.startswith("-") and arg != "-":
+            if arg == "--":
+                options_done = True
+                i += 1
+                continue
+            if arg in _AWK_VALUE_FLAGS:
+                i += 2  # inert string value follows
+                continue
+            if arg in _AWK_PROGRAM_FLAGS:
+                prog = args[i + 1] if i + 1 < n else ""
+                i += 2
+            elif arg.startswith("--source="):
+                prog = arg.split("=", 1)[1]
+                i += 1
+            elif arg.startswith("-e") and len(arg) > 2:
+                prog = arg[2:]  # gawk attached ``-e<program>``
+                i += 1
+            else:
+                i += 1  # other flag / attached inert value
+                continue
+        else:
+            prog = arg
+            i += 1
+        mutation = _awk_program_mutation(prog)
+        if mutation is not None:
+            return mutation
+    return None
+
+
 def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None]:
     """Classify a single command (one pipeline stage). Returns (ok, reason)."""
     if not tokens:
@@ -581,10 +1107,13 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
         # No wrapped command: ``env`` alone dumps the environment (read-only);
         # a bare metadata probe (``timeout -V`` / ``nice --help``) prints and
         # exits; a bare wrapper otherwise does nothing observable.
-        if binary in _READONLY_BINARIES or (args and all(a in _METADATA_FLAGS for a in args)):
+        if binary in _READONLY_BINARIES or (
+            args and all(a in _METADATA_FLAGS for a in args)
+        ):
             return True, None
         return (
-            False, f"'{binary}' wraps no command, so read-only status cannot be determined"
+            False,
+            f"'{binary}' wraps no command, so read-only status cannot be determined",
         )
 
     # Escape primitives reach the host. A ``/host/...`` absolute path needs NO
@@ -593,7 +1122,10 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     # path) while ``/host/usr/bin/iptables -A`` still lands in the iptables
     # guard below, and an unknown ``/host`` binary fails closed at the end.
     if binary in _ESCAPE_PRIMITIVES:
-        return False, f"'{binary}' reaches the host / escapes the container, not a read-only probe"
+        return (
+            False,
+            f"'{binary}' reaches the host / escapes the container, not a read-only probe",
+        )
 
     # Pure metadata probe (``--version`` / ``-h`` / ... and nothing else): every
     # CLI prints and exits before any action, whatever the binary otherwise
@@ -633,12 +1165,18 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
         ok = bool(args) and args[0] in _NFT_READONLY_FIRST
         if ok:
             return True, None
-        return False, "'nft' is read-only only with list/--version (add/delete/flush mutate)"
+        return (
+            False,
+            "'nft' is read-only only with list/--version (add/delete/flush mutate)",
+        )
     if binary == "tc":
         mutating = any(a in _TC_MUTATING for a in args)
         if not mutating:
             return True, None
-        return False, "'tc' add/del/change/replace mutate (only show/qdisc queries are read-only)"
+        return (
+            False,
+            "'tc' add/del/change/replace mutate (only show/qdisc queries are read-only)",
+        )
 
     # blade — read-only only for experiment inspection (see _BLADE_READONLY_VERBS).
     # Evidence: even these verbs open chaosblade.dat (BoltDB bookkeeping) and
@@ -668,7 +1206,10 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
         mutating = any(a in _IP_MUTATING for a in args)
         if not mutating:
             return True, None
-        return False, "'ip' is read-only only with show/list/get (set/add/del/flush mutate)"
+        return (
+            False,
+            "'ip' is read-only only with show/list/get (set/add/del/flush mutate)",
+        )
 
     # systemctl — read-only only for its status/show verbs.
     if binary == "systemctl":
@@ -686,30 +1227,40 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
         mutating = bool(positionals) or any(
             a in _MOUNT_MUTATING_FLAGS
             or a.startswith("-o")
-            or any(ch in _MOUNT_MUTATING_SHORT_CHARS
-                   for ch in _reachable_cluster(a, _MOUNT_VALUELESS_SHORT))
+            or any(
+                ch in _MOUNT_MUTATING_SHORT_CHARS
+                for ch in _reachable_cluster(a, _MOUNT_VALUELESS_SHORT)
+            )
             for a in args
         )
         if not mutating:
             return True, None
-        return False, "'mount' is read-only only with no arguments or -l (mounting/-o/-a/remount mutate)"
+        return (
+            False,
+            "'mount' is read-only only with no arguments or -l (mounting/-o/-a/remount mutate)",
+        )
 
     # dmesg — read-only unless clearing the ring buffer.
     if binary == "dmesg":
         if any(
             a in _DMESG_MUTATING_FLAGS
-            or any(ch in _DMESG_MUTATING_SHORT_CHARS
-                   for ch in _reachable_cluster(a, _DMESG_VALUELESS_SHORT))
+            or any(
+                ch in _DMESG_MUTATING_SHORT_CHARS
+                for ch in _reachable_cluster(a, _DMESG_VALUELESS_SHORT)
+            )
             for a in args
         ):
-            return False, "'dmesg' -C/-c clears the kernel ring buffer, which mutates (read-only only reads)"
+            return (
+                False,
+                "'dmesg' -C/-c clears the kernel ring buffer, which mutates (read-only only reads)",
+            )
         return True, None
 
     # journalctl — reading the journal is read-only; maintenance verbs are not.
     if binary == "journalctl":
         bad = next(
-            (a for a in args
-             if a.split("=")[0] in _JOURNALCTL_MUTATING_FLAGS), None,
+            (a for a in args if a.split("=")[0] in _JOURNALCTL_MUTATING_FLAGS),
+            None,
         )
         if bad:
             return False, (
@@ -729,22 +1280,44 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
             )
         return True, None
 
+    # hostname — bare and the read flags (-f/-s/-d/...) print a fact; a
+    # POSITIONAL argument (or ``-F``/``--file``) SETS the host name, which on
+    # a drill node breaks kubelet identity/registration.
+    if binary == "hostname":
+        bad = next(
+            (a for a in args if not a.startswith("-") or a in ("-F", "--file")),
+            None,
+        )
+        if bad is not None:
+            return False, (
+                f"'hostname' with an argument (or {bad}) sets the host name,"
+                " which mutates node identity; only the bare form and read"
+                " flags are read-only"
+            )
+        return True, None
+
     # date — reading the clock is a probe; ``-s``/``--set`` IS the clock-skew
     # fault. ``--set=...`` is caught by prefix so the value cannot hide it.
     if binary == "date":
         bad = next(
-            (a for a in args
-             if a in _DATE_MUTATING_FLAGS or a.startswith("--set=")), None,
+            (a for a in args if a in _DATE_MUTATING_FLAGS or a.startswith("--set=")),
+            None,
         )
         if bad is not None:
-            return False, f"'date' {bad} sets the system clock, which mutates (that IS the clock-skew fault, not a probe)"
+            return (
+                False,
+                f"'date' {bad} sets the system clock, which mutates (that IS the clock-skew fault, not a probe)",
+            )
         return True, None
 
     # route — printing the table is read-only; add/del/flush edit it.
     if binary == "route":
         bad = next((a for a in args if a in _ROUTE_MUTATING_VERBS), None)
         if bad is not None:
-            return False, f"'route' {bad} edits the routing table, which mutates (only no arguments or -n listing is read-only)"
+            return (
+                False,
+                f"'route' {bad} edits the routing table, which mutates (only no arguments or -n listing is read-only)",
+            )
         return True, None
 
     # ethtool — inspects by default; setter flags change the NIC.
@@ -770,13 +1343,19 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     if binary == "swapon":
         if any(a in _SWAPON_READONLY_FLAGS for a in args):
             return True, None
-        return False, "'swapon' enables swap by default, which mutates (only the -s/--show listing is read-only)"
+        return (
+            False,
+            "'swapon' enables swap by default, which mutates (only the -s/--show listing is read-only)",
+        )
 
     # arp — prints the cache unless -d (delete) / -s (add static) edit it.
     if binary == "arp":
         bad = next((a for a in args if a in _ARP_MUTATING_FLAGS), None)
         if bad is not None:
-            return False, f"'arp' {bad} edits the ARP cache, which mutates (only no arguments or -a/-n queries are read-only)"
+            return (
+                False,
+                f"'arp' {bad} edits the ARP cache, which mutates (only no arguments or -a/-n queries are read-only)",
+            )
         return True, None
 
     # numactl — ``-H``/``--hardware`` / ``-s``/``--show`` inspect; any other form
@@ -789,11 +1368,17 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
             # No wrapped command: read-only only if every flag is an inspect flag.
             if args and all(a in _RO for a in args):
                 return True, None
-            return False, "'numactl' is read-only only for -H/--hardware/-s/--show queries"
+            return (
+                False,
+                "'numactl' is read-only only for -H/--hardware/-s/--show queries",
+            )
         if _depth >= 3:
-            return False, "'numactl' nesting is too deep to determine read-only status reliably"
+            return (
+                False,
+                "'numactl' nesting is too deep to determine read-only status reliably",
+            )
         # First non-option token onward is the wrapped command it runs.
-        return _classify_argv(args[args.index(non_opt[0]):], _depth + 1)
+        return _classify_argv(args[args.index(non_opt[0]) :], _depth + 1)
 
     # Container-runtime CLIs — only leaf inspection verbs (ps/inspect/logs/...).
     if binary in _RUNTIME_CLIS:
@@ -826,23 +1411,37 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
         return True, None
 
     # awk — a programming language, not a filter. ``system(...)`` runs an
-    # arbitrary command; ``-f``/``-i``/``@load`` execute program FILES. The
-    # in-program redirect (``print > file``) and command pipes contain
-    # ``>``/``|`` and are caught by the string-level metachar screens applied
-    # on every call surface (host_read, host_inject's read-only branch, and
-    # the exec-inner control-op scan), so they need no argv-level re-check.
+    # arbitrary command; ``-f``/``-i``/``@load`` execute program FILES; an
+    # in-program redirect (``print > file``) or command pipe (``print | cmd``,
+    # ``cmd | getline``, ``|&`` coproc) writes files or runs commands from
+    # inside the program string. The in-program shapes used to be caught ONLY
+    # by the string-level metachar screens on the whole-command surfaces; the
+    # bashfacts engine reads the quoted program string as the literal word it
+    # is, so the guard now lives at argv level, unconditionally — and it
+    # judges by construct, not by character (see _awk_program_mutation), so
+    # the read-only forms those screens used to refuse (``NR>1`` comparisons,
+    # regex alternation, ``getline < file`` reads) stay allowed.
     if binary == "awk":
         bad = next(
-            (a for a in args
-             if a.split("=", 1)[0] in _AWK_MUTATING_FLAGS
-             or a.startswith(_AWK_MUTATING_SHORT_PREFIXES)
-             or _AWK_MUTATING_RE.search(a)),
+            (
+                a
+                for a in args
+                if a.split("=", 1)[0] in _AWK_MUTATING_FLAGS
+                or a.startswith(_AWK_MUTATING_SHORT_PREFIXES)
+                or _AWK_MUTATING_RE.search(a)
+            ),
             None,
         )
         if bad is not None:
             return False, (
                 f"'awk' is read-only only for filtering/printing; {bad} can run commands or load program files"
                 " (system()/@load/-f)"
+            )
+        mutation = _awk_program_arg_mutation(args)
+        if mutation is not None:
+            return False, (
+                "'awk' is read-only only for filtering/printing; the program string carries"
+                f" {mutation}, which writes a file or runs a command from inside awk"
             )
         return True, None
 
@@ -856,12 +1455,37 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     # Recognised before the mutating scan, and only for that flag — an upload or
     # a config read stays refused however its own value is spelled.
     if binary == "curl":
-        args = _drop_discard_output(args, ("-o", "--output"), cluster_of=_CURL_VALUELESS_SHORT)
+        args = _drop_discard_output(
+            args, ("-o", "--output"), cluster_of=_CURL_VALUELESS_SHORT
+        )
+        for i, a in enumerate(args):
+            verb = None
+            if a in ("-X", "--request"):
+                verb = args[i + 1] if i + 1 < len(args) else ""
+            elif a.startswith("--request="):
+                verb = a.split("=", 1)[1]
+            else:
+                m = _CURL_VERB_CLUSTER.match(a)
+                if m:
+                    # Attached (``-XDELETE``) or bundled (``-sX DELETE`` — the
+                    # value rides the NEXT token when the cluster tail is bare).
+                    verb = m.group(1) or (args[i + 1] if i + 1 < len(args) else "")
+            if verb is not None and verb.upper() not in _CURL_READONLY_VERBS:
+                return False, (
+                    f"'curl' is read-only only with the idempotent verbs"
+                    f" GET/HEAD/OPTIONS; {a}{' ' + verb if verb else ''}"
+                    " mutates the remote endpoint"
+                )
         bad = next(
-            (a for a in args
-             if a.startswith(_CURL_MUTATING_LONG_PREFIXES)
-             or any(ch in _CURL_MUTATING_SHORT_CHARS
-                    for ch in _reachable_cluster(a, _CURL_VALUELESS_SHORT))),
+            (
+                a
+                for a in args
+                if a.startswith(_CURL_MUTATING_LONG_PREFIXES)
+                or any(
+                    ch in _CURL_MUTATING_SHORT_CHARS
+                    for ch in _reachable_cluster(a, _CURL_VALUELESS_SHORT)
+                )
+            ),
             None,
         )
         if bad is not None:
@@ -884,9 +1508,12 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
             args, ("-o", "-a", "--output-file"), cluster_of=_WGET_VALUELESS_SHORT
         )
         bad = next(
-            (a for a in args
-             if a.startswith(_WGET_MUTATING_LONG_PREFIXES)
-             or a in _WGET_MUTATING_SHORT),
+            (
+                a
+                for a in args
+                if a.startswith(_WGET_MUTATING_LONG_PREFIXES)
+                or a in _WGET_MUTATING_SHORT
+            ),
             None,
         )
         if bad is not None:
@@ -952,7 +1579,10 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
         if not wrapped:
             return True, None  # bare ``command`` does nothing observable
         if _depth >= 3:
-            return False, "'command' nesting is too deep to determine read-only status reliably"
+            return (
+                False,
+                "'command' nesting is too deep to determine read-only status reliably",
+            )
         ok, reason = _classify_argv(wrapped, _depth + 1)
         if ok:
             return True, None
@@ -963,17 +1593,24 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     # (``sort -o/etc/cron.d/evil``); an exact-token check waves that through.
     if binary == "sort":
         bad = next(
-            (a for a in args
-             if a.startswith(_SORT_MUTATING_SHORT_PREFIXES)
-             or a.split("=", 1)[0] in _SORT_MUTATING_LONG_FLAGS),
+            (
+                a
+                for a in args
+                if a.startswith(_SORT_MUTATING_SHORT_PREFIXES)
+                or a.split("=", 1)[0] in _SORT_MUTATING_LONG_FLAGS
+            ),
             None,
         )
         if bad is not None:
-            return False, f"'sort' {bad} writes (and truncates) a file, not a read-only diagnostic"
+            return (
+                False,
+                f"'sort' {bad} writes (and truncates) a file, not a read-only diagnostic",
+            )
         return True, None
     if binary == "sar":
         bad = next(
-            (a for a in args if a.startswith(_SAR_MUTATING_SHORT_PREFIXES)), None,
+            (a for a in args if a.startswith(_SAR_MUTATING_SHORT_PREFIXES)),
+            None,
         )
         if bad is not None:
             return False, f"'sar' {bad} writes a data file, not a read-only diagnostic"
@@ -983,13 +1620,19 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     # fault injection, not an observation.
     if binary == "ss":
         bad = next(
-            (a for a in args
-             if a in _SS_MUTATING_FLAGS
-             or "K" in _reachable_cluster(a, _SS_VALUELESS_SHORT)),
+            (
+                a
+                for a in args
+                if a in _SS_MUTATING_FLAGS
+                or "K" in _reachable_cluster(a, _SS_VALUELESS_SHORT)
+            ),
             None,
         )
         if bad is not None:
-            return False, f"'ss' {bad} force-closes every matching socket, which is fault injection"
+            return (
+                False,
+                f"'ss' {bad} force-closes every matching socket, which is fault injection",
+            )
         return True, None
 
     # uniq — ``uniq INPUT OUTPUT``: the second positional is an output file.
@@ -1023,9 +1666,7 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     # real output path stay refused, as do the conversion operands that change
     # what is written even when the sink is discarded.
     if binary == "dd":
-        operands = {
-            k: v for k, _, v in (a.partition("=") for a in args) if _
-        }
+        operands = {k: v for k, _, v in (a.partition("=") for a in args) if _}
         if operands.get("of") in _DISCARD_SINKS and operands.get("if"):
             bad = next((f for f in _DD_MUTATING_OPERANDS if f in operands), None)
             if bad is None:
@@ -1039,7 +1680,9 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     # thing being SET) is present. Two+ positionals means ``iface VALUE``.
     if binary == "ifconfig":
         positionals = [a for a in args if not a.startswith("-")]
-        kw = next((p for p in positionals if p.lower() in _IFCONFIG_MUTATING_KEYWORDS), None)
+        kw = next(
+            (p for p in positionals if p.lower() in _IFCONFIG_MUTATING_KEYWORDS), None
+        )
         if kw is not None or len(positionals) >= 2:
             return False, (
                 f"'ifconfig' {kw or 'with a value argument'} changes interface state "
@@ -1051,30 +1694,44 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     # adds/edits/deletes a virtual service or real server.
     if binary == "ipvsadm":
         if not args or any(
-            a == "--list" or a == "-L" or (a.startswith("-L") and not a.startswith("--"))
+            a == "--list"
+            or a == "-L"
+            or (a.startswith("-L") and not a.startswith("--"))
             for a in args
         ):
             return True, None
-        return False, "'ipvsadm' is read-only only with -L/--list (add/edit/delete service mutate)"
+        return (
+            False,
+            "'ipvsadm' is read-only only with -L/--list (add/edit/delete service mutate)",
+        )
 
     # crontab — installs/edits/removes by default; only -l/--list reads.
     if binary == "crontab":
         if any(a in _CRONTAB_READONLY_FLAGS for a in args):
             return True, None
-        return False, "'crontab' installs/edits/removes a crontab by default (only -l/--list is read-only)"
+        return (
+            False,
+            "'crontab' installs/edits/removes a crontab by default (only -l/--list is read-only)",
+        )
 
     # timedatectl — reads unless it SETS the clock.
     if binary == "timedatectl":
         verb = next((a for a in args if not a.startswith("-")), "")
         if verb in _TIMEDATECTL_MUTATING_VERBS:
-            return False, f"'timedatectl' {verb} changes the clock/timezone, which mutates (status/list-timezones are read-only)"
+            return (
+                False,
+                f"'timedatectl' {verb} changes the clock/timezone, which mutates (status/list-timezones are read-only)",
+            )
         return True, None
 
     # resolvectl / systemd-resolve — read with status; set-*/revert/flush mutate.
     if binary in ("resolvectl", "systemd-resolve"):
         verb = next((a for a in args if not a.startswith("-")), "")
         if verb in _RESOLVECTL_MUTATING_VERBS:
-            return False, f"'{binary}' {verb} rewrites resolver state (status is read-only)"
+            return (
+                False,
+                f"'{binary}' {verb} rewrites resolver state (status is read-only)",
+            )
         return True, None
 
     # taskset / chrt — query one pid with -p; a second positional is the value
@@ -1083,13 +1740,17 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
         if binary == "chrt" and any(a in ("-m", "--max") for a in args):
             return True, None
         has_p = any(
-            a in ("-p", "--pid") or (a.startswith("-") and not a.startswith("--") and "p" in a[1:])
+            a in ("-p", "--pid")
+            or (a.startswith("-") and not a.startswith("--") and "p" in a[1:])
             for a in args
         )
         positionals = [a for a in args if not a.startswith("-")]
         if has_p and len(positionals) == 1:
             return True, None
-        return False, f"'{binary}' is read-only only as a single-pid -p query (setting affinity/priority or running a command mutates)"
+        return (
+            False,
+            f"'{binary}' is read-only only as a single-pid -p query (setting affinity/priority or running a command mutates)",
+        )
 
     # fdisk lists partitions with -l/--list (verified O_RDONLY on devices via
     # strace). parted is deliberately NOT admitted even for -l: strace shows it
@@ -1098,7 +1759,10 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     if binary == "fdisk":
         if any(a in _DISK_READONLY_FLAGS for a in args):
             return True, None
-        return False, "'fdisk' is read-only only with -l/--list (a bare device opens the mutating partition editor)"
+        return (
+            False,
+            "'fdisk' is read-only only with -l/--list (a bare device opens the mutating partition editor)",
+        )
     if binary == "parted":
         return False, (
             "'parted' opens block devices O_RDWR even in list mode (verified by strace),"
@@ -1110,7 +1774,10 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
         verb = next((a for a in args if not a.startswith("-")), "")
         if verb == "version":
             return True, None
-        return False, "'openssl' is read-only only for the 'version' subcommand (other subcommands compute/write/connect)"
+        return (
+            False,
+            "'openssl' is read-only only for the 'version' subcommand (other subcommands compute/write/connect)",
+        )
 
     # java — runs bytecode; only its version banner is a safe probe.
     # Evidence (Oracle JDK 17 CDS docs): the default CDS archive is
@@ -1120,7 +1787,10 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     if binary == "java":
         if args and all(a in _JAVA_READONLY_PROBES for a in args):
             return True, None
-        return False, "'java' runs bytecode (execution); only its -version banner is a read-only probe"
+        return (
+            False,
+            "'java' runs bytecode (execution); only its -version banner is a read-only probe",
+        )
 
     # Package managers — query forms read; everything else installs/removes.
     # Evidence (strace on al8 host): rpm -q* opens BDB region files
@@ -1128,24 +1798,42 @@ def _classify_argv(tokens: list[str], _depth: int = 0) -> tuple[bool, str | None
     # database (Packages/...) is opened O_RDONLY only and no DB file mtime
     # changes — query stays query.
     if binary == "rpm":
-        if any(a == "--query" or (a.startswith("-q") and not a.startswith("--")) for a in args):
+        if any(
+            a == "--query" or (a.startswith("-q") and not a.startswith("--"))
+            for a in args
+        ):
             return True, None
-        return False, "'rpm' is read-only only in query mode (-q/-qa/-ql..., --query); install/erase/upgrade mutate"
+        return (
+            False,
+            "'rpm' is read-only only in query mode (-q/-qa/-ql..., --query); install/erase/upgrade mutate",
+        )
     # dpkg query forms are classified as dpkg-query actions in the Debian man
     # page (dpkg-query reads /var/lib/dpkg without the mutating lock); no
     # Debian host exists in the test cluster, so this is doc-level evidence.
     if binary == "dpkg":
-        if any(a in _DPKG_READONLY_FLAGS or a.split("=", 1)[0] in _DPKG_READONLY_FLAGS for a in args):
+        if any(
+            a in _DPKG_READONLY_FLAGS or a.split("=", 1)[0] in _DPKG_READONLY_FLAGS
+            for a in args
+        ):
             return True, None
-        return False, "'dpkg' is read-only only for query forms (-l/-s/-S/-L/-W); install/remove/purge mutate"
+        return (
+            False,
+            "'dpkg' is read-only only for query forms (-l/-s/-S/-L/-W); install/remove/purge mutate",
+        )
     if binary == "apk":
         verb = next((a for a in args if not a.startswith("-")), "")
         if verb in _APK_READONLY_VERBS:
             return True, None
-        return False, "'apk' is read-only only for info/search/list/policy/version (add/del/upgrade mutate)"
+        return (
+            False,
+            "'apk' is read-only only for info/search/list/policy/version (add/del/upgrade mutate)",
+        )
 
     if binary in _MUTATING_BINARIES:
-        return False, f"'{binary}' is a write/load-generating command, not a read-only diagnostic"
+        return (
+            False,
+            f"'{binary}' is a write/load-generating command, not a read-only diagnostic",
+        )
     if binary in _READONLY_BINARIES:
         return True, None
     return False, f"'{binary}' is not a known read-only diagnostic command"
@@ -1179,7 +1867,10 @@ def _classify_inner(inner: list[str], _depth: int = 0) -> tuple[bool, str | None
     entry = inner[0].rsplit("/", 1)[-1] if inner else ""
     if entry in _ESCAPE_PRIMITIVES:
         if _depth >= 2:
-            return False, f"'{entry}' nesting is too deep to determine read-only status reliably"
+            return (
+                False,
+                f"'{entry}' nesting is too deep to determine read-only status reliably",
+            )
         unwrapped = _unwrap_escape(inner)
         if not unwrapped:
             return False, (
@@ -1189,7 +1880,10 @@ def _classify_inner(inner: list[str], _depth: int = 0) -> tuple[bool, str | None
         ok, reason = _classify_inner(unwrapped, _depth + 1)
         if ok:
             return True, None
-        return False, f"'{entry}' does not run a read-only command once on the host: {reason}"
+        return (
+            False,
+            f"'{entry}' does not run a read-only command once on the host: {reason}",
+        )
 
     inner_str = " ".join(inner)
     for op in _SHELL_CONTROL_OPS:
@@ -1218,27 +1912,18 @@ def _classify_inner(inner: list[str], _depth: int = 0) -> tuple[bool, str | None
     return _classify_argv(inner)
 
 
-def _parse_exec_inner(v_args: str) -> tuple[bool, list[str] | None, str | None]:
-    """Split ``POD [-n NS] [-c C] -- INNER`` into its inner tokens.
-
-    Returns ``(has_inner, inner_tokens, parse_error)``. ``has_inner`` is False
-    for a pure entry (no ``--``) which is always read-only.
-    """
-    try:
-        tokens = shlex.split(v_args)
-    except ValueError:
-        return True, None, "command cannot be parsed (unbalanced shell quotes)"
-    if "--" not in tokens:
-        return False, None, None  # no inner command (pure entry) → read-only
-    inner = tokens[tokens.index("--") + 1:]
-    return True, inner, None
-
-
 # --- Public API: bool views + reason views (single source of truth) --------
+
 
 def is_readonly_argv(argv: list[str]) -> bool:
     """True if a single command (one pipeline stage) is a read-only probe."""
-    return _classify_argv(argv)[0]
+    return (
+        _facts_verdict(
+            lambda: _facts_engine().argv_rejection_reason_facts(argv),
+            on_error=_INTERNAL_ERROR_REASON,
+        )
+        is None
+    )
 
 
 def is_readonly_inner_tokens(inner: list[str]) -> bool:
@@ -1283,32 +1968,26 @@ def is_readonly_kubectl_exec(v_args: str) -> bool:
     inspection command. Any shell control operator fails closed to mutating; a
     bare exec with no inner command is read-only.
     """
-    has_inner, inner, parse_error = _parse_exec_inner(v_args)
-    if parse_error is not None:
-        return False
-    if not has_inner:
-        return True
-    return _classify_inner(inner or [])[0]
+    return kubectl_exec_rejection_reason(v_args) is None
 
 
 def kubectl_exec_rejection_reason(v_args: str) -> str | None:
     """Specific reason a ``kubectl exec``/``debug`` inner command is NOT
     read-only, or ``None`` when it IS read-only."""
-    has_inner, inner, parse_error = _parse_exec_inner(v_args)
-    if parse_error is not None:
-        return parse_error
-    if not has_inner:
-        return None
-    ok, reason = _classify_inner(inner or [])
-    return None if ok else reason
+    return _facts_verdict(
+        lambda: _facts_engine().kubectl_exec_rejection_reason_facts(v_args),
+        on_error=_INTERNAL_ERROR_REASON,
+    )
 
 
 def is_readonly_host_command(command: str) -> bool:
     """True if a bare host command is a single read-only diagnostic.
 
-    No shell metacharacters (pipe/redirect/chain/substitution): a host channel
-    does reach a remote shell, but ``wrap_command`` quotes every token, so an
-    operator arrives as a literal argument and would silently do nothing.
+    No UNQUOTED shell operators (pipe/redirect/chain/substitution): a host
+    channel does reach a remote shell, but ``wrap_command`` quotes every
+    token, so an operator arrives as a literal argument and would silently
+    do nothing. Quoted literals (``'a|b'``) carry no structure and are
+    admitted by the facts engine.
     """
     return host_command_rejection_reason(command) is None
 
@@ -1318,33 +1997,26 @@ def contains_shell_metachar(command: str) -> bool:
 
     The same screen ``host_command_rejection_reason`` applies, exported so
     other read-only fast paths that judge at ARGV level (``host_inject``'s
-    ``skip_guard`` branch) can apply it too: the argv classifier alone cannot
-    see writes hidden inside a program string (``awk '{print > "/tmp/x"}'``).
+    ``skip_guard`` branch) can apply it too: the argv classifier judges ONE
+    command, so shell-level composition (pipe/redirect/chain/substitution)
+    still needs this raw-string net. (In-program writes are no longer its
+    job — ``_awk_program_mutation`` sees those at argv level since Phase 2.)
     Quoting makes a metachar a useless literal on the wire anyway, so refusing
     loses nothing.
     """
-    return any(bad in command for bad in _HOST_METACHARS)
+    return _facts_verdict(
+        lambda: _facts_engine().contains_shell_metachar_facts(command),
+        on_error=True,
+    )
 
 
 def host_command_rejection_reason(command: str) -> str | None:
     """Specific reason a bare host command is NOT an allowed read-only
     diagnostic, or ``None`` when it is."""
-    if not command or not command.strip():
-        return "empty command"
-    for bad in _HOST_METACHARS:
-        if bad in command:
-            return (
-                f"contains the shell metacharacter '{bad}'"
-                " (host_read only runs a single read-only diagnostic with no pipe/redirect)"
-            )
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return "command cannot be parsed (unbalanced shell quotes)"
-    if not tokens:
-        return "empty command"
-    ok, reason = _classify_argv(tokens)
-    return None if ok else reason
+    return _facts_verdict(
+        lambda: _facts_engine().host_command_rejection_reason_facts(command),
+        on_error=_INTERNAL_ERROR_REASON,
+    )
 
 
 __all__ = [

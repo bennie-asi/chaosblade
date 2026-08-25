@@ -1,6 +1,10 @@
 """ChaosBlade Python-application (in-process agent) CLI tool wrappers.
 
-Separate module from ``blade.py`` on purpose: this fault domain has a different
+Lives inside the ChaosBlade provider package next to ``cli.py`` (phase-11
+carrier-import-boundary): reached only through the python provider's tool
+surface, never via ``chaos_agent.tools``.
+
+Separate module from ``cli.py`` on purpose: this fault domain has a different
 command shape (``blade create python <target> <action>``), a different parameter
 face (per-client matchers: Redis ``cmd``/``key``, SQL ``sql``/``sqltype``, HTTP
 ``url``/``method``, ...) and a different precondition (an in-process agent must
@@ -49,13 +53,11 @@ python-scope drill is only reachable over a host-profile channel (``ssh`` /
 ``kubewiz_host``); both ``kubeconfig`` and ``kubewiz_k8s`` (profile ``k8s``) are
 refused before the model ever sees this tool.
 
-``--direct`` mode is gated identically (``direct_execute`` runs the same
-profile check before any injection preparation), and this tool additionally
-passes ``expect_profile=PROFILE_HOST`` to the transport, so a mismatched channel
-is refused at dispatch too. That deliberately gives up the co-located
-``kubeconfig`` case that direct mode used to allow: consistency across paths was
-chosen over that convenience, because a silent cross-profile execution returns
-data from the wrong machine (see task-46317228).
+This tool additionally passes ``expect_profile=PROFILE_HOST`` to the
+transport, so a mismatched channel is refused at dispatch too. That
+deliberately gives up the co-located ``kubeconfig`` case: consistency across
+paths is chosen over that convenience, because a silent cross-profile execution
+returns data from the wrong machine (see task-46317228).
 
 When the channel IS host-profile but the fault is still not delivered, the cause
 is the agent precondition — the error path below explains it.
@@ -67,7 +69,10 @@ from langchain_core.tools import tool
 
 from chaos_agent.config.settings import settings
 from chaos_agent.tools._tool_profiles import profile_for_tool
-from chaos_agent.tools.blade import _get_host_blade_path, _split_args
+from chaos_agent.agent.providers.chaosblade.cli import (
+    _get_host_blade_path,
+    _split_args,
+)
 from chaos_agent.transports import TransportTarget, execute_via_transport
 
 logger = logging.getLogger(__name__)

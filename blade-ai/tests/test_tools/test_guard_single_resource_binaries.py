@@ -28,7 +28,7 @@ import shlex
 
 import pytest
 
-from chaos_agent.agent.providers.host_shell import HostShellProvider
+from chaos_agent.agent.providers.host_shell.provider import HostShellProvider
 from chaos_agent.tools.guard import ToolGuard
 
 
@@ -156,7 +156,10 @@ class TestTheBoundaryDidNotMoveElsewhere:
     @pytest.mark.parametrize("command", [
         # Still-excluded binaries: unbounded by construction.
         "pkill -f stress-ng",      # pattern decides the blast radius
-        "rm -f /data/x",           # irreversible
+        "rm -rf /data/x",          # recursive walk has no drill boundary
+                                   # (`rm -f <single-file>` IS admitted now:
+                                   # drill-artifact cleanup tail, see
+                                   # TestRmCleanupTailGuard in test_guard.py)
         "bpftrace -e whatever",    # arbitrary BPF, kernel-wide override()
         # Pre-existing per-binary guards.
         "systemctl reboot",

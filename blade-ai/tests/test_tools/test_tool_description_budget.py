@@ -43,14 +43,14 @@ from chaos_agent.agent.nodes.verify._verifier_submit import (
     submit_verification,
 )
 from chaos_agent.agent.replan import request_replan
-from chaos_agent.tools.blade import (
+from chaos_agent.agent.providers.chaosblade.cli import (
     blade_create,
     blade_destroy,
     blade_help,
     blade_query_k8s,
     blade_status,
 )
-from chaos_agent.tools.blade_python import (
+from chaos_agent.agent.providers.chaosblade.cli_python import (
     blade_python_create,
     blade_python_prepare,
     blade_python_revoke,

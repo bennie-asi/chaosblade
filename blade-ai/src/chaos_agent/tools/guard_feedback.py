@@ -63,7 +63,37 @@ class ViolatedConstraint(str, Enum):
     # / rollback registration and retry — NOT a dead-end.
     NOT_RECOVERABLE = "not_recoverable"
     # Classifier could not make sense of the call (missing field, malformed).
+    # Also covers bash-parse failure shapes, per design 4.7 — no separate
+    # UNKNOWN_SYNTAX value is added.
     UNKNOWN = "unknown"
+    # Structural analysis exhausted its nesting budget (bashfacts). Not a
+    # dead-end — the fix is to split the command into simpler shapes
+    # (is_hard_floor=False). No construction site emits it yet: the
+    # bash-parsing surfaces (readonly probes) report through their reason
+    # strings, not GuardFeedback. The contract names it NOW so a future
+    # wiring of those surfaces needs no enum change.
+    BUDGET_EXCEEDED = "budget_exceeded"
+
+
+@dataclass(frozen=True)
+class EvidenceSpan:
+    """Absolute offset range of the structure a rejection fired on.
+
+    ``start``/``end`` index the command string the calling surface displays
+    — for the exec-form ToolGuard path that is ``" ".join(cmd)``, where
+    quote loss means the offsets are DISPLAY coordinates for audit / SSE /
+    TUI highlight layers, not source-fidelity guarantees. ``label`` names
+    the structural kind in machine-readable form (e.g.
+    ``"shell_metacharacter"``, ``"command_substitution"``).
+
+    Evidence never enters the LLM-facing text (``render_for_llm`` stays
+    compact by contract) — it serves audit logs, SSE detail, and TUI
+    highlighting (design 4.7).
+    """
+
+    start: int
+    end: int
+    label: str
 
 
 @dataclass
@@ -82,6 +112,10 @@ class GuardFeedback:
             and retry.
         compliant_form: OPTIONAL deterministic hint toward a compliant form.
             Empty unless we are certain of the alternative.
+        evidence: Precise ranges the verdict fired on (design 4.7). Empty by
+            default so every pre-existing construction site keeps its meaning
+            with zero changes; consumed by audit / SSE / TUI highlight,
+            never by the model-facing text.
     """
 
     allowed: bool
@@ -90,6 +124,7 @@ class GuardFeedback:
     offending: str = ""
     is_hard_floor: bool = False
     compliant_form: str = ""
+    evidence: tuple[EvidenceSpan, ...] = ()
 
     def render_for_llm(self) -> str:
         """Compose the model-facing text.
@@ -110,4 +145,4 @@ class GuardFeedback:
         return self.allowed, self.render_for_llm()
 
 
-__all__ = ["GuardFeedback", "ViolatedConstraint"]
+__all__ = ["EvidenceSpan", "GuardFeedback", "ViolatedConstraint"]

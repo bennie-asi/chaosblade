@@ -139,8 +139,18 @@ class GuardGateway:
         return get_tool_guard()
 
     def check_command(self, cmd: list[str]) -> GuardFeedback:
-        """Command-safety verdict as unified feedback (delegates ToolGuard)."""
-        return self.tool_guard.evaluate(cmd)
+        """Command-safety verdict as unified feedback (delegates ToolGuard).
+
+        A rejection is audited HERE (design 4.7): both execution call
+        sites (``transports.executor`` / ``tools.shell``) raise on a
+        rejection before their own ``audit_log`` can fire, so the guard's
+        interception would otherwise leave no audit trace. One hook covers
+        every caller.
+        """
+        feedback = self.tool_guard.evaluate(cmd)
+        if not feedback.allowed:
+            self.tool_guard.audit_rejection(cmd, feedback)
+        return feedback
 
     def check_target(
         self,

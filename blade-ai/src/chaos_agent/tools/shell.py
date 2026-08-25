@@ -222,7 +222,7 @@ async def run_command(
     proc = None
     reap_task = None
     try:
-        from chaos_agent.utils.blade_paths import resolve_exec_path
+        from chaos_agent.utils.exec_path import resolve_exec_path
 
         sub_env = None
         if env_override:

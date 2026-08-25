@@ -163,7 +163,7 @@ class TestProfileRefusalContract:
     """A profile refusal must read as an ERROR, not as command output.
 
     The ``Error:`` prefix is load-bearing, not cosmetic: carrier attribution
-    (``providers._detection.scan_host_native_injection``) treats any ToolMessage
+    (``providers.message_scanning.scan_host_native_injection``) treats any ToolMessage
     NOT starting with ``Error:`` as a successful host-native injection. Drop the
     prefix and a REFUSED ``host_inject`` is recorded as a real injection — the
     recover graph then tries to reverse a fault that never happened.
@@ -190,7 +190,7 @@ class TestProfileRefusalContract:
     ):
         from langchain_core.messages import AIMessage, ToolMessage
 
-        from chaos_agent.agent.providers._detection import scan_host_native_injection
+        from chaos_agent.agent.providers.message_scanning import scan_host_native_injection
 
         self._k8s_channel(monkeypatch)
         out = await host_inject.ainvoke({"command": "stress-ng --cpu 4 --timeout 60s"})

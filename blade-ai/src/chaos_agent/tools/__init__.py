@@ -1,11 +1,11 @@
-"""Tool definitions aggregated for binding into LangGraph nodes."""
+"""Tool definitions aggregated for binding into LangGraph nodes.
 
-from chaos_agent.tools.blade import blade_create, blade_destroy, blade_help, blade_status, blade_query_k8s
-from chaos_agent.tools.blade_python import (
-    blade_python_create,
-    blade_python_prepare,
-    blade_python_revoke,
-)
+Carrier-specific CLI wrappers (ChaosBlade) live in their provider package
+(``agent/providers/chaosblade/cli.py``) and are intentionally NOT re-exported
+here — the generic layer must not reach a carrier tool implementation via
+this package's import surface (phase-11 carrier-import-boundary).
+"""
+
 from chaos_agent.tools.file_reader import safe_read_file
 from chaos_agent.tools.file_search import safe_search_files
 from chaos_agent.tools.file_writer import safe_write_file
@@ -15,14 +15,6 @@ from chaos_agent.tools.kubectl import kubectl, kubectl_read
 from chaos_agent.tools.web_search import web_search
 
 __all__ = [
-    "blade_create",
-    "blade_destroy",
-    "blade_help",
-    "blade_status",
-    "blade_query_k8s",
-    "blade_python_create",
-    "blade_python_prepare",
-    "blade_python_revoke",
     "host_inject",
     "host_read",
     "kubectl",

@@ -11,9 +11,10 @@ E11 — host_part regex was replaced by AST-level parsing via
   2b. Per-binary argument guards, narrowing an ADMITTED binary/subcommand
      down to its safe forms: ``systemctl`` verb whitelist, ``kill`` PID
      target, ``chmod`` recursion, ``kubectl drain`` unrecoverable flags,
-     ``kubectl config`` read-only. Each ``_check_*`` returns a full
-     ``GuardFeedback`` (or ``None`` to pass) so it owns every field of its
-     own verdict instead of the caller flattening it into a string.
+     ``kubectl config`` read-only, ``systemd-run`` timer-only form. Each
+     ``_check_*`` returns a full ``GuardFeedback`` (or ``None`` to pass) so it
+     owns every field of its own verdict instead of the caller flattening it
+     into a string.
   3. Token-level checks on ``ParsedCommand.host_relevant_tokens()``
      only — no more ``" ".join(cmd)`` cross-token false positives.
      Two checks per host token:
@@ -51,14 +52,23 @@ not documentation polish:
 import json
 import logging
 import re
+import shlex
+from dataclasses import asdict
 from pathlib import Path
 
+from chaos_agent.bashfacts.facts import CommandFacts, ScriptFacts
+from chaos_agent.bashfacts.parser import parse_script
 from chaos_agent.models.command_result import CommandResult
-from chaos_agent.tools.guard_feedback import GuardFeedback, ViolatedConstraint
+from chaos_agent.tools.guard_feedback import (
+    EvidenceSpan,
+    GuardFeedback,
+    ViolatedConstraint,
+)
 from chaos_agent.tools.guard_parser import (
     SUSPICIOUS_SOLO_TOKENS,
     parse_command,
 )
+from chaos_agent.tools.readonly import _READONLY_BINARIES
 from chaos_agent.utils.time import now_iso
 
 logger = logging.getLogger(__name__)
@@ -70,7 +80,9 @@ logger = logging.getLogger(__name__)
 # block devices (nbd) and Ceph RBD (rbd).
 # NOTE: modern servers usually root on LVM (/dev/mapper/...), so omitting these
 # families would leave the most common layout unprotected.
-_BLOCK_DEVICE_FAMILIES = r"sd|nvme|vd|hd|xvd|disk|dm-|md|mmcblk|loop|dasd|sr|nbd|rbd|mapper/"
+_BLOCK_DEVICE_FAMILIES = (
+    r"sd|nvme|vd|hd|xvd|disk|dm-|md|mmcblk|loop|dasd|sr|nbd|rbd|mapper/"
+)
 
 
 # Read-only text filters an LLM commonly pipes a query into
@@ -115,6 +127,176 @@ def _classify_blacklist_pattern(pattern_src: str) -> tuple[str, bool]:
     return "forbidden parameter", True
 
 
+def _token_span(cmd: list[str], token: str, label: str) -> tuple[EvidenceSpan, ...]:
+    """Best-effort locate of ``token`` inside the exec-form display string.
+
+    The span indexes ``" ".join(cmd)`` — the same text audit / SSE / TUI
+    surfaces render — so a highlight layer maps it directly onto what the
+    user sees. Tokens are matched on whole argv elements, never by a bare
+    substring search: ``find`` would point INSIDE a sibling argument (the
+    ``|`` inside ``a|b``) and highlight the wrong characters. One exception:
+    the parser splits ``--runtime=9999999`` into ``--runtime`` plus the
+    value, so a value token owns no argv element of its own — it is pinned
+    to its slot inside the joined parent element. Empty when the token is
+    empty or absent; a standalone element always beats an embedded
+    occurrence (evidence guides the eye, it never decides).
+    """
+    if not token:
+        return ()
+    offset = 0
+    for part in cmd:
+        if part == token:
+            return (EvidenceSpan(start=offset, end=offset + len(token), label=label),)
+        offset += len(part) + 1
+    # Parser-split flag values (right of the ``=`` in a ``--flag=value``
+    # element) own no argv element; pin such a token to its exact slot
+    # inside the joined parent — never to an unrelated substring.
+    offset = 0
+    for part in cmd:
+        if part.startswith("-") and "=" in part:
+            value = part.split("=", 1)[1]
+            if value == token:
+                start = offset + len(part) - len(token)
+                return (EvidenceSpan(start=start, end=offset + len(part), label=label),)
+        offset += len(part) + 1
+    return ()
+
+
+def _is_command_substitution_pattern(pattern_src: str) -> bool:
+    """True for the two blacklist patterns that flag command substitution.
+
+    Same source-substring discipline as ``_classify_blacklist_pattern`` —
+    note the regex escaping: the ``$(...)`` pattern's SOURCE is ``\\$(``, so
+    a literal ``"$("`` substring check never fires; mirror the classifier's
+    ``"$" in p and "(" in p`` form exactly.
+    """
+    return "`" in pattern_src or ("$" in pattern_src and "(" in pattern_src)
+
+
+def _blacklist_evidence_label(pattern_src: str) -> str:
+    r"""Machine label for a blacklisted-pattern evidence span.
+
+    Same source-substring discipline as ``_classify_blacklist_pattern`` —
+    note the regex escaping: the ``$(...)`` pattern's SOURCE is ``\$(``, so
+    a literal ``"$("`` substring check never fires; mirror the classifier's
+    ``"$" in p and "(" in p`` form exactly.
+    """
+    if _is_command_substitution_pattern(pattern_src):
+        return "command_substitution"
+    return "blacklist_pattern"
+
+
+# ``systemd-run`` flags that take their value as a SEPARATE argv token
+# (``--flag value``); ``--flag=value`` forms carry it inline and need no
+# entry. Used only to locate where the positional COMMAND (the timer
+# payload) starts — the flags themselves stay fully checked by Gate ②.
+_SYSTEMD_RUN_VALUE_FLAGS = frozenset(
+    {
+        "--on-active",
+        "--on-boot",
+        "--on-startup",
+        "--on-unit-active",
+        "--on-unit-idle",
+        "--on-calendar",
+        "--unit",
+        "--description",
+        "--working-directory",
+        "--same-dir",
+        "--setenv",
+        "--property",
+        "-p",
+        "--timer-property",
+        "--uid",
+        "--gid",
+        "--nice",
+        "--oom-score-adjust",
+        "--cpu-affinity",
+        "--slice",
+        "--service-type",
+    }
+)
+
+
+def _systemd_run_payload_start(cmd: list[str]) -> int:
+    """Index of the first positional token — where the timer payload starts.
+
+    Mirrors systemd-run's own argv parsing: options may precede the COMMAND;
+    from the first positional token on, everything (``--``-prefixed or not)
+    is argv FOR that command and is never re-parsed as a systemd-run option.
+    Value flags in ``--flag value`` form swallow their separate value token.
+    """
+    i = 1
+    while i < len(cmd):
+        arg = cmd[i]
+        if arg.startswith("-") and arg != "-":
+            if "=" not in arg and arg in _SYSTEMD_RUN_VALUE_FLAGS:
+                i += 1  # skip the flag's separate value token
+        else:
+            return i
+        i += 1
+    return len(cmd)
+
+
+def _systemd_run_payload_tokens(cmd: list[str]) -> frozenset[str]:
+    """The timer-payload tokens of a ``systemd-run`` argv.
+
+    ``systemd-run [flags] COMMAND [ARGS...]``: from the first positional
+    token on, everything IS the command the timer will execute at the
+    deadline — including a quoted ``sh -c '…$(…)…'`` script that only the
+    TARGET's shell will ever expand.
+    """
+    return frozenset(cmd[_systemd_run_payload_start(cmd) :])
+
+
+def _wiz_command_values(cmd: list[str]) -> list[str]:
+    """The ``--command`` values of a ``wiz`` argv (both flag spellings).
+
+    ``wiz task exec --command <value>`` / ``--command=<value>``: the value
+    is the command region the remote side will run — wiz's only payload
+    carrier (the transport channel assembles the same flag when IT builds a
+    wiz call, but channel-assembled calls never pass the guard; only an
+    LLM-authored argv starting with ``wiz`` reaches this checker).
+    """
+    values: list[str] = []
+    i = 1
+    while i < len(cmd):
+        arg = cmd[i]
+        if arg == "--command":
+            if i + 1 < len(cmd):
+                values.append(cmd[i + 1])
+            i += 2
+            continue
+        if arg.startswith("--command="):
+            values.append(arg.split("=", 1)[1])
+        i += 1
+    return values
+
+
+# ── payload-region readmission ──────────────────────────────────────
+# A carrier's command region rides INSIDE a whitelisted binary's argv, so
+# Gate ① (binary whitelist) and Gate ③ (per-binary checkers) — both keyed on
+# ``cmd[0]`` alone — never see it. The readmission layer below puts the
+# region through the SAME admission a directly-executed command meets.
+
+# Interpreter form: the region is a script the TARGET's shell will parse,
+# legal only as ``sh -c '<script>'`` (a bare ``sh <file>`` runs a script the
+# guard cannot see, and a 4th token is a $0 form no skill teaches).
+_PAYLOAD_INTERPRETERS = frozenset({"sh", "bash"})
+# Nested carriers inside a payload script: multi-layer carriage has no
+# skill precedent and only ever lengthens the guard's decision chain.
+_NESTED_CARRIERS = frozenset({"systemd-run", "wiz"})
+# Redirect targets a payload script may write to: discard sinks only. The
+# one redirect the skills teach is ``2>/dev/null``; writing a payload's
+# output to a real file is no recovery step any skill prescribes.
+_PAYLOAD_REDIRECT_SINKS = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/fd/")
+# Heads allowed INSIDE a ``$(...)`` body of a payload script. The skills'
+# one use of substitution in payloads is resolving PIDs (``kill -CONT
+# $(pidof x)``); anything wider would let a probe's OUTPUT smuggle flags —
+# ``chmod $(echo -R) 777 /etc`` is a recursive chmod the static replay
+# cannot see. Fail closed to the PID probes.
+_PAYLOAD_SUBST_PROBES = frozenset({"pidof", "pgrep"})
+
+
 class ToolGuard:
     """Security guard for tool command execution."""
 
@@ -125,7 +307,9 @@ class ToolGuard:
     # as knowledge owned by that backend.
     BASE_COMMANDS = {
         # Diagnostics / transport
-        "df", "ping", "sleep",
+        "df",
+        "ping",
+        "sleep",
     }
 
     # Authoritative reference / equivalence anchor: the COMPLETE default binary
@@ -137,31 +321,71 @@ class ToolGuard:
     # ZERO change to the effective whitelist.
     ALLOWED_COMMANDS = {
         # K8s (chaosblade: blade; k8s_native: kubectl / wiz)
-        "blade", "kubectl", "wiz",
+        "blade",
+        "kubectl",
+        "wiz",
         # Host fault injection (host_shell)
-        "iptables", "ip6tables", "nft", "tc",
-        "stress", "stress-ng", "dd", "fallocate", "fio",
+        "iptables",
+        "ip6tables",
+        "nft",
+        "tc",
+        "stress",
+        "stress-ng",
+        "dd",
+        "fallocate",
+        "fio",
         # Diagnostics (guard base)
-        "df", "ping", "sleep",
+        "df",
+        "ping",
+        "sleep",
         # Host recovery / low-risk fault primitives (Tier 1, host_shell): bounded
         # blast radius, reversible or self-limiting, single-command form.
-        "truncate", "chmod", "cp", "kill", "ntpdate", "chronyc",
+        "truncate",
+        "chmod",
+        "cp",
+        "kill",
+        "ntpdate",
+        "chronyc",
         # Host service / time control (Tier 2, host_shell): admitted only WITH
         # the extra per-binary guards below (systemctl verb whitelist, kill PID /
         # chmod recursion checks). Never admit interpreters or shell (sh/bash/
         # python).
-        "systemctl", "date", "timedatectl", "mv",
+        "systemctl",
+        "date",
+        "timedatectl",
+        "mv",
+        # Self-recovery timer carrier (Tier 2, host_shell): admitted only in
+        # its timer form (`--on-active=<N>s`) by ``_check_systemd_run`` below —
+        # the skill 降级方案 pattern "先武装定时恢复，再注入". A bare
+        # ``systemd-run <cmd>`` would be a synchronous arbitrary-execution
+        # bypass of this whitelist.
+        "systemd-run",
         # Single-resource fault primitives (Tier 2, host_shell): each is the only
         # single-command way to express its fault, and each is narrowed to that
         # form by its own guard (_check_nc listen-only, _check_fuser
         # port-spec-only, _check_strace attach-only).
-        "nc", "fuser", "strace",
+        "nc",
+        "fuser",
+        "strace",
+        # Drill-artifact cleanup tail (Tier 2, host_shell): the host twin of
+        # ``kubectl delete <debug-pod>`` — every skill ends a manual recovery
+        # with ``rm -f <file>.bak``, deleting a file the DRILL itself created
+        # (backup / fill file). Narrowed to that exact form by ``_check_rm``:
+        # recursive forms have no drill boundary and are never admitted.
+        "rm",
     }
 
     # kubectl subcommands the tool layer will RUN (Gate ②). This is the
     # execution gate, deliberately narrower than
     # ``classifier.DESTRUCTIVE_KUBECTL_SUBS`` (a safety-classification set that
-    # also recognises verbs we refuse to run, e.g. edit/replace/run/proxy).
+    # also recognises verbs we refuse to run, e.g. edit/run/proxy).
+    # ``replace`` IS admitted: the PVC / limits / topology cases teach it as
+    # the ONLY working restore verb (apply's three-way merge keeps fields the
+    # injection added, so the restore is incomplete; replace PUTs the whole
+    # object and restores exactly) — refusing it makes the skill's restore
+    # step unexecutable-by-construction, the exact failure mode the
+    # invariant below exists to prevent. It stays inside the destructive
+    # classification set, so admitting it hides nothing from the guard.
     #
     # Invariant (test_kubectl_verb_consistency): it must be a SUPERSET of
     # ``K8sNativeProvider.inject_kubectl_subcommands`` and
@@ -174,6 +398,7 @@ class ToolGuard:
         "get",
         "describe",
         "delete",
+        "replace",
         "exec",
         "logs",
         "top",
@@ -247,10 +472,20 @@ class ToolGuard:
     # systemctl verbs permitted for service-level chaos + recovery. Machine /
     # boot-level verbs (poweroff / reboot / halt / kexec / isolate / disable /
     # enable / daemon-reload / suspend / hibernate) are intentionally excluded —
-    # they exceed the blast radius of a single-service drill.
+    # they exceed the blast radius of a single-service drill. reset-failed only
+    # clears a unit's in-memory failed marker (transient-timer re-arm hygiene
+    # after a failed payload; no start/stop side effect), so it stays inside
+    # that blast radius.
     SYSTEMCTL_ALLOWED_SUBCOMMANDS = {
-        "start", "stop", "restart", "mask", "unmask", "status",
-        "is-active", "is-enabled",
+        "start",
+        "stop",
+        "restart",
+        "mask",
+        "unmask",
+        "status",
+        "is-active",
+        "is-enabled",
+        "reset-failed",
     }
 
     PARAM_BLACKLIST_PATTERNS = [
@@ -291,12 +526,29 @@ class ToolGuard:
         param_blacklist: list[str] | None = None,
     ):
         self.allowed_commands = allowed_commands or self._default_allowed_commands()
-        self.kubectl_subcommands = kubectl_subcommands or self.KUBECTL_ALLOWED_SUBCOMMANDS
+        self.kubectl_subcommands = (
+            kubectl_subcommands or self.KUBECTL_ALLOWED_SUBCOMMANDS
+        )
         self.systemctl_subcommands = (
             systemctl_subcommands or self.SYSTEMCTL_ALLOWED_SUBCOMMANDS
         )
         self.param_blacklist = param_blacklist or self.PARAM_BLACKLIST_PATTERNS
         self._compiled_patterns = [re.compile(p) for p in self.param_blacklist]
+        # Single dispatch table for Gate ③b: evaluate() looks the EXECUTED
+        # binary up here, and the payload-region readmission replays the
+        # SAME checkers on a payload's head — one table, so the two can
+        # never drift apart.
+        self._binary_checkers = {
+            "systemctl": self._check_systemctl,
+            "kill": self._check_kill,
+            "chmod": self._check_chmod,
+            "nc": self._check_nc,
+            "fuser": self._check_fuser,
+            "strace": self._check_strace,
+            "systemd-run": self._check_systemd_run,
+            "rm": self._check_rm,
+            "wiz": self._check_wiz,
+        }
 
     @classmethod
     def _default_allowed_commands(cls) -> set[str]:
@@ -403,7 +655,9 @@ class ToolGuard:
                 )
             if parsed.subcommand == "config":
                 config_index = cmd.index("config")
-                config_action = cmd[config_index + 1] if config_index + 1 < len(cmd) else ""
+                config_action = (
+                    cmd[config_index + 1] if config_index + 1 < len(cmd) else ""
+                )
                 if config_action != "view":
                     return GuardFeedback(
                         allowed=False,
@@ -430,19 +684,32 @@ class ToolGuard:
         # returns a full GuardFeedback so the offending token and the compliant
         # form land in their own fields rather than being concatenated into one
         # opaque sentence.
-        for guarded, checker in (
-            ("systemctl", self._check_systemctl),
-            ("kill", self._check_kill),
-            ("chmod", self._check_chmod),
-            ("nc", self._check_nc),
-            ("fuser", self._check_fuser),
-            ("strace", self._check_strace),
-        ):
-            if binary == guarded:
-                feedback = checker(cmd)
-                if feedback is not None:
-                    return feedback
-                break
+        checker = self._binary_checkers.get(binary)
+        if checker is not None:
+            feedback = checker(cmd)
+            if feedback is not None:
+                return feedback
+
+        # 3c. Carrier-payload exemption for the Gate ② command-substitution
+        # patterns ONLY. The payload region has ALREADY been re-admitted
+        # structurally by the carrier's own checker (Gate ③b above): every
+        # ``$()`` body inside it was parsed by bashfacts and its segment
+        # heads checked against the whitelist, so a quoted
+        # ``sh -c 'kill -CONT $(pgrep -f x)'`` payload is a TARGET-shell
+        # expansion the guard has already vetted — ``$(`` there is not a
+        # host injection. Every OTHER blacklist pattern (``rm -rf``,
+        # raw-device writes, magnitude caps) still fires on the payload —
+        # it genuinely executes eventually.
+        carrier_payload_tokens: frozenset[str] = frozenset()
+        carrier_option_tokens: frozenset[str] = frozenset()
+        if binary == "systemd-run":
+            carrier_payload_tokens = _systemd_run_payload_tokens(cmd)
+            carrier_option_tokens = frozenset(cmd[1 : _systemd_run_payload_start(cmd)])
+        elif binary == "wiz":
+            carrier_payload_tokens = frozenset(_wiz_command_values(cmd))
+            carrier_option_tokens = frozenset(
+                t for t in cmd[1:] if t not in carrier_payload_tokens
+            )
 
         # 4 + 5. Token-level checks (SUSPICIOUS_SOLO_TOKENS + regex blacklist)
         # on host-relevant tokens only. Excludes data_payload_values and
@@ -465,10 +732,10 @@ class ToolGuard:
                         allowed=False,
                         constraint=ViolatedConstraint.UNSUPPORTED_FORM,
                         reason=(
-                            "Shell pipe '|' is not supported (exec-form, "
-                            "shell=False)."
+                            "Shell pipe '|' is not supported (exec-form, shell=False)."
                         ),
                         offending=token,
+                        evidence=_token_span(cmd, token, "shell_metacharacter"),
                         compliant_form=(
                             "The command's raw output is returned to you in "
                             "full — perform any post-processing (counting, "
@@ -486,11 +753,19 @@ class ToolGuard:
                         "pipe, redirect, chain, or background."
                     ),
                     offending=token,
+                    evidence=_token_span(cmd, token, "shell_metacharacter"),
                     compliant_form=(
                         "Express the intent as a single standalone command."
                     ),
                 )
             for pattern in self._compiled_patterns:
+                if (
+                    carrier_payload_tokens
+                    and token in carrier_payload_tokens
+                    and token not in carrier_option_tokens
+                    and _is_command_substitution_pattern(pattern.pattern)
+                ):
+                    continue
                 if pattern.search(token):
                     category, hard = _classify_blacklist_pattern(pattern.pattern)
                     return GuardFeedback(
@@ -509,6 +784,11 @@ class ToolGuard:
                             )
                         ),
                         offending=token,
+                        evidence=_token_span(
+                            cmd,
+                            token,
+                            _blacklist_evidence_label(pattern.pattern),
+                        ),
                         is_hard_floor=hard,
                         # A magnitude cap is reshapeable, a destructive floor is
                         # not — only offer a way forward for the former, rather
@@ -593,6 +873,469 @@ class ToolGuard:
             )
         return None
 
+    def _check_systemd_run(self, cmd: list[str]) -> GuardFeedback | None:
+        """Admit ``systemd-run`` ONLY as a self-recovery timer whose payload
+        is itself re-admitted.
+
+        The drill form every host skill 降级方案 arms is
+        ``systemd-run --on-active=<N>s --unit=<name> <inverse-cmd>``: the
+        payload runs at the DEADLINE, not now, so a native fault self-reverses
+        even if the session dies ("先武装定时恢复，再注入"). ``--on-active``
+        is what makes that true — without it the payload runs IMMEDIATELY,
+        which is arbitrary execution wearing a whitelisted binary's name
+        (``systemd-run nginx`` is just nginx, and nginx is in no whitelist).
+        Both ``--on-active=<N>s`` and the split ``--on-active <N>s`` form are
+        recognised (systemd-run accepts either). The scan stops at the first
+        positional token, mirroring systemd-run's own argv parsing — a
+        payload-carried ``--on-active`` (``systemd-run nginx --on-active=600s``
+        hands that flag to NGINX, not to the timer) arms nothing and must not
+        satisfy this check.
+
+        Once the timer form is confirmed, the payload region (every token
+        from the first positional on) is RE-ADMITTED through
+        :meth:`_admit_command_region`: the timer executing the payload at its
+        deadline is still that payload EXECUTING, so it must meet the same
+        Gate ① whitelist and Gate ③ checkers a directly-run command meets.
+        The earlier checker verified only the timer FORM — a payload of
+        ``python /tmp/x.py`` or ``nc -e /bin/sh …`` sailed past every gate
+        except the blacklist regexes, whose vocabulary does not include
+        "not whitelisted" binaries (timer-payload readmission hole).
+        """
+        payload_start = _systemd_run_payload_start(cmd)
+        armed = any(
+            arg == "--on-active" or arg.startswith("--on-active=")
+            for arg in cmd[1:payload_start]
+        )
+        if not armed:
+            return GuardFeedback(
+                allowed=False,
+                constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                reason="systemd-run is admitted only as a self-recovery timer",
+                offending="--on-active",
+                compliant_form=(
+                    "Arm the timer: `systemd-run --on-active=<N>s "
+                    "--unit=<name> <inverse-cmd>` — the payload runs at the "
+                    "deadline, not now. Without ``--on-active`` it runs "
+                    "immediately, which is a synchronous arbitrary-execution "
+                    "bypass of the binary whitelist; run such a payload through "
+                    "the whitelist in its own name instead."
+                ),
+            )
+        return self._admit_command_region(cmd[payload_start:], "timer")
+
+    def _check_wiz(self, cmd: list[str]) -> GuardFeedback | None:
+        """Re-admit the ``--command`` value of an LLM-authored ``wiz`` argv.
+
+        ``wiz`` sits in the whitelist as a k8s-domain transport primitive,
+        and ``wiz task exec --command <value>`` makes the VALUE a command
+        region the remote side runs — structurally the same hole the timer
+        payload had: Gate ① sees only ``cmd[0] == wiz``, so an interpreter
+        or any non-whitelisted binary riding in the value executed with no
+        whitelist opinion at all. Channel-assembled wiz calls (the transport
+        layer building ``wiz task exec --command`` around an already-checked
+        command) never reach this checker — only an LLM explicitly starting
+        its argv with ``wiz`` does.
+        """
+        values = _wiz_command_values(cmd)
+        if not values:
+            # A trailing ``--command`` with no value token is a malformed
+            # exec shape (wiz's own parser would error out), but fail closed
+            # here too rather than admit a carrier whose payload region is
+            # unspecified — non-exec shapes simply never spell ``--command``.
+            if any(a == "--command" for a in cmd[1:]):
+                return GuardFeedback(
+                    allowed=False,
+                    constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                    reason="wiz --command is missing its value",
+                    offending="--command",
+                    compliant_form=(
+                        "Pass the remote command as the flag's value: "
+                        "`wiz task exec --command '<cmd>'`."
+                    ),
+                )
+            return None  # not an exec shape (task list / login / …): nothing rides
+        for value in values:
+            try:
+                argv = shlex.split(value)
+            except ValueError:
+                argv = value.split()
+            feedback = self._admit_command_region(argv, "wiz task exec --command")
+            if feedback is not None:
+                return feedback
+        return None
+
+    # ── payload-region readmission ────────────────────────────────────
+
+    def _admit_command_region(
+        self, argv: list[str], carrier: str
+    ) -> GuardFeedback | None:
+        """Admit a carrier's command region through Gates ① and ③.
+
+        Gate ① (binary whitelist) and Gate ③ (per-binary checkers) both key
+        on ``cmd[0]`` alone, so a second command riding INSIDE a whitelisted
+        carrier's argv — the timer payload of ``systemd-run``, the
+        ``--command`` value of ``wiz task exec`` — reached execution meeting
+        neither. This is the hole-class fix: the region passes the SAME
+        admission judgment a directly-executed command would.
+
+        Two shapes, mirroring how the region reaches the target:
+          argv form    ``… rm -f /tmp/x.log`` — the region IS an argv; its
+                       head must be whitelisted and its checker replayed.
+          script form  ``… sh -c '<script>'`` — the region is a script the
+                       TARGET's shell parses; bashfacts decomposes it and
+                       every segment (plus every nested ``$()`` body) is
+                       admitted segment by segment.
+        """
+        if not argv:
+            return GuardFeedback(
+                allowed=False,
+                constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                reason=f"{carrier} payload is empty — nothing to arm",
+                offending="",
+            )
+        head = Path(argv[0]).name
+        if head in _PAYLOAD_INTERPRETERS:
+            # Script form, exactly ``sh -c '<script>'``: a bare ``sh <file>``
+            # runs a script FILE whose contents no gate can see, and a $0
+            # fourth token is a shape no skill teaches.
+            if len(argv) != 3 or argv[1] != "-c" or not argv[2].strip():
+                return GuardFeedback(
+                    allowed=False,
+                    constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                    reason=(
+                        f"{carrier} payload interpreter form is only `sh -c '<script>'`"
+                    ),
+                    offending=head,
+                    compliant_form=(
+                        "Put the whole recovery script in ONE quoted string: "
+                        "`sh -c '<cmd> [; <cmd>…]'`. A bare interpreter runs "
+                        "a script file the guard cannot see."
+                    ),
+                )
+            return self._admit_script(argv[2], carrier)
+        if head not in self.allowed_commands and head not in _READONLY_BINARIES:
+            return GuardFeedback(
+                allowed=False,
+                constraint=ViolatedConstraint.UNKNOWN_BINARY,
+                reason=f"{carrier} payload binary not allowed: {head}",
+                offending=head,
+                is_hard_floor=True,
+                compliant_form=(
+                    "Payload commands must be whitelisted binaries: "
+                    + ", ".join(sorted(self.allowed_commands))
+                    + " (read-only diagnostics are allowed too). Anything "
+                    "else must run in its own name through the whitelist."
+                ),
+            )
+        return self._replay_payload_checker(head, argv, carrier)
+
+    def _admit_script(self, script: str, carrier: str) -> GuardFeedback | None:
+        """Admit a ``sh -c`` script payload via bashfacts decomposition."""
+        # Fail closed on 2+ backslashes before a newline: bash scans
+        # left-to-right, so an EVEN backslash run leaves the newline UNescaped
+        # — a command separator — while the fold below would splice the next
+        # command into the current word (`echo a\\<NL>rm -f /tmp/x` really
+        # runs rm; folded it parses as one `echo a\rm …` segment and the rm
+        # escapes the segment check). No skill form uses the pattern.
+        if re.search(r"\\{2,}\n", script):
+            return GuardFeedback(
+                allowed=False,
+                constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                reason=(
+                    f"{carrier} payload uses 2+ backslashes before a newline "
+                    "— ambiguous line continuation"
+                ),
+                offending="\\\\",
+                compliant_form=(
+                    "Use a single backslash per line continuation, one "
+                    "command per line."
+                ),
+            )
+        # ``\<newline>`` is bash line-continuation (the two characters are
+        # DELETED); the skills' multi-line doc forms carry it inside the
+        # quoted script. The scanner does not consume the sequence (a raw
+        # parse yields an empty-head segment), so fold it first — a faithful
+        # mirror of the TARGET shell's own preprocessing, not a relaxation.
+        facts = parse_script(script.replace("\\\n", ""))
+        return self._admit_script_facts(facts, carrier)
+
+    def _admit_script_facts(
+        self, facts: ScriptFacts, carrier: str, *, subst_probe: bool = False
+    ) -> GuardFeedback | None:
+        """Admit every segment of a parsed payload script.
+
+        ``subst_probe`` tightens the head set to :data:`_PAYLOAD_SUBST_PROBES`
+        — used for ``$(...)`` bodies, whose output feeds the OUTER command's
+        argv and must not smuggle flags or arbitrary values.
+        """
+        if facts.errors:
+            return GuardFeedback(
+                allowed=False,
+                constraint=ViolatedConstraint.UNKNOWN,
+                reason=(
+                    f"{carrier} payload script failed structural parse: "
+                    f"{facts.errors[0].message}"
+                ),
+                offending="",
+                is_hard_floor=False,
+                compliant_form=(
+                    "Split the payload into simpler shapes: plain "
+                    "`;` / `&&` / `||` sequences of whitelisted commands."
+                ),
+            )
+        if not facts.segments:
+            return GuardFeedback(
+                allowed=False,
+                constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                reason=f"{carrier} payload script is empty",
+                offending="",
+            )
+        for seg in facts.segments:
+            if seg.background:
+                return GuardFeedback(
+                    allowed=False,
+                    constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                    reason=f"{carrier} payload backgrounds a command (`&`)",
+                    offending="&",
+                    compliant_form=(
+                        "Run the recovery steps sequentially — a backgrounded "
+                        "step escapes the timer's completion tracking."
+                    ),
+                )
+            if not isinstance(seg.command, CommandFacts):
+                return GuardFeedback(
+                    allowed=False,
+                    constraint=ViolatedConstraint.UNKNOWN,
+                    reason=f"{carrier} payload uses a subshell `( ... )`",
+                    offending="(",
+                    compliant_form=(
+                        "Write the steps as a plain sequence (`;` `&&` `||`); "
+                        "subshells are outside the reviewed payload grammar."
+                    ),
+                )
+            head = ""
+            if seg.command.name is not None:
+                name_word = seg.command.name
+                head = (
+                    name_word.value if name_word.value is not None else name_word.text
+                )
+            if not head:
+                return GuardFeedback(
+                    allowed=False,
+                    constraint=ViolatedConstraint.UNKNOWN,
+                    reason=(f"{carrier} payload has a segment with no command head"),
+                    offending="",
+                )
+            if head in _PAYLOAD_INTERPRETERS:
+                return GuardFeedback(
+                    allowed=False,
+                    constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                    reason=(
+                        f"{carrier} payload script nests an interpreter ({head!r})"
+                    ),
+                    offending=head,
+                    compliant_form=(
+                        "The payload is already parsed as a shell script — "
+                        "write the commands directly; a nested sh -c only "
+                        "hides them."
+                    ),
+                )
+            if head in _NESTED_CARRIERS:
+                return GuardFeedback(
+                    allowed=False,
+                    constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                    reason=(f"{carrier} payload script nests carrier {head!r}"),
+                    offending=head,
+                    compliant_form=(
+                        "One carrier is enough — run the inner command "
+                        "directly in the payload."
+                    ),
+                )
+            if subst_probe:
+                head_ok = head in _PAYLOAD_SUBST_PROBES
+            else:
+                head_ok = head in self.allowed_commands or head in _READONLY_BINARIES
+            if not head_ok:
+                return GuardFeedback(
+                    allowed=False,
+                    constraint=ViolatedConstraint.UNKNOWN_BINARY,
+                    reason=(
+                        f"{carrier} payload"
+                        + (" $(...) body" if subst_probe else " script")
+                        + f" command not allowed: {head}"
+                    ),
+                    offending=head,
+                    is_hard_floor=True,
+                    compliant_form=(
+                        "Payload commands must be whitelisted binaries: "
+                        + ", ".join(sorted(self.allowed_commands))
+                        + (
+                            "; inside $(…) only PID probes are allowed: "
+                            + ", ".join(sorted(_PAYLOAD_SUBST_PROBES))
+                            if subst_probe
+                            else " (read-only diagnostics are allowed too)"
+                        )
+                    ),
+                )
+            for redirect in seg.command.redirects:
+                target = redirect.target.value if redirect.target is not None else None
+                if target is None or not target.startswith(_PAYLOAD_REDIRECT_SINKS):
+                    shown = target if target is not None else "?"
+                    return GuardFeedback(
+                        allowed=False,
+                        constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                        reason=(
+                            f"{carrier} payload redirects to non-sink target: {shown}"
+                        ),
+                        offending=shown,
+                        compliant_form=(
+                            "Only discard sinks are allowed in payloads "
+                            "(e.g. `2>/dev/null`); the recovery steps write "
+                            "no files."
+                        ),
+                    )
+            # Per-binary checker replay, dynamic words sentinel-ized: a
+            # literal flag stays a literal (structural checks still fire).
+            # A dynamic word (``$(…)`` / ``$VAR`` — bashfacts leaves
+            # ``value=None``; quoted/escaped literals DO carry a value) is
+            # admitted ONLY on kill, whose dynamic PID target is the
+            # payloads' one legal dynamic form (``kill -CONT $(pidof x)``).
+            # Everywhere else a dynamic word would expand INTO the command's
+            # argv on the target and bypass the checker's literal-structure
+            # judgment (``chmod $MODE 777`` with MODE=-R is a recursive chmod
+            # the static replay cannot see; ``rm -f $(…)`` can widen to a
+            # multi-file delete the single-file checker forbids).
+            replay = [head]
+            for word in seg.command.args:
+                if word.value is not None:
+                    replay.append(word.value)
+                elif head == "kill":
+                    # kill's dynamic PID operand: admitted only in the two
+                    # vetted shapes. (a) the word carries a script part — a
+                    # ``$(…)`` / backtick body, already checked recursively
+                    # below against the PID-probe set; (b) a bare ``$VAR``.
+                    # Anything else — notably ``$((…))`` arithmetic — fails
+                    # closed: bashfacts parses an arithmetic word as ONE
+                    # opaque token with NO script part, so a backtick riding
+                    # inside it (``kill -CONT $((`evil`)``) executes on the
+                    # target while the recursion below never sees it. No
+                    # skill form uses arithmetic PIDs.
+                    if not any(
+                        p.script is not None for p in word.parts
+                    ) and not re.fullmatch(r"\$[A-Za-z_][A-Za-z0-9_]*", word.text):
+                        return GuardFeedback(
+                            allowed=False,
+                            constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                            reason=(
+                                f"{carrier} payload: kill's dynamic PID "
+                                f"operand must be a PID probe or a bare $VAR "
+                                f"(got {word.text!r})"
+                            ),
+                            offending=word.text,
+                            compliant_form=(
+                                "Use `$(pidof …)` / `$(pgrep …)` / a bare "
+                                "$PID variable as kill's PID operand. "
+                                "Arithmetic or parameter-expanded operands "
+                                "are outside the reviewed payload grammar."
+                            ),
+                        )
+                    replay.append("999999")
+                else:
+                    return GuardFeedback(
+                        allowed=False,
+                        constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+                        reason=(
+                            f"{carrier} payload: {head} has a dynamic argument "
+                            f"({word.text!r}) — only kill's PID target may be "
+                            "dynamic"
+                        ),
+                        offending=word.text,
+                        compliant_form=(
+                            "Literalize every argument (file paths, flags, "
+                            "modes). Only the PID operand of kill may come "
+                            "from `$(pidof …)` / `$(pgrep …)` / a $PID "
+                            "variable."
+                        ),
+                    )
+            feedback = self._replay_payload_checker(head, replay, carrier)
+            if feedback is not None:
+                return feedback
+            # ``$(…)`` / backtick bodies: PID probes only, recursively.
+            for word in (seg.command.name, *seg.command.args):
+                if word is None:
+                    continue
+                for part in word.parts:
+                    if part.script is None:
+                        continue
+                    feedback = self._admit_script_facts(
+                        part.script, carrier, subst_probe=True
+                    )
+                    if feedback is not None:
+                        return feedback
+        return None
+
+    def _replay_payload_checker(
+        self, head: str, argv: list[str], carrier: str
+    ) -> GuardFeedback | None:
+        """Replay the head's per-binary checker on a payload argv, prefixing
+        the verdict with the carrier so the model sees WHICH layer fired.
+
+        Evidence spans are dropped: their offsets index the payload's own
+        argv, not the carrier command the caller would display.
+        """
+        checker = self._binary_checkers.get(head)
+        if checker is None:
+            return None
+        feedback = checker(argv)
+        if feedback is None:
+            return None
+        return GuardFeedback(
+            allowed=False,
+            constraint=feedback.constraint,
+            reason=f"{carrier} payload: {feedback.reason}",
+            offending=feedback.offending,
+            is_hard_floor=feedback.is_hard_floor,
+            compliant_form=feedback.compliant_form,
+        )
+
+    def _check_rm(self, cmd: list[str]) -> GuardFeedback | None:
+        """Admit ``rm`` ONLY as the idempotent single-file cleanup tail.
+
+        Every host skill ends a manual early-recovery with
+        ``rm -f <file>.bak`` / ``rm -f <fill-file>`` — deleting a file the
+        DRILL itself created (the backup, the fallocate fill). That is a
+        cleanup of the drill's own artifact, the host twin of
+        ``kubectl delete <debug-pod>``: bounded, and the file has no value
+        outside the drill. ``-f`` makes it idempotent — the timer may have
+        cleaned the file already, and the tail must not fail on that.
+
+        Recursive forms have NO such boundary (``-r`` walks a whole tree the
+        drill never created) and are refused outright — the same reasoning
+        that gives kubectl ``drain`` its dedicated flag guard while bare
+        ``delete`` needs none. The quoted-token ``rm -rf`` hard floor in
+        Gate ② keeps covering the ``sh -c '…'`` forms; this checker covers
+        the SEPARATE-token forms (``rm -rf /etc`` splits into three argv
+        tokens, which the per-token blacklist regex cannot see).
+        """
+        args = cmd[1:]
+        if len(args) == 2 and args[0] == "-f" and not args[1].endswith("/"):
+            return None
+        flag = next((a for a in args if a.startswith("-")), args[0] if args else "rm")
+        return GuardFeedback(
+            allowed=False,
+            constraint=ViolatedConstraint.UNSUPPORTED_FORM,
+            reason=(
+                "rm is admitted only as `rm -f <single-file>` — deleting one "
+                "drill-created file (backup / fill artifact)"
+            ),
+            offending=flag,
+            compliant_form=(
+                "Delete exactly one drill-created file: `rm -f <path>`. "
+                "Recursive forms (-r/-R/-rf/--recursive) walk whole trees "
+                "with no drill boundary and are never admitted."
+            ),
+        )
+
     def _check_chmod(self, cmd: list[str]) -> GuardFeedback | None:
         """Refuse recursive chmod — a whole-tree permission rewrite."""
         for arg in cmd[1:]:
@@ -645,9 +1388,12 @@ class ToolGuard:
                     ),
                 )
         listening = any(
-            arg in ("-l", "-lk", "-kl", "--listen") or (
-                arg.startswith("-") and not arg.startswith("--")
-                and "l" in arg[1:] and arg[1:].isalpha()
+            arg in ("-l", "-lk", "-kl", "--listen")
+            or (
+                arg.startswith("-")
+                and not arg.startswith("--")
+                and "l" in arg[1:]
+                and arg[1:].isalpha()
             )
             for arg in cmd[1:]
         )
@@ -676,9 +1422,10 @@ class ToolGuard:
         machine. The argument shape is the whole difference, so it is what gets
         checked. Without ``-k`` fuser only lists holders and is left alone.
         """
-        if not any(a == "-k" or (
-            a.startswith("-") and not a.startswith("--") and "k" in a[1:]
-        ) for a in cmd[1:]):
+        if not any(
+            a == "-k" or (a.startswith("-") and not a.startswith("--") and "k" in a[1:])
+            for a in cmd[1:]
+        ):
             return None
         targets = [a for a in cmd[1:] if not a.startswith("-")]
         port_spec = re.compile(r"^\d+/(tcp|udp)$")
@@ -828,8 +1575,7 @@ class ToolGuard:
                     offending=arg,
                     compliant_form=(
                         "Process names and command substitution are not "
-                        "resolved here (exec-form runs no shell). "
-                        + resolve_first
+                        "resolved here (exec-form runs no shell). " + resolve_first
                     ),
                 )
         if not pid_seen:
@@ -840,6 +1586,28 @@ class ToolGuard:
                 compliant_form=resolve_first,
             )
         return None
+
+    def audit_rejection(self, cmd: list[str], feedback: GuardFeedback) -> None:
+        """Record a REJECTION audit entry.
+
+        Both execution call sites raise on rejection BEFORE ``audit_log``
+        can fire (and a rejection has no ``CommandResult`` to log), so
+        without this entry the guard's own interception left no trace.
+        Same JSONL shape as ``audit_log``, plus the full feedback —
+        including evidence spans for audit / SSE / TUI highlight
+        (design 4.7: a rejection is a fact, and facts get recorded).
+        """
+        log_entry = {
+            "timestamp": now_iso(),
+            "rejected": True,
+            "command": cmd,
+            "constraint": feedback.constraint.value,
+            "reason": feedback.reason,
+            "offending": feedback.offending,
+            "is_hard_floor": feedback.is_hard_floor,
+            "evidence": [asdict(span) for span in feedback.evidence],
+        }
+        logger.info(json.dumps(log_entry, ensure_ascii=False))
 
     def audit_log(
         self,
