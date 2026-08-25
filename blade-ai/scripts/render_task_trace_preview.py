@@ -45,6 +45,8 @@ for t in tasks:
     tid = t["task_id"]
     d = details.get(tid, {})
     spec = jload(d.get("fault_spec")) or {}
+    fault_target = spec.get("fault_target", "")
+    fault_action = spec.get("fault_action", "")
     pm = jload(d.get("postmortem")) or {}
     ver = jload(d.get("verification")) or {}
     feas = jload(d.get("feasibility_report")) or {}
@@ -67,8 +69,8 @@ for t in tasks:
         "use_case": spec.get("case_resource_path") or spec.get("use_case_name", ""),
         "user_desc": spec.get("user_description", ""),
         "scope": spec.get("scope", ""),
-        "blade_target": spec.get("blade_target", ""),
-        "blade_action": spec.get("blade_action", ""),
+        "fault_target": fault_target,
+        "fault_action": fault_action,
         "params": spec.get("params") or {},
         "duration_seconds": spec.get("duration_seconds"),
         "target_ns": tgt.get("namespace", ""),
@@ -217,7 +219,7 @@ function select(i) {
 }
 
 function renderDetail(t) {
-  const faultLabel = [t.scope, t.blade_target, t.blade_action].filter(Boolean).join("-");
+  const faultLabel = [t.scope, t.fault_target, t.fault_action].filter(Boolean).join("-");
   const paramStr = Object.entries(t.params || {}).map(([k,v]) => `${k}=${v}`).join(", ");
 
   // 时间线（来自 postmortem 的 Timeline 段）——这是当前数据里唯一的"阶段序列"

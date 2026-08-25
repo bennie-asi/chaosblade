@@ -642,7 +642,7 @@ async def main() -> None:
                 "chaos_task",
                 """
                 SELECT task_id, task_state, stage, phase, operation, skill_name,
-                       blade_uid, namespace, target_name, tenant_id, error,
+                       experiment_uid, namespace, target_name, tenant_id, error,
                        finished_at, duration_ms, gmt_create, gmt_modified
                 FROM tasks WHERE task_id = $1
                 """,
