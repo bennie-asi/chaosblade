@@ -69,9 +69,11 @@ kubectl exec <pod-name> -n <namespace> -- df -h <PVC挂载路径>
 
 # 1) 填充量 = 文件系统总容量 × 目标使用率 − 当前已用量（本用例目标为打满，可取可用量 − 少量保留）
 
-# 2) 先武装定时清理（容器内后台定时器，到期自动删除填充文件），再填充
+# 2) 先武装定时清理（容器内后台定时器，到期自动删除填充文件），再填充。
+#    两条命令分两次独立执行——不能用 && 串联：第二段 kubectl 会沦为第一条 exec
+#    载荷（sh -c）的死参数，填充静默丢失
 kubectl exec <pod-name> -n <namespace> -- sh -c \
-  '( sleep <duration>; rm -f <PVC挂载路径>/fill_file ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; rm -f <PVC挂载路径>/fill_file ) >/dev/null 2>&1 &'
 # 使用 fallocate 快速填充磁盘
 kubectl exec <pod-name> -n <namespace> -- fallocate -l <算出的填充量>G <PVC挂载路径>/fill_file
 # 或使用 dd：
@@ -80,13 +82,21 @@ kubectl exec <pod-name> -n <namespace> -- dd if=/dev/zero of=<PVC挂载路径>/f
 
 恢复命令（提前恢复）：
 ```bash
-kubectl exec <pod-name> -n <namespace> -- rm -f <PVC挂载路径>/fill_file
+# 先终止已武装的清理定时器（及仍在写入的 dd），再删除填充文件——已武装定时器不会随
+# 手动恢复取消，迟到的 rm 会误删后续轮次的填充文件（实测：第二轮 dd 写入中被上一轮
+# 300s 定时器的 rm 删掉文件名，dd 继续写 unlinked inode，空间占用持续到 dd 退出）
+kubectl exec <pod-name> -n <namespace> -- sh -c 'pkill -f fill_file; rm -f <PVC挂载路径>/fill_file'
 ```
 
 注意事项：
-- `fallocate` 分配速度快（仅分配元数据），`dd` 实际写入数据速度较慢但更真实
-- 自恢复基于注入前武装的容器内后台定时器（sleep <duration> + rm 填充文件），到期自动清理；提前恢复仍用上方手动命令
+- `fallocate` 分配速度快（仅分配元数据），`dd` 实际写入数据速度较慢但更真实（实测 19.5G
+  PVC 以 ~430MB/s 写入约 45s，dd 需 nohup 后台跑防执行通道超时）
+- 自恢复基于注入前武装的容器内后台定时器（sleep <duration> + rm 填充文件），到期自动清理
+  （实测机制正常）；提前恢复用上方手动命令，**必须先 pkill 终止定时器**，否则跨轮次幽灵
+  rm 会误删新一轮填充文件
 - 需按**增量**计算填充大小以确保磁盘使用率达到预期值（填充量 = 文件系统总容量 × 目标使用率 − 当前已用量，先用 `df -h <PVC挂载路径>` 查看）；盲目填一个大数可能越过云盘实际容量直接报 ENOSPC，也可能远达不到打满效果
+- ENOSPC 判据的触发量需超过剩余可用空间（实测：Use% 99%、Avail 112M 时，50MB 写入
+  仍成功、200MB 写入才报 `No space left on device`）
 
 ---
 

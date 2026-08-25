@@ -16,6 +16,10 @@ fault_types:
   - node-cpu-stress
   - node-network-delay
 summary: "K8s architecture and chaos engineering context: Pod lifecycle, health checks, resource model, networking, fault propagation paths, verification layer overview. Resource abbreviation table included."
+phases:
+  - plan
+  - execute
+  - verify
 ---
 
 # Kubernetes Fundamentals Q&A (for fault drills)
@@ -528,14 +532,14 @@ Pod fault
 ```
 
 **Relevance to fault drills**:
-- When designing a verification plan, the Agent should not only verify "did the fault take effect" but also "is the fault's impact as expected"
-- For example, after injecting Pod CPU fullload, beyond the CPU metric also verify that Pod's response latency, its health-check status, whether it was removed from Endpoints, and the load shift on the application's other Pods
+- When designing a verification plan, the verdict answers exactly one question: did the fault take effect on the target. Propagated effects are observational only — record evidence already in hand, never wait or sample for them
+- For example, after injecting Pod CPU fullload, the CPU metric decides the verdict; that Pod's response latency, health-check status, Endpoints membership and the load shift on other Pods are propagated effects to record if evidence is already in hand
 
 ---
 
 ### Q25: How do you distinguish "the injection took effect" from "the fault caused the expected impact"?
 
-**A25**: This is the core question of Layer 2 verification; see the full three-layer verification model in `chaos-engineering-principles.md` Q7-Q8.
+**A25**: This distinction is the heart of verification; see the layered model in `chaos-engineering-principles.md` Q7-Q8.
 
 A brief comparison:
 
@@ -544,6 +548,8 @@ A brief comparison:
 | **Did the fault take effect** | Was the ChaosBlade experiment created successfully, and was the target resource modified | `blade_status` returns success; a chaos process appears inside the Pod |
 | **Did the expected symptom appear** | Did the system state exhibit the symptom described in the fault scenario | Pod memory approaches its Limit; the application slows down |
 | **Is the impact as expected** | Is the fault's blast radius within the controllable range, with no unintended spread | Only the target Pod is affected; other Pods on the same node are healthy |
+
+Only the first two rows are verdict criteria. The third row is a propagated-effect observation: record evidence already in hand, otherwise mark the step 'expected'/'not_applicable' — never wait, retry or sample for it.
 
 ---
 

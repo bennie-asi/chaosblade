@@ -50,6 +50,12 @@
 # ⚠️ 全量/控制面 DROP 会切断 exec 依赖的通道，必须先用 systemd-run 武装定时恢复，再下 DROP。
 
 # 方案 1：仅屏蔽与 API Server 的通信（保留 SSH，恢复通道不断）
+# ⚠️ <api-server-ip> 必须按集群实际 endpoint 全量展开：apiserver 前有 SLB/
+#    多副本时是多个 VIP/IP（`kubectl get endpoints kubernetes` 可查）——每个 IP
+#    各需 INPUT/OUTPUT 两条规则；漏掉任一 IP 节点仍可达 apiserver，注入不生效。
+# ⚠️ <recovery-seconds> 窗口下限 ≈ 420s：完整判据链需要 NotReady 判定
+#    （~40–50s）+ tolerationSeconds 默认 300s（Pod 开始驱逐）+ 驱逐/重建
+#    观察与验证调用余量；窗口不足会在看到 Pod 重建前自恢复，判据链被打断。
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep <duration>
 kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
   systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-nodedown sh -c "
@@ -57,6 +63,14 @@ kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
     iptables -D OUTPUT -d <api-server-ip> -j DROP" &&
   iptables -I INPUT -s <api-server-ip> -j DROP &&
   iptables -I OUTPUT -d <api-server-ip> -j DROP
+'
+# 示例（SLB 双 VIP 10.0.0.138 / 10.0.2.200 → 4 条规则，恢复链 ; 串联保证每条 -D 都尝试）：
+kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
+  systemd-run --on-active=480s --unit=blade-restore-nodedown sh -c "
+    iptables -D INPUT -s 10.0.0.138 -j DROP; iptables -D OUTPUT -d 10.0.0.138 -j DROP;
+    iptables -D INPUT -s 10.0.2.200 -j DROP; iptables -D OUTPUT -d 10.0.2.200 -j DROP" &&
+  { iptables -I INPUT -s 10.0.0.138 -j DROP; iptables -I OUTPUT -d 10.0.0.138 -j DROP;
+    iptables -I INPUT -s 10.0.2.200 -j DROP; iptables -I OUTPUT -d 10.0.2.200 -j DROP; echo INJECTED; }
 '
 
 # 方案 2：全量断网（更彻底，模拟真实宕机）——必须内置 systemd 定时自恢复
@@ -85,4 +99,6 @@ ssh root@<node-ip> 'iptables -D INPUT -s <api-server-ip> -j DROP; iptables -D OU
 - 禁止使用无自恢复机制的全量 DROP 方案（可能导致节点永久失联）
 - systemd-run 创建的 transient timer 由宿主机 systemd(PID 1) 管理，debug Pod 被删除也不影响恢复
 - 恢复链使用 `;` 而非 `&&`，保证每条 iptables -D 都被尝试（某条规则不存在也不中断后续）
-- 建议超时设置 60-600 秒，根据 pod-eviction-timeout 与演练目标调整
+- 建议超时设置：timer 窗口（`--on-active`）下限 ≈ 420s（NotReady 判定 ~40–50s +
+  tolerationSeconds 默认 300s + 驱逐/重建观察与验证余量），上限根据演练目标调整；
+  窗口不足会在 Pod 重建前自恢复，判据链被打断

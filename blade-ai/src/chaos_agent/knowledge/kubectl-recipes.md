@@ -10,6 +10,10 @@ topics:
 fault_types:
   - all
 summary: "Long-tail kubectl subcommand recipes (get / describe / top / logs / exec / debug / patch / scale / cordon / taint / delete) with field-selector, label-selector, and JSONPath examples that the kubectl tool docstring no longer carries inline."
+phases:
+  - execute
+  - verify
+  - recover
 ---
 
 # kubectl Recipes & JSONPath Catalogue

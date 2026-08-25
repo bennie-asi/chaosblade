@@ -51,7 +51,7 @@
    ```
    ⚠️ 严禁把 `EXCLUDED_NODES`（API Server/控制面节点、kubewiz-executor Pod 所在节点）纳入任何一批。
 
-3. 记录返回的 blade_uid，用于后续恢复
+3. 记录返回的 experiment_uid，用于后续恢复
 
 > ⚠️ **注入范围与批量约束（排除节点禁止注入、其余可分批）**：目标 AZ 节点须先剔除 `EXCLUDED_NODES`，仅对剩余节点注入，必须同时满足两条不变量：
 >
@@ -94,7 +94,7 @@
 **注入恢复**：
 1. 销毁 ChaosBlade 实验：
    ```bash
-   blade destroy <blade_uid>
+   blade destroy <experiment_uid>
    ```
    AZ 网络分区场景下，DaemonSet 通道的 blade destroy 大概率无法下达（API Server 不可达）。
    依赖 `--timeout` 自动恢复。SSH 通道可逐节点 SSH 登录恢复。

@@ -84,12 +84,17 @@ ChaosBlade 不可用时，只有两条路，都不由 Agent 执行：
    这不是同一个故障（延迟 ≠ 错误码），只在验证「调用路径异常时应用如何降级」时可替代：
    ```bash
    pgrep -f <process-name>
+   # 先武装定时终止（timer 由宿主机 systemd(PID 1) 管理，到期自动 kill 掉 strace；
+   # 详见「调用延迟」case），再 attach。武装成功（输出含 Running timer as unit）后再执行
+   systemd-run --on-active=<recovery-seconds>s --unit=blade-kill-strace \
+     sh -c 'kill $(pgrep -x strace)'
    strace -p <pid> -e trace=<syscall> -T
    ```
 
 恢复命令：
 ```bash
-# 若用了上面第 2 条：取 strace 自身 PID 后终止
+# 若用了上面第 2 条：先停定时器，再取 strace 自身 PID 后终止
+systemctl stop blade-kill-strace.timer 2>/dev/null
 pgrep -f strace
 kill <pid>
 ```
@@ -99,3 +104,4 @@ kill <pid>
 - bpftrace override 功能需要内核编译时启用 CONFIG_BPF_KPROBE_OVERRIDE
 - 大多数生产内核未启用该功能，原生方案可用性有限
 - 如需替代方案，可考虑 LD_PRELOAD 注入自定义 so 库拦截 libc 函数
+- 第 2 条近似路径的定时终止、残留清理与「调用延迟」case 同款（blade-kill-strace timer；重复武装报 already loaded 时按该 case 注意事项清理残留）

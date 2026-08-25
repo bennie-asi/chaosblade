@@ -56,20 +56,22 @@ blade destroy <experiment-uid>
 ```bash
 # 先武装定时移回（timer 由宿主机 systemd(PID 1) 管理，到期自动还原），
 # 再移走文件。移走而非删除：原文件即备份，同文件系统内为原子操作，不存在
-# 「备份成功但删除失败」或「备份失败却已删除」的中间态
+# 「备份成功但删除失败」或「备份失败却已删除」的中间态。
+# 两条命令分两次独立执行（执行通道不支持 && 串联）；武装成功（输出含 Running timer as unit）后再执行移走
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-filedel \
-  mv <filepath>.orig <filepath> &&
+  mv <filepath>.orig <filepath>
 mv <filepath> <filepath>.orig
 ```
 
 恢复命令（timer 到期前可提前手动恢复）：
 ```bash
 # 提前恢复：移回原路径，不留残留备份文件（同时停掉已武装的 timer）
-systemctl stop blade-restore-filedel 2>/dev/null
+systemctl stop blade-restore-filedel.timer 2>/dev/null
 mv <filepath>.orig <filepath>
 ```
 
 注意事项：
 - 操作前必须备份，否则数据不可恢复
-- 自恢复基于 systemd-run transient timer 到期自动 `mv` 回原路径，补齐了 ChaosBlade `--timeout` 的自恢复能力；`&&` 串联保证武装失败时不会执行移走操作
+- 自恢复基于 systemd-run transient timer 到期自动 `mv` 回原路径，补齐了 ChaosBlade `--timeout` 的自恢复能力；武装与移走分两次独立执行，须确认武装成功（输出含 `Running timer as unit`）后再执行移走（等价于 && 串联的失败短路保证）
 - 演练环境不要对无法重建的唯一数据文件做此操作
+- 同名 transient timer 重复武装会报 `Unit blade-restore-filedel.service was already loaded`（上次武装命令执行失败时 unit 以 failed 状态残留所致）；重武装前先清理残留：`systemctl stop blade-restore-filedel.service; systemctl reset-failed blade-restore-filedel.service`（武装命令成功执行过的 unit 无残留，可直接重武装）

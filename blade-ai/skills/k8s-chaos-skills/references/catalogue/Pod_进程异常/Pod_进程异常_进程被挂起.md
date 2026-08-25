@@ -32,14 +32,20 @@
    ```
    - `--process`：目标进程名，必须与 ps aux 输出一致
    - 原理：向目标进程发送 SIGSTOP 信号，进程被内核挂起，无法处理任何请求但不会退出
-4. 记录返回的 blade_uid，用于后续恢复
+4. 记录返回的 experiment_uid，用于后续恢复
 
 **注入验证**：
-1. 在目标 Pod 内确认进程状态为 T（Stopped）：
+1. 在目标 Pod 内确认进程状态为 T（Stopped；管道必须包在 sh -c 载荷内——命令是 argv 直传
+   无 shell，裸 ps 形态下 `|`/`grep` 会沦为 ps 的字面参数，过滤静默失效）：
    ```bash
-   kubectl exec <pod-name> -n <namespace> -- ps aux | grep <进程名>
+   kubectl exec <pod-name> -n <namespace> -- sh -c 'ps aux | grep <进程名>'
    ```
-   确认 STAT 列显示 T（表示进程被 SIGSTOP 挂起）
+   procps 镜像确认 STAT 列显示 T（表示进程被 SIGSTOP 挂起）；**busybox 镜像 ps 无 STAT 列**
+   （输出仅 PID/USER/TIME/COMMAND，实测 busybox:1.33），改用 /proc 判据：
+   ```bash
+   kubectl exec <pod-name> -n <namespace> -- sh -c 'grep State /proc/$(pgrep -x <进程名>)/status'
+   ```
+   输出 `State:\tT (stopped)` 表示挂起（正常运行为 `State:\tS (sleeping)`）
 2. 验证应用端口无响应：
    ```bash
    kubectl exec <pod-name> -n <namespace> -- wget -qO- --timeout=5 localhost:<port>
@@ -55,15 +61,16 @@
 **注入恢复**：
 1. 销毁 ChaosBlade 实验（会向进程发送 SIGCONT 恢复执行）：
    ```bash
-   blade destroy <blade_uid>
+   blade destroy <experiment_uid>
    ```
 2. 若 Liveness 探针已触发容器重启，等待新 Pod Ready 即可
 3. 或等待 `--timeout`（`<duration>`）到期后 ChaosBlade 自动发送 SIGCONT 恢复
 
 **恢复验证**：
-1. 确认进程恢复正常运行状态：
+1. 确认进程恢复正常运行状态（同样包在 sh -c 载荷内，理由同注入验证；busybox 镜像用
+   注入验证第 1 条的 /proc State 判据，恢复后为 `S (sleeping)`）：
    ```bash
-   kubectl exec <pod-name> -n <namespace> -- ps aux | grep <进程名>
+   kubectl exec <pod-name> -n <namespace> -- sh -c 'ps aux | grep <进程名>'
    ```
    确认 STAT 列不再显示 T
 2. 验证应用端口恢复响应：
@@ -95,23 +102,29 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'command -v kill; command -v pgr
 
 注入命令（**先武装定时恢复，再注入**；到期自动发送 SIGCONT，补齐自恢复能力）：
 ```bash
-# 武装定时恢复（容器内后台定时器，必须重定向后台化，否则 exec 挂住；
-# grep -vw $$ 排除定时器进程自身——其 cmdline 也包含进程名，不排除会混入 pgrep 结果）
+# 武装定时恢复（容器内后台定时器，必须重定向后台化，否则 exec 挂住）
+# 两条命令分两次独立执行——不能用 && 串联：第二段 kubectl 会沦为第一条 exec
+# 载荷（sh -c）的死参数，挂起静默丢失
 kubectl exec <pod-name> -n <namespace> -- sh -c \
-  '( sleep <duration>; kill -CONT $(pgrep -f <process-name> | grep -vw $$) ) >/dev/null 2>&1 &' &&
-# 挂起目标进程（发送 SIGSTOP；同样排除自身，否则 PID 序不利时 sh 会先冻结自己、目标漏发）
-kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -STOP $(pgrep -f <process-name> | grep -vw $$)'
+  '( sleep <duration>; kill -CONT $(pgrep -x <process-name>) ) >/dev/null 2>&1 &'
+# 挂起目标进程（发送 SIGSTOP）
+kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -STOP $(pgrep -x <process-name>)'
 ```
+**必须用 `pgrep -x`（按进程名精确匹配），严禁 `pgrep -f`（按 cmdline 匹配）+ `grep -vw $$` 排除的老写法**——实测后者有两处误匹配（busybox:1.33 复现）：
+- ① 上面武装的定时器后台 sh 的 cmdline 含进程名字面量，注入时会被一起 SIGSTOP 冻结——定时器被冻结则到期不再触发，**自恢复链断裂**
+- ② `$()`/管道的瞬时子进程在 fork 后 exec 前 cmdline 是 sh 副本（同样含进程名字面量），pgrep 扫描命中、kill 执行时已退出——报 `can't kill pid <N>: No such process`（rc=1）
+- 实测对照：`pgrep -f httpd` 输出目标 PID + 瞬时 PID 两个值，`pgrep -x httpd` 只输出目标 PID
+- `-x` 按进程名（comm）匹配，定时器/瞬时进程的进程名是 sh/pgrep/grep 不会命中；<process-name> 须与 `ps aux` 输出 COMMAND 列首词一致（进程名超 15 字符会被内核截断，截断名即 comm）
 
 恢复命令：
 ```bash
 # 恢复目标进程（发送 SIGCONT；SIGCONT 幂等，武装的定时器后续再触发也无副作用）
-kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -CONT $(pgrep -f <process-name> | grep -vw $$)'
+kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -CONT $(pgrep -x <process-name>)'
 ```
 
 注意事项：
-- 必须确认实际进程名（通过 `ps aux` 确认），不可凭服务名猜测
-- 自恢复基于注入前武装的容器内后台定时器（sleep <duration> + SIGCONT），到期自动恢复；提前恢复仍用上方手动命令
+- 必须确认实际进程名（通过 `ps aux` 确认），不可凭服务名猜测；确认的进程名同时就是 `pgrep -x` 的匹配词，两者必须一致
+- 自恢复基于注入前武装的容器内后台定时器（sleep <duration> + SIGCONT），到期自动恢复；提前恢复仍用上方手动命令（容器内无 systemd，定时器无法像节点侧用例那样先 stop——后台 sleep 定时器不可取消，只能等它到期空触发，SIGCONT 幂等无害）
 - 若 Liveness 探针已触发容器重启，进程会自动恢复（新容器中进程正常启动）
 - 效果与 ChaosBlade 完全等价，ChaosBlade 内部也是发送 SIGSTOP/SIGCONT
 
@@ -137,7 +150,8 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -CONT $(pgrep -f <process-
    kubectl get pod <pod-name> -n <namespace> -o jsonpath={.status.qosClass}
    ```
 
-2. 拼出 cgroup 路径。**三处转换必须做对，否则路径不存在**：
+2. 拼出 cgroup 路径（以下转换规则仅适用 **systemd cgroup driver** 的 `.slice`/`.scope` 布局；cgroupfs driver 布局不同，这些转换拼不出正确路径——**推荐所有场景都直接用下方 find 实测定位**）。
+   systemd driver 的三处转换：
    - Pod UID 里的 `-` 全部换成 `_`（`314aae5f-2566-…` → `pod314aae5f_2566_…`）
    - containerID 去掉 `containerd://` 前缀，包成 `cri-containerd-<id>.scope`
    - **按 QoS 插入中间层**（这是最容易漏的一层）：
@@ -203,7 +217,10 @@ kubectl debug node/<node-name> --image=<verified-cluster-image> --profile=sysadm
   此时应记录为「故障导致重启」，且**不要再写 THAWED**（路径已不存在，写入会报错）
 - 冻结期间 `kubectl exec <pod>` 会挂住 —— 所有验证都从节点侧或外部 Pod 做
 - `freezer.state` 权限实测为 `-rw-r--r-- root root`，`chroot /host` 后可写
-- 路径依赖 **systemd cgroup driver**（`.slice`/`.scope` 命名）。若节点用 cgroupfs driver，
-  路径形如 `/sys/fs/cgroup/freezer/kubepods/besteffort/pod<UID>/<containerID>/`，
-  本用例未覆盖 —— 用上面的 `find` 命令实测确认后再操作
+- cgroup 路径形态随节点 cgroup driver 而变：systemd driver 为 `.slice`/`.scope` 命名（上面拼路径规则），cgroupfs driver 为 `/sys/fs/cgroup/freezer/kubepods/<qos小写>/pod<UID>/<containerID>/`（实测 ACK 集群即此形态，且 Pod UID 保留连字符不转下划线、containerID 为裸 ID 不包 scope）；两种形态均以 find 实测定位为准
+- 手动提前恢复后，此前武装的 timer 仍存活（pending 状态），立即重武装同名 unit 会报
+  `Unit blade-thaw-<containerID前12位>.timer already exists`（实测复现；注入命令的
+  `&&` 串联保证此时 FROZEN 不会写入）；先 `systemctl stop blade-thaw-<containerID前12位>.timer`
+  清掉 pending timer 再重武装，或等它到期触发（transient timer 触发后自动清理，
+  THAWED 幂等无害）
 

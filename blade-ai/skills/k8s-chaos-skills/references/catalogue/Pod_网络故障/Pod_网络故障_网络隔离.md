@@ -34,12 +34,12 @@
    - 不指定 `--source-port`/`--destination-port`/`--source-ip`/`--destination-ip` 时为全量丢包
    - `--timeout`：实验自动过期时间（秒），到期后 ChaosBlade 自动撤销规则
    - `--network-traffic`：可选，指定方向 `in`（入方向丢包）或 `out`（出方向丢包），不指定则双向丢包
-4. 记录返回的 blade_uid，用于后续恢复
+4. 记录返回的 experiment_uid，用于后续恢复
 
 **注入验证**：
 1. **（主证据，必做）** 确认实验已生效：
    ```bash
-   blade status --uid <blade_uid>
+   blade status --uid <experiment_uid>
    ```
    状态为 Success/Running 即表示丢包规则已下到目标 Pod 的网络命名空间。
 2. **（只做与本次 `--network-traffic` 匹配的分支）** 其余方向的现象在本次注入下**不可能出现**，直接标记为 `expected` 并跳过：
@@ -73,7 +73,7 @@
 **注入恢复**：
 1. 销毁 ChaosBlade 实验：
    ```bash
-   blade destroy <blade_uid>
+   blade destroy <experiment_uid>
    ```
 2. 如 Pod 因健康检查失败被重启，等待新 Pod Ready
 

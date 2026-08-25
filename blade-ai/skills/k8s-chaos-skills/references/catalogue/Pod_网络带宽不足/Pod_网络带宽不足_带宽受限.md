@@ -33,10 +33,12 @@
 
    **路径 A —— 容器内确认是 iproute2 tc**（需 NET_ADMIN；`CapEff` 全零的容器会报 EPERM）。
    **先武装定时自删，再注入规则**（后台进程与目标容器同 netns，到期自动移除规则，
-   补齐自恢复能力；必须重定向后台化，否则 exec 挂住）：
+   补齐自恢复能力；必须重定向后台化，否则 exec 挂住）。
+   两条命令分两次独立执行——不能用 && 串联：第二段 kubectl 会沦为第一条 exec
+   载荷（sh -c）的死参数，注入静默丢失：
    ```bash
    kubectl exec <pod-name> -n <namespace> -- sh -c \
-     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &'
    kubectl exec <pod-name> -n <namespace> -- \
      tc qdisc add dev eth0 root tbf rate <rate> burst <burst> latency <latency>
    ```
@@ -61,9 +63,10 @@
    kubectl get pod <pod-name> -n <namespace> \
      -o jsonpath='{range .status.ephemeralContainerStatuses[*]}{.name}{"="}{.state}{"\n"}{end}'
 
-   # 3) 经载体注入。同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）
+   # 3) 经载体注入。同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）。
+   #    两条命令分两次独立执行——不能用 && 串联（第二段会沦为第一条 exec 载荷的死参数）
    kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- sh -c \
-     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &'
    kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- \
      tc qdisc add dev eth0 root tbf rate <rate> burst <burst> latency <latency>
    ```
@@ -94,15 +97,16 @@
    ```
    输出应包含 `qdisc tbf ... rate <注入速率> burst ... lat ...`
 
-2. 测吞吐，用「注入前 vs 注入后」的速率差作为判据。**不要用小请求测** ——
-   限速不影响单个小包的时延，几 KB 的请求在 1mbit 下仍是毫秒级返回，看起来「没生效」：
-   ```bash
-   # 拉一个足够大的对象（>= 1MB），只看速率不要正文
-   kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- \
-     curl -s -o /dev/null -w '%{speed_download} bytes/s in %{time_total}s' --max-time 60 <大文件地址>
-   ```
-   判据：`speed_download` 应落在 `rate` 附近（如 `1mbit` ≈ 125000 bytes/s，允许 ±30% 偏差）。
-   若与基线相比无明显下降，检查 `burst` 是否过大（相当于没限速）或测试对象太小。
+2. 测吞吐，用「注入前 vs 注入后」的速率差作为判据。**tbf 只限出方向（实测确证：
+   1mbit 挂载中入向下载仍可达 1365KB/s 不受限）—— 判据必须测出向上传，不能测下载**。
+   若业务是下载型流量，tbf 无法产生可观测现象，须换 ifb 重定向（不在本用例范围）
+   或改选其他方案。测法：在目标 Pod 内往外发大流量（如 `dd if=/dev/zero bs=1M count=N | nc <接收端> <port>`
+   计时，接收端用另一台可达主机的 `nc -l` / `socat TCP-LISTEN` 落盘），
+   比较注入前后耗时。**不要用小请求测** —— 限速不影响单个小包的时延，
+   几 KB 的请求在 1mbit 下仍是毫秒级返回，看起来「没生效」
+   判据：出向上传速率应落在 `rate` 附近（如 `1mbit` ≈ 125KB/s，实测 1mbit 下上传约
+   227KB/s、基线 ≥ 8MB/s，约 35 倍差；允许 ±30% 偏差）。
+   若与基线相比无明显下降，检查 `burst` 是否过大（相当于没限速）或测试流量是否为入向（入向不受限）。
 
 3. 确认**小请求仍然正常** —— 这是区分「限速」与「网络不通」的关键：
    ```bash
@@ -136,14 +140,10 @@
    kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc show dev eth0
    ```
    输出应回到默认 qdisc（如 `pfifo_fast` / `noqueue` / `mq`），不再包含 tbf
-2. 重测吞吐，确认速率恢复到基线水平：
-   ```bash
-   kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- \
-     curl -s -o /dev/null -w '%{speed_download} bytes/s' --max-time 60 <大文件地址>
-   ```
+2. 重测出向上传速率，确认恢复到基线水平（测法同注入验证步骤 2）
 3. 确认应用日志不再出现传输慢/超时错误
 
 **基准事实**：
 - **根因**：通过 tc tbf（令牌桶过滤器）在 Pod 网卡限制出方向速率，模拟带宽受限/专线拥塞环境
-- **必现现象**：大对象下载速率被压到 `rate` 附近；`tc qdisc show` 显示 tbf 规则；
+- **必现现象**：出方向大流量传输速率被压到 `rate` 附近（入向不受限）；`tc qdisc show` 显示 tbf 规则；
   小请求仍正常返回（区别于网络不通）；应用出现数据同步滞后、上传超时等慢速症状

@@ -7,10 +7,12 @@ topics:
   - experiment design
   - safety red lines
   - fault injection methodology
-  - three-layer verification model
+  - layered verification model
 fault_types:
   - all
-summary: "Authoritative source for chaos engineering principles: steady state hypothesis, blast radius control, experiment lifecycle, safety red lines, three-layer verification model. Q&A format."
+summary: "Authoritative source for chaos engineering principles: steady state hypothesis, blast radius control, experiment lifecycle, safety red lines, layered verification model. Q&A format."
+phases:
+  - plan
 ---
 
 # Chaos Engineering Principles and Fault Injection Fundamentals (for the Agent)
@@ -21,7 +23,7 @@ summary: "Authoritative source for chaos engineering principles: steady state hy
 > - **Core concepts**: what chaos engineering is → [Q1](#q1-what-is-chaos-engineering-how-does-it-differ-from-traditional-testing); why do fault injection → [Q2](#q2-why-do-fault-injection-what-is-its-core-value)
 > - **Design principles**: the seven principles → [Q3](#q3-what-are-the-seven-principles-of-chaos-engineering); blast-radius control → [Q5](#q5-what-is-blast-radius-and-how-do-you-control-it)
 > - **Fault taxonomy**: infrastructure / Pod / application layer → [Q4](#q4-what-types-of-fault-injection-are-there-and-what-are-the-typical-scenarios-for-each)
-> - **Experiment flow**: the five lifecycle phases → [Q6](#q6-what-phases-does-a-complete-fault-injection-experiment-contain); the three-layer verification model → [Q7](#q7-authoritative-source-what-are-layer-1--layer-2--layer-3-verification-and-how-do-they-relate)
+> - **Experiment flow**: the five lifecycle phases → [Q6](#q6-what-phases-does-a-complete-fault-injection-experiment-contain); the layered verification model → [Q7](#q7-authoritative-source-what-are-layer-1--layer-2--layer-3-verification-and-how-do-they-relate)
 > - **Safety red lines**: the forbidden-operations list → [Q9](#q9-safety-red-lines-which-operations-are-absolutely-forbidden-and-why)
 > - **Use cases**: typical applications → [Q10](#q10-what-are-the-typical-real-world-applications-of-fault-injection)
 > - **The Agent's role**: strengths and limits → [Q11](#q11-what-advantages-does-the-agent-have-over-traditional-fault-injection-tools-such-as-using-chaosblade-directly) / [Q12](#q12-what-are-the-agents-limitations-when-should-the-agent-not-be-used)
@@ -302,14 +304,14 @@ Preparation → Injection → Observation → Recovery → Analysis
   - Pod CPU fullload → `kubectl top pod my-pod -n default` shows CPU near the limit
   - Pod network delay → `kubectl exec my-pod -n default -- ping -c 3 <target>` shows increased latency
 
-- **Layer 3 verification** (optional): compare laterally to confirm the blast radius is contained
+- **Layer 3 (propagated-effect observation, optional)**: compare laterally to note the blast radius — observational record, never a verdict criterion
   - Only the target Pod is affected; the Deployment's other Pods are healthy
   - The Service's overall error rate has not risen significantly
 
 > **🤖 The Agent's responsibilities**:
 > 1. Read the "verification method" section of the Skill to get the recommended kubectl verification commands
 > 2. Run the verification commands, parse the output and judge whether it matches expectations
-> 3. If verification fails (e.g. CPU did not rise after injection), **trigger a rollback automatically** and record the failure reason
+> 3. If verification fails (e.g. CPU did not rise after injection), the framework **rolls back automatically** and the failure reason is recorded
 > 4. If verification passes, mark the experiment as active and enter the waiting period (duration countdown)
 
 ---
@@ -378,23 +380,23 @@ blade status --uid <uid>
 
 ### Q7: [AUTHORITATIVE SOURCE] What are Layer 1 / Layer 2 / Layer 3 verification, and how do they relate?
 
-**A7**: Fault verification uses a three-layer model, going deeper layer by layer:
+**A7**: Fault verification uses a layered model; the first two layers decide the verdict, the third is observational:
 
 | Layer | Name | What it verifies | Method | Reliability |
 |------|------|---------|---------|--------|
 | **Layer 1** | Injection-action verification | Was the ChaosBlade experiment created/destroyed successfully | `blade status --uid <uid>` | High (queries the experiment status directly) |
 | **Layer 2** | Symptom verification | Did the system exhibit the expected fault symptom | `kubectl top/exec/describe/logs` + metric assertions | Medium-high (depends on parsing kubectl output) |
-| **Layer 3** | Impact verification | Is the fault's blast radius contained and as expected | Lateral comparison + business-metric monitoring | Medium (needs cross-checking across dimensions) |
+| **Layer 3** | Propagated-effect observation | Is the fault's blast radius contained and as expected (observational record, non-verdict) | Lateral comparison + business-metric monitoring | Medium (needs cross-checking across dimensions) |
 
 **How they relate**:
-- **Layer 1 is a necessary condition**: if Layer 1 fails (the experiment was not created), skip Layer 2/3 and roll back immediately
+- **Layer 1 is a necessary condition**: if Layer 1 fails (the experiment was not created), skip Layer 2/3 — the framework rolls back immediately
 - **Layer 2 is a sufficient condition**: passing Layer 2 means the fault really took effect, but not that the impact is as expected
-- **Layer 3 is enhanced verification**: used for complex scenarios, e.g. verifying cascading failures or assessing business impact
+- **Layer 3 is observational**: it records propagated effects (cascading failures, business impact); it never gates the verdict
 
 **The Agent's verification strategy**:
-- **Injection verification**: Layer 1 + Layer 2 are mandatory. Layer 3 is optional, depending on whether the Skill defines lateral-comparison rules
+- **Injection verification (verdict)**: Layer 1 + Layer 2 decide the verdict. Layer 3 is an optional observational record, depending on whether the Skill defines lateral-comparison rules
 - **Recovery verification**: Layer 1 (confirm the experiment was destroyed) + Layer 2 (confirm the symptom is gone) are mandatory
-- **Handling verification failure**: if Layer 2 fails (e.g. CPU did not rise after injection), the Agent MUST **automatically trigger** `blade destroy` to roll back, and record the failure reason in the experiment history
+- **Handling verification failure**: if Layer 2 fails (e.g. CPU did not rise after injection), the framework automatically runs `blade destroy` to roll back, and the failure reason is recorded in the experiment history
 
 **A complete verification example (Pod CPU fullload)**:
 
@@ -421,20 +423,20 @@ blade status --uid <uid>
 └─────────────────────────────────────────────┘
                     ↓
 ┌─────────────────────────────────────────────┐
-│ Layer 3: impact verification (optional)     │
+│ Layer 3: propagated effects (optional)     │
 ├─────────────────────────────────────────────┤
 │ command: kubectl top pod -l app=my-app -n d │
 │ output:  my-pod-1: 480m (96%)               │
 │          my-pod-2: 50m  (10%)               │
 │          my-pod-3: 60m  (12%)               │
-│ verdict: only the target Pod is affected    │
+│ observed: only the target Pod is affected   │
 └─────────────────────────────────────────────┘
 ```
 
 > **💡 Agent usage tips**:
 > - Layer 1 verification MUST use the `blade_status` tool — do not hand-assemble the command
 > - Layer 2's commands and assertion logic should be read from the Skill's "verification method" section
-> - If Layer 2 fails, retry 1-2 times first (3-5s apart) to rule out a timing issue; if it still fails, trigger a rollback
+> - If Layer 2 fails, retry 1-2 times first (3-5s apart) to rule out a timing issue; if it still fails, submit the failed verdict — the framework rolls back automatically
 
 ---
 
@@ -574,7 +576,7 @@ blade status --uid <uid>
 - **Verification**:
   - Layer 1: confirm the experiment was created
   - Layer 2: confirm the Pod was deleted and the Deployment created a replacement automatically
-  - Layer 3: confirm the Service Endpoints is briefly empty during the deletion but recovers within 5 seconds; the service's overall error rate stays < 0.1%
+  - Layer 3 (observation): confirm the Service Endpoints is briefly empty during the deletion but recovers within 5 seconds; the service's overall error rate stays < 0.1%
 
 **Expected result**: a brief wobble (< 5 seconds), but the service stays available overall
 
@@ -593,7 +595,7 @@ blade status --uid <uid>
 - **Verification**:
   - Layer 1: confirm the experiment was created
   - Layer 2: `kubectl top pod` shows the target Pod's CPU near its limit
-  - Layer 3: `kubectl get hpa` shows currentReplicas increasing; `kubectl get deployment` shows replicas increasing
+  - Layer 3 (observation): `kubectl get hpa` shows currentReplicas increasing; `kubectl get deployment` shows replicas increasing
 
 **Expected result**: HPA scales out within 2-5 minutes and the new Pods share the load
 
@@ -612,7 +614,7 @@ blade status --uid <uid>
 - **Verification**:
   - Layer 1: confirm the experiment was created
   - Layer 2: run `ping` inside service B's Pod and confirm latency rose to ~5 seconds
-  - Layer 3: service A's logs show timeout and retry records; service A's overall error rate stays < 1% (because the retries succeed)
+  - Layer 3 (observation): service A's logs show timeout and retry records; service A's overall error rate stays < 1% (because the retries succeed)
 
 **Expected result**: some of service A's requests time out but eventually succeed via retries, keeping the overall error rate contained
 
@@ -631,7 +633,7 @@ blade status --uid <uid>
 - **Verification**:
   - Layer 1: confirm the experiment was created
   - Layer 2: `kubectl top pod` shows memory near the limit; `kubectl get pod -o json` shows the container was OOMKilled (exitCode 137)
-  - Layer 3: confirm the alerting system sent a notification within 1 minute, and that the SRE received it and responded
+  - Layer 3 (observation): confirm the alerting system sent a notification within 1 minute, and that the SRE received it and responded
 
 **Expected result**: the alert fires promptly and the SRE can locate the problem quickly
 
@@ -650,7 +652,7 @@ blade status --uid <uid>
 - **Verification**:
   - Layer 1: confirm the experiment was created
   - Layer 2: confirm the primary's Pod was deleted and the StatefulSet created a new Pod
-  - Layer 3: confirm the standby was promoted to primary, application connections switched to the new primary automatically, and data consistency was not compromised
+  - Layer 3 (observation): confirm the standby was promoted to primary, application connections switched to the new primary automatically, and data consistency was not compromised
 
 **Expected result**: the database completes failover within 30-60 seconds; the application errors briefly, then recovers
 
@@ -748,6 +750,6 @@ blade status --uid <uid>
 | RPO | Recovery Point Objective — the maximum data loss the business tolerates |
 | Layer 1 verification | Injection verification — confirms the ChaosBlade experiment was created/destroyed successfully |
 | Layer 2 verification | Phenomenon verification — confirms the system exhibited the expected fault symptom |
-| Layer 3 verification | Impact verification — confirms the fault's blast radius is contained |
+| Layer 3 verification | Propagated-effect observation — records the fault's blast radius (observational, non-verdict) |
 | Skill | The Agent's skill module, defining a fault type's injection instructions, verification method and preconditions |
 | Operational Memory | The Agent's operational memory, storing experiment history and operational experience |

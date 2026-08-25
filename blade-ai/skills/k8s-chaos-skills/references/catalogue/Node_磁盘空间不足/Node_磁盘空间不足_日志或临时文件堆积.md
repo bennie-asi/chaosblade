@@ -98,7 +98,7 @@ kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-imag
 ```bash
 # 提前恢复：删除填充文件（同时停掉已武装的 timer）
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'systemctl stop blade-restore-diskfill 2>/dev/null; rm -f /var/log/app-archive.log /tmp/app-archive.log'
+  'systemctl stop blade-restore-diskfill.timer 2>/dev/null; rm -f /var/log/app-archive.log /tmp/app-archive.log'
 # 删除 debug Pod
 kubectl delete pod <debug-pod-name> --force --grace-period=0
 ```
@@ -107,3 +107,4 @@ kubectl delete pod <debug-pod-name> --force --grace-period=0
 - 填充路径对应的分区取决于节点配置，需参考上方「CRD 模式路径→分区映射表」
 - 与 ChaosBlade `--percent` 不同，此方式需按**增量**手动计算填充字节数（填充量 = 分区总容量 × 目标使用率 − 当前已用量）；量太小达不到 85% 告警阈值，量太大把分区填满会触发非预期的 DiskPressure/驱逐
 - 自恢复基于 systemd-run transient timer 到期自动删除填充文件，补齐了 ChaosBlade `--timeout` 的自恢复能力；timer 载荷里的文件路径必须与填充路径逐字一致
+- 同名 transient timer 重复武装会报 `Unit blade-restore-diskfill.service was already loaded`（上次武装命令执行失败时 unit 以 failed 状态残留所致）；重武装前先按本文件注入命令的同等 chroot /host 通道形态清理残留：`systemctl stop blade-restore-diskfill.service; systemctl reset-failed blade-restore-diskfill.service`（武装命令成功执行过的 unit 无残留，可直接重武装）

@@ -61,26 +61,27 @@ blade destroy <experiment-uid>
 pgrep -f <process-name>
 
 # 2) 若进程由 systemd 服务托管：先武装定时拉起，再杀死。
-#    timer 由宿主机 systemd(PID 1) 管理，到期自动 systemctl start 恢复服务
+#    timer 由宿主机 systemd(PID 1) 管理，到期自动 systemctl start 恢复服务。
+#    每对命令分两次独立执行（执行通道不支持 && 串联）；武装成功（输出含 Running timer as unit）后再杀死
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-<service> \
-  systemctl start <service> &&
+  systemctl start <service>
 kill -9 <pid>
 
 # 按端口一步杀死（需宿主机有 fuser；同样先武装定时拉起）
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-<service> \
-  systemctl start <service> &&
+  systemctl start <service>
 fuser -k <port>/tcp
 
 # 3) 若进程不受 systemd 托管：先武装定时执行应用启动命令，再杀死
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-<process-name> \
-  sh -c '<应用启动命令>' &&
+  sh -c '<应用启动命令>'
 kill -9 <pid>
 ```
 
 恢复命令（timer 到期前可提前手动恢复）：
 ```bash
 # 提前恢复：手动重启服务（同时停掉已武装的 timer，避免重复拉起）
-systemctl stop blade-restore-<service> 2>/dev/null
+systemctl stop blade-restore-<service>.timer 2>/dev/null
 systemctl start <service>
 # 或执行应用启动命令
 ```
@@ -90,3 +91,4 @@ systemctl start <service>
 - 使用 kill -15 可让进程优雅退出
 - 原生方式无法实现持续杀死（count + timeout 模式）
 - 自恢复基于 systemd-run transient timer（宿主机 PID 1 管理）补齐了 ChaosBlade `--timeout` 的自恢复能力；注入前必须先确认进程的托管方式（`systemctl status` / `ps -o ppid`），不受任何守护机制管理的裸进程被杀后无法自动拉起，timer 载荷里的启动命令必须写全（工作目录、环境变量、用户）
+- 同名 transient timer 重复武装会报 `Unit blade-restore-<service>.service was already loaded`（上次武装命令执行失败时 unit 以 failed 状态残留所致）；重武装前先清理残留：`systemctl stop <unit>.service; systemctl reset-failed <unit>.service`（武装命令成功执行过的 unit 无残留，可直接重武装）

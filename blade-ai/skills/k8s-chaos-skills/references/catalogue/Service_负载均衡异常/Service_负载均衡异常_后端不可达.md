@@ -50,26 +50,34 @@
 
 > 当 ChaosBlade 不可用时，可使用以下 kubectl 原生命令实现等效后端不可达。
 
-前提条件：方式A 只需容器内有 `kill`（BusyBox 也提供，基本总是可用）；方式C 只用控制面 kubectl，
-不依赖容器内任何东西 —— **这两条是最可靠的**。方式B 额外要求容器内真有 `iptables` 且有
-NET_ADMIN，精简镜像通常两者都不满足，选它之前先验证。
+前提条件：方式C 只用控制面 kubectl，不依赖容器内任何东西 —— **最可靠**。方式A 除容器内有
+`kill` 外还必须确认 PID 1 可被信号杀死（见下方前置检查，BusyBox 等单进程镜像不满足）。
+方式B 额外要求容器内真有 `iptables` 且有 NET_ADMIN，精简镜像通常两者都不满足，选它之前先验证。
 
 注入命令：
 ```bash
-# 方式A：杀死后端 Pod 主进程（推荐，导致 Pod 重启/CrashLoopBackOff）
+# 方式A：杀死后端 Pod 主进程（导致 Pod 重启/CrashLoopBackOff）。
+# ⚠️ 前置检查——先看 PID 1 是什么，不是任何进程都能 kill：
+#   kubectl exec <pod-name> -n <namespace> -- ps
+# 内核对容器内 PID 1 有信号保护（SIGNAL_UNKILLABLE）：PID 1 未注册信号 handler 时
+# `kill 1` 与 `kill -9 1` 均被内核忽略——命令 rc=0 但进程毫发无损、restartCount 不变、
+# 服务不中断，**静默失效**（BusyBox 单进程容器实测复现，sleep/sh/tail 等精简镜像主进程
+# 均属此类）。仅当 PID 1 是注册了 SIGTERM handler 的应用（nginx/java 等）时 kill 1 才有效；
+# PID 1 不可杀时改走方式C，或节点侧 crictl stop -t 0 <containerID>（debug pod + chroot /host，
+# kubelet 会重启容器使 restartCount+1）
 kubectl exec <pod-name> -n <namespace> -- sh -c 'kill 1'
 # 方式B：注入网络丢包（需容器内真有 iptables 且有 NET_ADMIN，先验证：
 #         kubectl exec <pod-name> -n <namespace> -- sh -c 'command -v iptables || echo NO_IPTABLES'）
-#         先武装定时 -D 再 -A，到期自动恢复
+#         先武装定时 -D 再 -A，到期自动恢复。两条命令分两次独立执行——不能用 && 串联：
+#         第二段 kubectl 会沦为第一条 exec 载荷（sh -c）的死参数，注入静默丢失
 kubectl exec <pod-name> -n <namespace> -- sh -c \
-  '( sleep <duration>; iptables -D OUTPUT -j DROP ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; iptables -D OUTPUT -j DROP ) >/dev/null 2>&1 &'
 kubectl exec <pod-name> -n <namespace> -- iptables -A OUTPUT -j DROP
-# 方式B'：容器内无 iptables 时，用临时容器 + tc（临时容器与目标容器共享网络命名空间，
-#         工具来自调试镜像，--profile=netadmin 提供 NET_ADMIN）
-# ── 路径 B'：容器内无可用工具（精简镜像的常态）。
-#    先建【长驻】临时容器作为载体 —— 必须 sleep 保活；若把 tc 直接交给 kubectl debug，
-#    命令跑完容器即终止，后续 `kubectl exec -c <debugger>` 会报 container not found，
-#    故障将无法恢复（已实测）。
+# 方式B'：容器内无 iptables 时，用临时容器 + tc。
+#    临时容器与目标容器共享同一个网络命名空间，工具来自调试镜像，
+#    --profile=netadmin 提供 NET_ADMIN。先建【长驻】临时容器作为载体 ——
+#    必须 sleep 保活；若把 tc 直接交给 kubectl debug，命令跑完容器即终止，
+#    后续 `kubectl exec -c <debugger>` 会报 container not found，故障将无法恢复（已实测）。
 # 0) 前置安全检查：确认目标 Pod 不是 hostNetwork。hostNetwork=true 的 Pod
 #    其网络命名空间【就是宿主机】，临时容器里的 tc 会打穿整个节点，
 #    爆炸半径从单 Pod 扩大到整台机器。为 true 时禁止此路径，改用 node 级用例。
@@ -84,9 +92,10 @@ kubectl get pod <pod-name> -n <namespace> \
   -o jsonpath='{range .status.ephemeralContainerStatuses[*]}{.name}{"="}{.state}{"\n"}{end}'
 
 # 经载体注入：载体与目标容器共享网络命名空间，操作 eth0 即操作目标 Pod 的网卡。
-# 同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）
+# 同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）。
+# 两条命令分两次独立执行——不能用 && 串联（第二段会沦为第一条 exec 载荷的死参数）
 kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- sh -c \
-  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &'
 kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev eth0 root netem loss 100%
 # 方式C：直接删除后端 Pod
 kubectl delete pod <pod-name> -n <namespace>
@@ -102,8 +111,12 @@ kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc del dev et
 ```
 
 注意事项：
-- 方式A（kill 1）效果最直接，但应用会立即重启，故障窗口可能较短
-- 方式B（iptables）持续效果更好，但需容器有 NET_ADMIN 权限
+- 方式A（kill 1）效果最直接，但存在 PID 1 信号免疫陷阱（见注入命令处前置检查）：
+  单进程精简镜像（PID 1 为 sleep/sh 等无 handler 进程）下 kill 1 全形态静默失效，
+  命令返回成功不代表故障生效，必须用 restartCount/ps 复核注入效果；且应用会立即重启，
+  故障窗口可能较短
+- 方式B（iptables）持续效果更好，但需容器有 NET_ADMIN 权限；本用例实测 BusyBox 镜像无 iptables
+  （NO_IPTABLES），与其预判一致
 - 与 ChaosBlade 不同，方式A/C 无法精确控制故障持续时间
 - 方式B 依赖容器内有 `iptables`，精简镜像（BusyBox/distroless）通常没有；此时用方式B'，
   但要先确认集群能拉取含 iproute2 的镜像。**临时容器无法从运行中的 Pod 移除**，

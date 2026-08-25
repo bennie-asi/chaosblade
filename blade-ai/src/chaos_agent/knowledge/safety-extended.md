@@ -9,6 +9,9 @@ topics:
 fault_types:
   - all
 summary: "Advisory good-practice rules, the Blast Radius Assessment Framework (scope / dependencies / cross-namespace / data risk), and the Abort / Continue / Escalate decision framework. Sourced on demand when the cache-tight inject prompt's hard-only safety section is insufficient."
+phases:
+  - plan
+  - execute
 ---
 
 # Safety Extended: Advisory, Blast Radius, Decision Framework

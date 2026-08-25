@@ -56,14 +56,19 @@ blade destroy <experiment-uid>
 #    分配量 = MemTotal × 目标百分比 − (MemTotal − MemAvailable)，按增量算，勿用绝对值
 
 # stress-ng 的 vm stressor 与本用例同属 mem 故障族，可直接执行。
-# --vm-keep 让页面保持驻留，效果接近 Page Cache 持续占用。
+# 注意（实测）：vm stressor 占用的是**匿名内存**——观测面是 free 的 used 列增长，
+# **不会**进入 buff/cache（实测 Cached 仅 +37MB 噪音级）。--vm-keep 只改写
+# 策略（驻留不释放），不改变内存类型。
+# 效果口径：从「可用内存减少」的应用视角等效；但上方注入验证的 buff/cache
+# 判据在 stress-ng 路径下**不可达**——若监控告警钉在 buff/cache 指标上，
+# 原生路径无法复现该形态（仅人工 dd 路径可填 Page Cache），判读时改看 used。
 stress-ng --vm 1 --vm-bytes <算出的分配量换算的MB数>M --vm-keep --timeout <duration>s
 ```
 > 分配量按**增量**计算：主机已有基础用量，直接按目标百分比的绝对值分配会超量触发 OOM Killer。
 
 > **为什么不用 `dd` 填充文件**：本用例的批准故障族是 `mem`（主路径 `blade create mem load
 > --mode cache`），而 `dd` 被判为 `disk` 族。target_guard 的故障类型锁定会以
-> `blade_target drift: approved=mem effective=disk` 拒绝跨族命令 —— 这不是命令写法问题，
+> `fault_target drift: approved=mem effective=disk` 拒绝跨族命令 —— 这不是命令写法问题，
 > 改参数也过不去。若确实要用 dd 走磁盘路径填充 Page Cache，需要把演练本身按 `disk` 族
 > 立项，或由人工执行：
 > `dd if=/dev/zero of=/tmp/cache_fill bs=1M count=<size_in_MB>`

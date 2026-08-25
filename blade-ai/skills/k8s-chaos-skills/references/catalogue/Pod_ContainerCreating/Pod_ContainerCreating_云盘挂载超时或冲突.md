@@ -35,8 +35,12 @@
        persistentVolumeClaim:
          claimName: <应用A的PVC名称>
    ```
-   确认占用者 Pod Running（云盘已 attach 到 `<占用节点>`）后再继续。
-3. 删除应用 A 原来的 Pod，触发在其他节点重建
+   **不要等待占用者 Running 再继续**：应用 A 的 Pod 仍在使用该 PVC，RWO 卷按 Pod 使用者
+   排他，占用者此刻必然卡在 ContainerCreating，Events 显示 `Multi-Attach error`（等待卷
+   从原使用者释放）——这是预期时序，不是注入失败。
+3. 删除应用 A 原来的 Pod，触发在其他节点重建。卷从原节点 detach 后由占用者抢先 attach 到
+   `<占用节点>`（占用者此刻转为 Running，即注入生效标志），应用 A 的新 Pod 调度到其他节点
+   后进入 ContainerCreating 并反复报 Multi-Attach error
 4. 观察新 Pod 的 ContainerCreating 状态
 
 **机制反证条件（命中即停）**：

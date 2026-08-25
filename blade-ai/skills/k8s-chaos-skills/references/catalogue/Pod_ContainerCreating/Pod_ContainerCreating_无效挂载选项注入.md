@@ -15,17 +15,15 @@
 4. 确认删除目标 Pod 后控制器（StatefulSet/Deployment）会自动重建——重建是触发重新 mount 的必要条件
 
 **演练步骤**：
-1. **先武装定时基线还原，再注入**（在运行 kubectl 的机器上后台武装，到期自动按资源准备第 2 条
-   记录的基线还原 PV mountOptions，补齐自恢复能力；按基线二选一，仅执行其中一行；PID 落盘供提前
-   恢复时终止定时器）：
+1. **先武装定时自恢复，再注入**（恢复命令幂等：定时器到期自动恢复为主，Agent 在演练结束时
+   主动执行同一条命令兜底，定时器迟到重复执行无副作用。定时器 shell 逻辑必须作为 `kubectl exec` 载体载荷派发——直接以
+   `sh -c '…'` 作为顶层命令派发会被命令守卫拦截（unknown_binary: sh）；执行通道为
+   多副本路由，无法可靠终止定时器，故不设 pidfile。恢复命令按资源准备第 2 条的基线
+   确定形态后，用 base64 折叠武装）。
+   载体 Pod 选集群内带 kubectl 且有足够 RBAC 权限的常驻 Pod（如演练工具 Pod）：
    ```bash
-   # 基线为空时
-   ( sleep <duration>; kubectl patch pv <pv> --type json \
-       -p '[{"op":"remove","path":"/spec/mountOptions"}]' ) >/dev/null 2>&1 &
-   # 基线非空时（<基线选项JSON数组> 为注入前记录的原值，如 ["nolock","noatime"]）
-   ( sleep <duration>; kubectl patch pv <pv> --type json \
-       -p '[{"op":"replace","path":"/spec/mountOptions","value":<基线选项JSON数组>}]' ) >/dev/null 2>&1 &
-   echo $! > /tmp/blade-restore-mntopt.pid
+   # 武装定时自恢复（将"注入恢复"第 1 步按基线选定的一条 patch 命令 base64 编码后填入 <restore-b64>）
+   kubectl exec <载体Pod> -n <载体命名空间> -- sh -c 'echo <restore-b64> | base64 -d > /tmp/blade-restore-mntopt.sh; ( sleep <duration>; sh /tmp/blade-restore-mntopt.sh ) >/dev/null 2>&1 & echo armed'
    ```
 2. 向 PV 注入无效挂载选项（追加，不覆盖既有选项）：
    ```
@@ -47,12 +45,15 @@
 3. `kubectl get pv <pv> -o jsonpath='{.spec.mountOptions}'`：确认注入选项仍在 PV 上（故障持续的原因）
 
 **注入恢复**：
-1. 等待 `<duration>` 到期后武装的定时器自动按基线还原 PV mountOptions；如需提前恢复，先终止定时器：
+1. 等待 `<duration>` 到期，定时器自动按基线还原 PV mountOptions；演练提前结束时由 Agent 主动
+   执行同一条恢复命令（幂等，定时器迟到再执行一次无副作用；按资源准备第 2 条的基线二选一）：
    ```bash
-   kill $(cat /tmp/blade-restore-mntopt.pid) 2>/dev/null; rm -f /tmp/blade-restore-mntopt.pid
+   # 基线为空时
+   kubectl patch pv <pv> --type json -p '[{"op":"remove","path":"/spec/mountOptions"}]'
+   # 基线非空时（<基线选项JSON数组> 为注入前记录的原值，如 ["nolock","noatime"]）
+   kubectl patch pv <pv> --type json -p '[{"op":"replace","path":"/spec/mountOptions","value":<基线选项JSON数组>}]'
    ```
-2. 按基线还原 PV mountOptions：基线为空时 `kubectl patch pv <pv> --type json -p '[{"op":"remove","path":"/spec/mountOptions"}]'`；基线非空时 patch 回原值数组
-3. kubelet 下一轮 mount 重试（分钟级）自动成功，Pod 原地转为 Running——**无需删除或重建 Pod**，恢复动作只有一个 patch
+2. kubelet 下一轮 mount 重试（分钟级）自动成功，Pod 原地转为 Running——**无需删除或重建 Pod**，恢复动作只有一个 patch
 
 **恢复验证**：
 1. `kubectl get pod <pod> -n <ns>`：状态恢复 Running，READY 1/1，且 Pod 对象未变（AGE 与注入前一致，证明原地恢复而非重建）

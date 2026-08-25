@@ -56,10 +56,13 @@
 2. 或等待 `--timeout` 到期后 ChaosBlade 自动停止杀进程
 3. 说明：进程被杀后容器 entrypoint 会自动拉起进程，ChaosBlade timeout 控制"持续杀进程"的时长
 4. 路径 B 持续模式（见降级方案）：等待 `systemd-run` timer 到期后循环自动终止；
-   如需提前终止，经 debug pod 执行：
+   如需提前终止，经 debug pod 依次执行两条命令——停掉 timer + 手动执行与 timer
+   载荷同款的终止 pkill（两条独立命令，不要串联；括号写法防 pkill 自匹配）：
    ```bash
    kubectl debug node/<node-name> --image=<verified-cluster-image> --profile=sysadmin --quiet \
-     -- chroot /host systemctl stop <unit-name>
+     -- chroot /host systemctl stop <unit-name>.timer
+   kubectl debug node/<node-name> --image=<verified-cluster-image> --profile=sysadmin --quiet \
+     -- chroot /host pkill -f 'crictl st[o]p -t 0'
    ```
 
 **恢复验证**：
@@ -109,9 +112,13 @@ kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- kill -15 <
 ```
 
 注意事项：
+- **容器 PID 1 不可杀**：sidecar 容器的主进程（PID 1）受内核 SIGNAL_UNKILLABLE 保护，
+  `kill -15/-9 1` 返回成功但进程不退出（静默无效）——本路径只能作用于容器内**非 init
+  进程**；若目标就是主进程，改走路径 B（节点侧 `crictl stop` 停整个容器，由 kubelet 重建，
+  等效实现「主进程被杀」语义）
 - 必须通过 `ps aux` 或 `pgrep` 确认实际进程名，不可猜测
 - "反复重启/持续崩溃"意图不要用 `watch`/循环脚本在容器内堆次数——应改用
-  路径 B 第 3 步的**持续模式**（节点侧 systemd-run 有界循环），它有定时自停兜底；
+  路径 B 第 3 步的**持续模式**（节点侧 systemd-run 有界循环），它有定时自停兕底；
   主方案 ChaosBlade `--timeout` 持续杀进程可用时优先用主方案
 - 与 ChaosBlade 相比，kubectl exec 单次 kill 缺少持续杀进程和自动超时停止的能力
 
@@ -168,11 +175,11 @@ kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- kill -15 <
    kubectl debug node/<node-name> --image=<verified-cluster-image> --profile=sysadmin --quiet \
      -- chroot /host sh -c '
      systemd-run --on-active=<duration>s --unit=blade-stoploop-sidecar-<pod-name> sh -c "
-       pkill -f \"crictl sto\$((0+0))p -t 0\"; pkill -x crictl; true" &&
-     sh -c "for i in $(seq 1 <rounds>); do
-       SID=$(crictl pods --namespace <namespace> -q | head -1)
-       CID=$(crictl ps --pod \$SID --name <sidecar-container-name> -q | head -1)
-       [ -n \"$CID\" ] && crictl stop -t 0 $CID
+       pkill -f \"crictl st[o]p -t 0\"; pkill -x crictl; true" &&
+     sh -c "for i in \$(seq 1 <rounds>); do
+       SID=\$(crictl pods --namespace <namespace> -q | head -1)
+       CID=\$(crictl ps --pod \$SID --name <sidecar-container-name> -q | head -1)
+       [ -n \"\$CID\" ] && crictl stop -t 0 \$CID
        sleep <interval>
      done"
    '
@@ -182,14 +189,22 @@ kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- kill -15 <
      应 ≥ `<rounds> × <interval>` 并留余量
    - `<interval>`：两轮 stop 的间隔（秒），建议 ≥ 15，给 kubelet 留出重建与退避爬坡空间
    - `<rounds>`：循环轮数上限，是 timer 之外的第二重保险
+   - **循环体里的 `$(...)` 与 `$VAR` 必须整体转义**（`\$(...)`、`\$CID`）——外层
+     `sh -c '...'` 的双引号载荷里，未转义的 `\$()` 会在**武装时刻**被外层 shell 提前
+     展开：彼时 `\$SID` 未定义，空值被 word-split 吞掉后 `crictl ps --pod` 会把
+     `--name` 当作 pod 值 → 查询无匹配 → `CID=` 恒空，循环每轮空转零注入
+     （静默失败；尾部未转义的 `\$CID` 同样被提前展开为空，`crictl stop -t 0` 无目标）
    - **每轮必须重新解析容器 ID**——kubelet 每轮只重建被停的 sidecar 容器，其 ID 每轮都变；
      固化第 1 轮 ID 会导致第 2 轮起空转（实测教训）
    - **必须用 `--pod <podSandboxId>` 把解析限定到目标 Pod**——集群里同名 sidecar
      （如 `istio-proxy`）遍布多个 Pod，不限定会停错 Pod 的 sidecar；
      sandbox 本身不随容器重启而变化，每轮用 `crictl pods --namespace` 重新解析即可
      （多 Pod 同 namespace 时先按 Pod 名核对出唯一 sandbox）
-   - timer 载荷里的 `sto\$((0+0))p` 是防自匹配技巧：若直接写 `stop`，pkill -f 会先命中
-     timer 自己的 shell 命令行把它杀了；用 `$((0+0))` 拆开后语义等价、命令行不再含字面模式
+   - timer 载荷里的 `st[o]p` 是防自匹配技巧（括号法）：若直接写 `stop`，pkill -f 的
+     正则会先命中 timer 自己的 shell 命令行把它杀了；写成 `st[o]p` 后模式文本不含
+     字面 `stop`（自身 cmdline 不自匹配），而正则字符类 `[o]` 仍匹配 `o`（目标
+     `crictl stop` 照常命中）。**不要用 `sto$((0+0))p` 算术拆开法**——timer 触发时
+     第二层展开把 `$((0+0))` 求值为 `0`，模式变 `sto0p` 永不匹配，终止器形同虚设
    - timer 由宿主机 PID 1 管理，debug pod 删除后循环与自停恢复均不受影响
    - 提前终止见上方"注入恢复"第 4 条
 
@@ -212,7 +227,7 @@ kubectl exec <pod-name> -c <主容器名> -n <namespace> -- echo alive
 kubectl get pod <pod-name> -n <namespace> -o wide
 ```
 持续模式的恢复：等 `<duration>` 到期 timer 自动终止循环（或按上方"注入恢复"第 4 条
-`systemctl stop <unit-name>` 提前终止），之后 kubelet 完成最后一次重建即稳定。
+提前终止——停 `<unit-name>.timer` 并手动执行终止器 pkill），之后 kubelet 完成最后一次重建即稳定。
 恢复验证以"sidecar 容器 restartCount 停止增长 + 全部容器 Ready + 主容器未受影响"为准。
 
 注意事项：

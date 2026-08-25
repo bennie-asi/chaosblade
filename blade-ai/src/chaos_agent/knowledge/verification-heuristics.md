@@ -12,6 +12,9 @@ topics:
 fault_types:
   - all
 summary: "Full-detail catalogue for verifying fault injection effects: fault-effect delay window (5-30s), multi-iteration verification pattern, method priority order, fault-type → method mapping (CPU/Memory/Network/Pod/Disk/Node), evidence sufficiency rules, ambiguous-result handling, and minimal-container fallback."
+phases:
+  - verify
+  - recover
 ---
 
 # Verification Heuristics & Method Selection

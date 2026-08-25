@@ -17,9 +17,9 @@
     <text x="140" y="58" text-anchor="middle" font-size="15" font-weight="600" fill="#3730a3">Natural language</text>
     <text x="140" y="76" text-anchor="middle" font-size="12" fill="#6366f1">Natural-language intent</text>
 
-    <rect x="260" y="34" width="200" height="52" rx="10" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5 4"/>
-    <text x="360" y="58" text-anchor="middle" font-size="15" font-weight="600" fill="#334155">Structured  --direct</text>
-    <text x="360" y="76" text-anchor="middle" font-size="12" fill="#64748b">Structured args · zero LLM</text>
+    <rect x="260" y="34" width="200" height="52" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="360" y="58" text-anchor="middle" font-size="15" font-weight="600" fill="#3730a3">Structured</text>
+    <text x="360" y="76" text-anchor="middle" font-size="12" fill="#6366f1">CLI parameters (CI/CD)</text>
   </g>
 
   <!-- main chain boxes -->
@@ -57,8 +57,7 @@
 
   <!-- input arrows -->
   <path d="M135,86 L135,158" fill="none" stroke="#6366f1" stroke-width="2" marker-end="url(#arrow)"/>
-  <path d="M360,86 C360,120 367,120 367,158" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrowAmber)"/>
-  <text x="392" y="126" font-size="11" fill="#64748b">bypass planning</text>
+  <path d="M360,86 C360,125 200,125 200,158" fill="none" stroke="#6366f1" stroke-width="2" marker-end="url(#arrow)"/>
 
   <!-- chain arrows -->
   <path d="M230,208 L270,208" fill="none" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"/>

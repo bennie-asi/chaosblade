@@ -15,9 +15,10 @@
 4. 确认容器内有 `dd` 工具（用于验证 IO 性能）
 
 **演练步骤**：
-1. 定位应用 A 的 Pod，确认根文件系统可写：
+1. 定位应用 A 的 Pod，确认根文件系统可写（&& 必须包在 sh -c 载荷内——命令是 argv 直传无 shell，
+   裸 touch 形态下 `&&`/`rm`/`-f` 会沦为 touch 的字面参数，在 / 下创建同名垃圾文件且 rm 永不执行）：
    ```bash
-   kubectl exec <pod-name> -n <namespace> -- touch /.iobench.tmp && rm -f /.iobench.tmp
+   kubectl exec <pod-name> -n <namespace> -- sh -c 'touch /.iobench.tmp && rm -f /.iobench.tmp'
    ```
 2. 使用 `blade create k8s pod-disk burn` 对目标 Pod 注入持续高 IO 负载，间接制造 IO 延迟：
    ```bash
@@ -34,12 +35,13 @@
    - `--path`：必须使用 `/`（容器根文件系统）。不要使用 EmptyDir、hostPath 等子目录挂载路径，这些路径在 ChaosBlade nsexec 模式下校验会失败
    - `--size`：每次写入块大小（MB），默认 10，增大可加剧 IO 竞争
    - 原理：通过持续大量读写 IO 操作使磁盘 IO 队列饱和，间接导致应用的 IO 请求排队等待，表现为 IO 延迟显著增加
-3. 记录返回的 blade_uid，用于后续恢复
+3. 记录返回的 experiment_uid，用于后续恢复
 
 **注入验证**：
-1. 在 Pod 内执行写入操作，确认耗时明显增加：
+1. 在 Pod 内执行写入操作，确认耗时明显增加（`conv=fsync` 写完强制落盘，busybox dd 实测支持；
+   不要用 `oflag=dsync`——busybox dd 不支持 oflag，会报 `unrecognized option`）：
    ```bash
-   kubectl exec <pod-name> -n <namespace> -- dd if=/dev/zero of=/.iolatency.tmp bs=1M count=10 oflag=dsync
+   kubectl exec <pod-name> -n <namespace> -- dd if=/dev/zero of=/.iolatency.tmp bs=1M count=10 conv=fsync
    ```
 2. 对比注入前后写入耗时（注入后因 IO 队列饱和，写入吞吐显著下降）
 3. 查看应用日志，确认出现 slow query 或 timeout 相关告警
@@ -50,14 +52,14 @@
    ```
 
 **注入恢复**：
-1. 销毁 blade 实验：`blade destroy <blade_uid>`
+1. 销毁 blade 实验：`blade destroy <experiment_uid>`
 2. 或等待 `--timeout`（`<duration>`）到期后自动恢复
 3. 若应用存在连接池超时，可能需等待连接回收或重启 Pod
 
 **恢复验证**：
-1. 在 Pod 内重新执行写入操作，确认耗时恢复正常：
+1. 在 Pod 内重新执行写入操作，确认耗时恢复正常（同样用 `conv=fsync`，不要用 busybox 不支持的 `oflag=dsync`）：
    ```bash
-   kubectl exec <pod-name> -n <namespace> -- dd if=/dev/zero of=/.iolatency.tmp bs=1M count=10 oflag=dsync
+   kubectl exec <pod-name> -n <namespace> -- dd if=/dev/zero of=/.iolatency.tmp bs=1M count=10 conv=fsync
    ```
 2. 查看应用日志，确认 slow query 和 timeout 告警消失
 3. 确认应用请求延迟 P99 恢复到基线水平

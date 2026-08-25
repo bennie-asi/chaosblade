@@ -40,7 +40,7 @@
 
 ## 工作原理
 
-BLADE AI 用一个确定性的 LangGraph 状态机编排演练的全生命周期。两条入口链路 —— 自由的自然语言与确定性的 `--direct` 参数 —— 在同一个 `safety_check` 处汇合，此后每一次运行都走完全相同的有序骨架。
+BLADE AI 用一个确定性的 LangGraph 状态机编排演练的全生命周期。自然语言与结构化参数两种入口形式都被解析为同一份故障意图，此后每一次运行都走完全相同的有序骨架，并在同一个 `safety_check` 处接受安全审查。
 
 ![三阶段 ReAct 链路：规划、安全审查、确认门禁、执行、验证，以及独立的恢复子图](assets/pipeline.png)
 
@@ -99,10 +99,10 @@ blade-ai config                               # 查看全部配置
 # 自然语言模式
 blade-ai inject -i "给 default 命名空间的 my-pod 注入 80% CPU 压力，持续 120 秒"
 
-# 结构化模式（CI/CD 友好，零 LLM）
+# 结构化模式（CI/CD 友好）
 blade-ai inject --scope pod --target cpu --action fullload \
   -n "app=myapp" --namespace default \
-  -p "cpu-percent=80" -d 120 --direct
+  -p "cpu-percent=80" -d 120
 
 # 查看可用故障场景
 blade-ai list
@@ -190,7 +190,7 @@ BLADE AI 采用分层设计：顶层是接入适配器，中间是统一的 Lang
 
 *点击图片可查看高清原图。*
 
-单一 `AgentState`（按生命周期组织：身份 / 意图 / 规划 / 安全 / 确认 / 执行 / 验证 / 恢复 / 循环控制 / 结果 / 记忆）是唯一真相源；确定性的 `--direct` 路径与 LLM 规划路径在 `safety_check` 处汇合；Recover 图完全独立编译、拥有自己的 ReAct 循环；SSE 流式事件（token / tool / confirm / result ……）贯穿节点 → FastAPI → TUI，是统一的实时反馈通道。完整设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+单一 `AgentState`（按生命周期组织：身份 / 意图 / 规划 / 安全 / 确认 / 执行 / 验证 / 恢复 / 循环控制 / 结果 / 记忆）是唯一真相源；自然语言与结构化输入均经 LLM 规划，并在 `safety_check` 处汇合；Recover 图完全独立编译、拥有自己的 ReAct 循环；SSE 流式事件（token / tool / confirm / result ……）贯穿节点 → FastAPI → TUI，是统一的实时反馈通道。完整设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ---
 

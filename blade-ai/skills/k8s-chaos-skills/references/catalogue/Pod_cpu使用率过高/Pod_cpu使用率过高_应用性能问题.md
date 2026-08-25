@@ -48,7 +48,9 @@ kubectl exec <pod-name> -n <namespace> -c <container> -- \
 
 # 方式二：容器无 stress-ng，用 shell 循环。
 # 关键点：① 先读 CPU 上限算循环数；② 每个循环重定向到 /dev/null（否则
-# exec 会一直挂到 10s 超时）；③ PID 落盘 + 按文件定时 kill 实现可靠自动恢复。
+# exec 会一直挂到 10s 超时）；③ PID 落盘 + 按文件定时 kill 实现可靠自动恢复；
+# ④ 计数用 while 自增而非 $(seq)——busybox 1.33 无 seq applet（exit 127），
+# $(seq 1 N) 展开为空会使 for 空转零注入（静默失败）。
 
 # ① 读取 CPU 上限，计算循环数 N = ceil(limit核数 × percent/100)
 #    例：limit=2、目标 90% → N=2；单核循环≈100%，无法做到不足单核的精细百分比
@@ -58,9 +60,11 @@ kubectl get pod <pod-name> -n <namespace> \
 # ② 注入：起 N 个循环，PID 落盘，<duration> 秒后按 PID 文件自动 kill
 kubectl exec <pod-name> -n <namespace> -c <container> -- sh -c '
   : > /tmp/loadgen-worker.pids
-  for i in $(seq 1 <N>); do
+  i=1
+  while [ $i -le <N> ]; do
     ( while :; do :; done ) >/dev/null 2>&1 &
     echo $! >> /tmp/loadgen-worker.pids
+    i=$((i+1))
   done
   ( sleep <duration>; kill $(cat /tmp/loadgen-worker.pids) 2>/dev/null; rm -f /tmp/loadgen-worker.pids ) >/dev/null 2>&1 &
   echo "started <N> loops, auto-stop after <duration>s"

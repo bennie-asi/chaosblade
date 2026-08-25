@@ -8,41 +8,19 @@
 **资源准备**：
 1. 确认应用 A 已正常运行
 2. 确认应用 A 的 Pod 已配置 resources.limits.memory
+3. 确认容器内有注入载体：`stress-ng`（首选）；否则 `python`/`perl`（多数业务容器自带）；最低保底 `dd`（见方案 3 的驻留陷阱）
+
+> **本场景不使用 ChaosBlade（`blade create k8s pod-mem load`）**：其注入进程是 Pod 内
+> 最大的内存占用者，内存逼近 Limit 时会被 OOM killer 优先杀掉——进程一死内存立即释放，
+> 故障无法真正持续生效。内存压力注入一律走下方 kubectl-native 方案。
 
 **演练步骤**：
 1. 定位应用 A 的 Pod
-2. 使用 chaosblade 对应用 A 的 Pod 注入内存压力，模拟内存占用增长接近 Limit 的场景
-3. 观察 Pod 内存使用率变化
+2. 测量内存基线并计算分配量（必须，防超量 OOMKill）
+3. 在 Pod 内注入驻留式内存压力（kubectl exec），模拟内存占用增长接近 Limit 的场景
+4. 观察 Pod 内存使用率变化
 
 **注入命令**：
-```bash
-blade create k8s pod-mem load --mode ram --mem-percent <percent> --names <Pod名> --namespace <命名空间> --kubeconfig <path> --timeout <duration>
-```
-> **必须使用 `--mode ram`**。默认的 cache 模式在 cgroup v2 环境下不会增加 Pod 的 RSS 内存占用，kubectl top 观测不到变化。`--mode ram` 直接分配匿名内存，确保 Pod 内存使用率真实上升。
-
-**注入验证**：
-1. `kubectl top pod <pod-name> -n <namespace>` 确认内存用量接近 Limit 上限（对比 resources.limits.memory）
-2. 仅当已触发 OOMKill 时，`kubectl describe pod` 才会在 Events 中见到 OOMKilled；只接近 Limit 而未 OOM 时**没有任何内存相关 Event，查不到是必然，不要反复找**
-3. （可选，仅当演练方提供了应用访问入口时）向入口发请求确认延迟增大；无入口时上述内存级证据成立即可判定
-
-**注入恢复**：
-1. 销毁 chaosblade 内存压力注入实验
-
-**恢复验证**：
-1. `kubectl top pod <pod-name> -n <namespace>` 确认内存用量回落到注入前基线
-2. （可选，有访问入口时）确认应用响应恢复正常
-
-**基准事实**：
-- **根因**：应用内存使用增长或注入内存压力，导致 Pod 内存使用率接近 Limit，存在被 OOMKill 的风险
-- **必现现象**：Pod 内存使用率接近 Limit；应用响应变慢；存在 OOMKill 风险
-
----
-
-**降级方案（kubectl-native）**
-
-> 当 ChaosBlade 不可用时，可使用以下 kubectl 原生命令实现等效内存压力注入。
-
-前提条件：容器内有 `stress-ng`（首选）；否则有 `python`/`perl`（多数业务容器自带）；最低保底用 `dd`（见方案 3 的驻留陷阱）
 
 **先测基线、算增量（必须，防超量 OOMKill）**：
 ```bash
@@ -54,7 +32,7 @@ kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[0].reso
 **分配量 = limit × 目标百分比 − 当前用量**。例：limit=8Gi、当前 3.3Gi、目标 80% → 8×0.8 − 3.3 ≈ 3.1G。
 **严禁直接按「limit × 目标百分比」的绝对值分配**——Pod 已有基础用量，超量会越过剩余余量直接触发 OOMKill，注入进程被杀、效果不出现。
 
-注入命令：
+注入（按容器内可用载体择一）：
 ```bash
 # 方案1：指定绝对大小（推荐，精确控制；后台+重定向让 exec 立即返回，--timeout 自带自动恢复）
 kubectl exec <pod-name> -n <namespace> -- \
@@ -84,7 +62,13 @@ kubectl exec <pod-name> -n <namespace> -- sh -c '
 ```
 > **不要走 tmpfs 文件写路线**（`dd of=/dev/shm/…`）：部分环境对页缓存写入路径限速，实测可低至 ~0.5MB/s（3.5G 需 1 小时以上）；匿名内存分配（方案 2）同环境实测 <30 秒完成同量级分配。
 
-恢复命令（从精确到兜底）：
+**注入验证**：
+1. `kubectl top pod <pod-name> -n <namespace>` 确认内存用量接近 Limit 上限（对比 resources.limits.memory）
+2. 仅当已触发 OOMKill 时，`kubectl describe pod` 才会在 Events 中见到 OOMKilled；只接近 Limit 而未 OOM 时**没有任何内存相关 Event，查不到是必然，不要反复找**
+3. （可选，仅当演练方提供了应用访问入口时）向入口发请求确认延迟增大；无入口时上述内存级证据成立即可判定
+
+**注入恢复**：
+1. 杀掉 Pod 内注入进程释放内存（按注入时实际使用的方案择一）：
 ```bash
 # stress-ng：kill 进程
 kubectl exec <pod-name> -n <namespace> -- sh -c 'pkill -f stress-ng 2>/dev/null'
@@ -96,6 +80,14 @@ kubectl exec <pod-name> -n <namespace> -- \
 kubectl exec <pod-name> -n <namespace> -- \
   sh -c "ps -o pid,args 2>/dev/null | grep -E '[s]tress-ng|[m]em_stress|[d]d if=/dev/zero' | awk '{print \$1}' | xargs -r kill -9"
 ```
+
+**恢复验证**：
+1. `kubectl top pod <pod-name> -n <namespace>` 确认内存用量回落到注入前基线
+2. （可选，有访问入口时）确认应用响应恢复正常
+
+**基准事实**：
+- **根因**：应用内存使用增长或注入内存压力，导致 Pod 内存使用率接近 Limit，存在被 OOMKill 的风险
+- **必现现象**：Pod 内存使用率接近 Limit；应用响应变慢；存在 OOMKill 风险
 
 注意事项：
 - stress-ng `--vm-bytes` 按系统内存百分比计算，非 Pod cgroup 百分比，需手动转算绝对值

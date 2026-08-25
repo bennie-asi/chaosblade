@@ -27,7 +27,7 @@ blade create systemd stop --service <service-name> --timeout <duration>
 
 **注入验证**：
 1. `systemctl status <service>` 确认服务状态为 inactive/dead
-2. `ss -tlnp | grep <port>` 确认端口不再监听
+2. `ss -tlnp | grep <port>` 确认端口不再监听（仅适用于有监听端口的服务；无端口服务如 atd/crond 跳过此条，以第 1 条 systemctl 状态为准）
 3. 观察依赖该服务的其他组件是否报错
 
 **注入恢复**：
@@ -52,17 +52,18 @@ blade destroy <experiment-uid>
 
 > 当 ChaosBlade 不可用时，可使用以下原生命令实现等效故障注入。
 
-注入命令（**先武装定时恢复，再注入**；到期自动拉起服务，补齐自恢复能力）：
+注入命令（**先武装定时恢复，再注入**；到期自动拉起服务，补齐自恢复能力。
+两条命令分两次独立执行——执行通道不支持 && 串联；武装成功（输出含 Running timer as unit）后再 stop）：
 ```bash
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-<service-name> \
-  systemctl start <service-name> &&
+  systemctl start <service-name>
 systemctl stop <service-name>
 ```
 
 恢复命令（提前恢复）：
 ```bash
 # 先终止武装的定时器，再手动拉起
-systemctl stop blade-restore-<service-name> 2>/dev/null
+systemctl stop blade-restore-<service-name>.timer 2>/dev/null
 systemctl start <service-name>
 ```
 
@@ -70,15 +71,17 @@ systemctl start <service-name>
 - systemctl stop 会触发服务的 ExecStop 优雅停止流程
 - 如果服务配置了 Restart=always，需要先 mask 服务再 stop（武装还原需包含 unmask）：
   ```bash
+  # 三条命令逐条独立执行（执行通道不支持 && 串联）；前一条成功返回后再执行下一条
   systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-<service-name> \
-    sh -c 'systemctl unmask <service-name> && systemctl start <service-name>' &&
-  systemctl mask <service-name> &&
+    sh -c 'systemctl unmask <service-name> && systemctl start <service-name>'
+  systemctl mask <service-name>
   systemctl stop <service-name>
   ```
   提前恢复时：
   ```bash
-  systemctl stop blade-restore-<service-name> 2>/dev/null
+  systemctl stop blade-restore-<service-name>.timer 2>/dev/null
   systemctl unmask <service-name>
   systemctl start <service-name>
   ```
 - 自恢复基于注入前武装的 systemd-run transient timer（到期自动拉起服务）；提前恢复仍用上方手动命令
+- 同名 transient timer 重复武装会报 `Unit blade-restore-<service-name>.service was already loaded`（上次武装命令执行失败时 unit 以 failed 状态残留所致）；重武装前先清理残留：`systemctl stop blade-restore-<service-name>.service; systemctl reset-failed blade-restore-<service-name>.service`（武装命令成功执行过的 unit 无残留，可直接重武装）

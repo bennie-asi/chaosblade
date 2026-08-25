@@ -11,7 +11,15 @@
 3. 确认监控系统可观测节点磁盘使用率和 Pod 驱逐事件
 
 **演练步骤**：
-1. 查看目标节点 kubelet 配置的驱逐阈值（默认 `imagefs.available < 15%`）
+1. 前置确证（两项，直接决定填充量计算与本场景可行性）：
+   ```bash
+   # a) 分区拓扑：容器运行时目录与根分区是否同一分区（决定适用阈值）
+   kubectl debug node/<节点名> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host df -h / /var/lib/containerd
+   # b) kubelet 驱逐配置与 feature-gates（探测驱逐链路是否被集群定制禁用）
+   kubectl debug node/<节点名> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c 'tr "\0" "\n" < /proc/$(pgrep -x kubelet | head -1)/cmdline | grep -E "eviction-hard|feature-gates"'
+   ```
+   - 阈值随分区拓扑变化：容器运行时目录与根分区**同分区**时，默认阈值为 `nodefs.available < 10%`（已用 >90%）；独立 imagefs 分区时才是 `imagefs.available < 15%`。显式 `--eviction-hard` 存在时以其为准
+   - feature-gates 中若含 `DisablePodEviction=true`（ACK 等托管集群定制 gate），kubelet 驱逐链路被整体禁用：实测将根分区 available 压至 4% 以下并持续观察 90 秒，节点 DiskPressure condition 恒为 False、无任何 Pod 被驱逐。命中此 gate 时「Pod Evicted / DiskPressure=True」现象在该集群**不可达**——磁盘填充本身仍可注入且可观测（df 可证，节点定制检测组件会上报 RootDiskPressure 类事件），演练按「填充可验证 + 驱逐不可达」定案或更换集群，不得在报告中断言驱逐现象
 2. 使用 chaosblade 对目标节点的容器运行时目录注入磁盘填充，使其超过驱逐阈值：
    ```bash
    blade create k8s node-disk fill \
@@ -26,7 +34,7 @@
 4. 观察应用 A 的 Pod 驱逐和重建行为
 
 **注入验证**：
-1. 执行 `kubectl describe node <节点名>`，确认 Conditions 中 DiskPressure 为 True
+1. 执行 `kubectl describe node <节点名>`，确认 Conditions 中 DiskPressure 为 True（前置确证命中 `DisablePodEviction=true` 时此项在本集群不可达，按演练步骤第 1 步判读改验磁盘使用率与节点定制事件）
 2. 执行 `kubectl get pods --field-selector=status.phase=Failed`，确认有 Pod 被 Evicted
 3. 查看被驱逐 Pod 的详情，确认 reason 为 `The node was low on resource: ephemeral-storage`
 4. 确认应用 A 在其他节点重建 Pod
@@ -76,7 +84,7 @@ kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-imag
 ```bash
 # 提前恢复：删除填充文件（同时停掉已武装的 timer）
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
-  'systemctl stop blade-restore-diskfill 2>/dev/null; rm -f /var/lib/containerd/app-archive.log'
+  'systemctl stop blade-restore-diskfill.timer 2>/dev/null; rm -f /var/lib/containerd/app-archive.log'
 # 删除 debug Pod
 kubectl delete pod <debug-pod-name> --force --grace-period=0
 # 清理 Evicted Pod
@@ -84,6 +92,8 @@ kubectl delete pods --field-selector=status.phase=Failed
 ```
 
 注意事项：
-- 填充大小需按**增量**计算（填充量 = 分区总容量 × 目标使用率 − 当前已用量），确保超过驱逐阈值（默认 imagefs.available < 15%）；量太小不越阈值不触发驱逐，量太大把分区填满会影响恢复阶段写入
+- 填充大小需按**增量**计算（填充量 = 分区总容量 × 目标使用率 − 当前已用量），确保超过驱逐阈值——阈值随分区拓扑变化：容器运行时目录与根分区同分区时默认 `nodefs.available < 10%`，独立 imagefs 分区时默认 `imagefs.available < 15%`（显式 --eviction-hard 优先）；量太小不越阈值不触发驱逐，量太大把分区填满会影响恢复阶段写入
+- 演练前先按主方案演练步骤第 1 步做前置确证：feature-gates 含 `DisablePodEviction=true` 的集群驱逐链路被禁用，填充可注入可自恢复但不会出现 DiskPressure=True 与 Pod Evicted，须按「填充可验证 + 驱逐不可达」定案
 - 与 ChaosBlade `--percent` 不同，此方式需手动计算填充字节数
 - 自恢复基于 systemd-run transient timer 到期自动删除填充文件，补齐了 ChaosBlade `--timeout` 的自恢复能力；被驱逐的 Pod 由上层控制器自动重建，Evicted 残留记录需手动清理
+- 同名 transient timer 重复武装会报 `Unit blade-restore-diskfill.service was already loaded`（上次武装命令执行失败时 unit 以 failed 状态残留所致）；重武装前先按本文件注入命令的同等 chroot /host 通道形态清理残留：`systemctl stop blade-restore-diskfill.service; systemctl reset-failed blade-restore-diskfill.service`（武装命令成功执行过的 unit 无残留，可直接重武装）

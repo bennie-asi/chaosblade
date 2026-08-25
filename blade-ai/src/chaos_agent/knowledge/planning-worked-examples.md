@@ -4,19 +4,23 @@ topics:
   - target grounding
   - handling empty query results
   - method viability probing
+  - consequence chain reasoning
   - when to finish_planning vs keep probing
 fault_types:
   - all
-summary: "Three canonical Phase 1 traces showing the expected reasoning at the highest-failure moments: (1) a target identifier that returns empty — discover the correct one instead of rejecting or looping; (2) method preconditions that CAN be probed read-only — probe each documented path and commit to the one proven viable; (3) a precondition no read-only tool can answer — record it as an assumption and proceed, do not loop."
+summary: "Four canonical Phase 1 traces showing the expected reasoning at the highest-failure moments: (1) a target identifier that returns empty — discover the correct one instead of rejecting or looping; (2) method preconditions that CAN be probed read-only — probe each documented path and commit to the one proven viable; (3) a precondition no read-only tool can answer — record it as an assumption and proceed, do not loop; (4) an environment reaction a mutation may trigger — probe whether it can fire, and route around, surface, or reject; never bet silently."
+phases:
+  - plan
 ---
 
 # Planning Worked Examples (canonical traces)
 
 > **When to read this**: Load this when Phase 1 planning stalls — either a
 > query for the target came back empty, you are deciding which documented
-> injection path to commit to, or you cannot answer a method precondition and
-> are unsure whether to keep probing, reject, or finish. Each example shows
-> the expected behaviour end-to-end, not a rule to memorise.
+> injection path to commit to, you cannot answer a method precondition and
+> are unsure whether to keep probing, reject, or finish, or a mutation may
+> trigger an environment reaction beyond the approved scope. Each example
+> shows the expected behaviour end-to-end, not a rule to memorise.
 
 ## Example 1 — The target identifier is wrong, not absent
 
@@ -89,3 +93,36 @@ actually propagate through this kernel/runtime combination.
 answer; what remains is genuinely Phase 2's empirical question, and the system
 owns verification and replan there. Blocking planning on evidence that
 structurally cannot exist yet is the classic planning loop.
+
+## Example 4 — An environment reaction the mutation may trigger
+
+**Situation**: The approved drill fills the disk of a node to 90%. The direct
+effect is disk pressure; but the node runs the container runtime and kubelet
+on the SAME partition, and kubelet evicts pods when disk pressure trips its
+thresholds. The mutation's REAL effect is the direct effect PLUS that
+reaction — eviction of pods the user never approved touching.
+
+**Expected trace**:
+
+1. Reason the consequence chain explicitly: direct effect (partition ~90%)
+   plus the environment's reaction to it (kubelet DiskPressure → eviction
+   of co-located pods).
+2. Probe read-only whether the reaction can fire: which partition the fill
+   path sits on, whether the runtime/kubelet share it, and what the
+   eviction thresholds are.
+3. A reaction you can rule out (fill path on a dedicated partition, ample
+   headroom to the threshold) — record that evidence and proceed.
+4. A reaction you CANNOT rule out is a planning fact, not a gamble:
+   - route around it — a different fill path or a size that stays below
+     the eviction threshold, same approved fault effect; or
+   - surface it — keep the original mutation, put the reaction and its
+     blast radius in the plan so the user's approval decision covers it; or
+   - reject with that evidence when no variant keeps the approved scope.
+5. Never bet silently that the reaction will not fire — Phase 2 would then
+   discover the expanded blast radius by causing it.
+
+**Why this is right**: A mutation executes inside a live system that reacts;
+planning only the direct effect underestimates the blast radius precisely
+where it is cheapest to fix — before anything is injected. Probing the
+reaction's preconditions is read-only and free; absorbing the reaction after
+the fact is an incident.

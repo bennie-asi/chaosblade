@@ -96,6 +96,10 @@ kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- sh -c 'kil
 ```
 
 注意事项：
+- **容器 PID 1 不可挂起**：sidecar 容器的主进程（PID 1）受内核 SIGNAL_UNKILLABLE 保护，
+  `kill -STOP 1` 返回成功但进程不进入 T 状态（静默无效）——本路径只能作用于容器内
+  **非 init 进程**；若目标就是主进程，改走路径 B（freezer 冻结整个容器 cgroup，
+  等效实现「主进程挂起」语义）
 - 必须通过 `ps aux` 或 `pgrep` 确认实际进程名，不可猜测
 - 与 ChaosBlade 相比，kubectl exec 方式缺少自动超时恢复机制，需手动发送 SIGCONT
 - 如容器内无 `pgrep`，可用 `ps aux | grep <process-name>` 替代获取 PID

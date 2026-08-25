@@ -10,6 +10,10 @@ topics:
 fault_types:
   - all
 summary: "kubectl command reference: subcommand overview, JSONPath patterns, JSON output field reference, Events troubleshooting. Verification mapping migrated to fault-verification-strategies.md."
+phases:
+  - execute
+  - verify
+  - recover
 ---
 
 # kubectl Complete Reference (for fault drills)

@@ -10,7 +10,7 @@
 1. 确认目标 Pod 包含多个容器，明确 Sidecar 容器名称
 2. 确认 Sidecar 容器监听的端口（如 istio-proxy 的 15001/15006）
 3. 确认目标 Pod 所在 namespace 和 labels
-4. 若走路径 C（tc netem）：确认目标节点内核支持 netem（**内核级依赖**）。netem 由宿主机内核的 sch_netem 模块提供，容器与宿主共享内核，换容器 / 换临时容器都改变不了。只读探查：`kubectl exec <pod-name> -n <namespace> -- grep sch_netem /proc/modules`——有输出说明已加载；无输出**不能**判定不可行（注入时内核可能自动加载模块），记为待执行验证的假设。**判据以注入输出为准**：注入报 `RTNETLINK answers: Operation not supported` 或 `RTNETLINK answers: No such file or directory`（后者为节点上 sch_netem 模块文件本身缺失、内核自动加载失败，实测确证）即为内核不支持 netem 的确证
+4. 若走路径 C（tc netem）：确认目标节点内核支持 netem（**内核级依赖**）。netem 由宿主机内核的 sch_netem 模块提供，容器与宿主共享内核，换容器 / 换临时容器都改变不了。只读探查：`kubectl exec <pod-name> -n <namespace> -- grep sch_netem /proc/modules`——有输出说明已加载；无输出时可用更强的前置确证（实测）：经 node debug 载体执行 `chroot /host modprobe sch_netem` 试载，报 `FATAL: Module sch_netem not found` 即模块文件本身缺失（内核自动加载不可能成功），**注入前即可定案不可行**；实测 ACK/ASI al8 内核（5.10.134-13.1.al8）即为此形态——同一节点 netem 全家（loss/delay/corrupt）全部不可行，而 sch_tbf 存在（带宽受限场景可用，见 `Pod_网络带宽不足_带宽受限`）。**判据以注入输出为准**：注入报 `RTNETLINK answers: Operation not supported`、`RTNETLINK answers: No such file or directory`（后者为节点上 sch_netem 模块文件本身缺失、内核自动加载失败）或 `Error: Specified qdisc kind is unknown.`（RC=2，另一实测形态）即为内核不支持 netem 的确证
 
 **演练步骤**：
 1. 确认 Pod 内容器列表，获取 Sidecar 容器名称：
@@ -82,22 +82,23 @@ kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- sh -c \
 补齐 ChaosBlade `--timeout` 的自恢复能力；必须重定向后台化，否则 exec 挂住）：
 ```bash
 # ── 路径 A：容器内有真 iptables + NET_ADMIN
+# 两条命令分两次独立执行——不能用 && 串联：第二段 kubectl 会沦为第一条 exec
+# 载荷（sh -c）的死参数，注入静默丢失
 kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- sh -c \
-  '( sleep <duration>; iptables -D OUTPUT -j DROP ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; iptables -D OUTPUT -j DROP ) >/dev/null 2>&1 &'
 kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- iptables -A OUTPUT -j DROP
-# 仅丢弃特定端口流量：
+# 仅丢弃特定端口流量（同样两次独立执行，不能 && 串联）：
 kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- sh -c \
-  '( sleep <duration>; iptables -D OUTPUT -p tcp --sport <port> -j DROP ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; iptables -D OUTPUT -p tcp --sport <port> -j DROP ) >/dev/null 2>&1 &'
 kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- iptables -A OUTPUT -p tcp --sport <port> -j DROP
 
-# ── 路径 B：容器内有真 tc + NET_ADMIN（100% 丢包等效于网络中断）
+# ── 路径 B：容器内有真 tc + NET_ADMIN（100% 丢包等效于网络中断；同样两次独立执行）
 kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- sh -c \
-  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &'
 kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- tc qdisc add dev eth0 root netem loss 100%
 
 # ── 路径 C：容器内两者都不可用（精简镜像的常态）。临时容器与 Pod 内各容器共享同一个网络
-#    命名空间，所以在临时容器里操作 eth0 就等于操作这个 Pod 的网络栈；工具来自调试镜像
-# ── 路径 C：容器内无可用工具（精简镜像的常态）。
+#    命名空间，所以在临时容器里操作 eth0 就等于操作这个 Pod 的网络栈；工具来自调试镜像。
 #    先建【长驻】临时容器作为载体 —— 必须 sleep 保活；若把 tc 直接交给 kubectl debug，
 #    命令跑完容器即终止，后续 `kubectl exec -c <debugger>` 会报 container not found，
 #    故障将无法恢复（已实测）。
@@ -115,9 +116,10 @@ kubectl get pod <pod-name> -n <namespace> \
   -o jsonpath='{range .status.ephemeralContainerStatuses[*]}{.name}{"="}{.state}{"\n"}{end}'
 
 # 经载体注入：载体与目标容器共享网络命名空间，操作 eth0 即操作目标 Pod 的网卡。
-# 同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）
+# 同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）。
+# 两条命令分两次独立执行——不能用 && 串联（第二段会沦为第一条 exec 载荷的死参数）
 kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- sh -c \
-  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &'
 kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev eth0 root netem loss 100%
 ```
 - `<verified-cluster-image>`：必须是当前集群**已验证可拉取**且含 **iproute2**（非 BusyBox）的镜像。
@@ -129,7 +131,9 @@ kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev et
 - `--quiet`：不进入交互附着；**不要加 `-it`**
 - 载体名形如 `debugger-xxxxx`，注入/验证/恢复三步都要用同一个
 - **内核级依赖（仅路径 C）**：netem 需要宿主机内核支持 sch_netem。若注入报
-  `RTNETLINK answers: Operation not supported` 或 `RTNETLINK answers: No such file or directory`（模块文件缺失），即内核不支持 netem 的确证 —— 立即停止，
+  `RTNETLINK answers: Operation not supported`、`RTNETLINK answers: No such file or directory`
+  （模块文件缺失）或 `Error: Specified qdisc kind is unknown.`（RC=2，另一实测形态），
+  即内核不支持 netem 的确证 —— 立即停止，
   **不要重试、不要换容器或重建临时容器**（内核是同一个，重试只是空转），发起 replan
   并附上该报错证据，改选 iptables 路径或判定不可行
 

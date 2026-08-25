@@ -55,29 +55,31 @@ blade destroy <experiment-uid>
 前提条件：具备 root 权限
 
 注入命令（**先武装定时恢复，再注入**；到期自动重启时间同步服务并校时，补齐自恢复能力；
-武装→停服务→改时间必须 `&&` 全链串联，武装失败时不得执行偏移）：
+武装→停服务→改时间逐条独立执行，武装未确认成功（输出含 Running timer as unit）时不得执行偏移）：
 ```bash
 # 1) 先查本机用的是哪个时间同步服务（三者取其一，不要盲试）
 systemctl is-active ntpd
 systemctl is-active chronyd
 
-# 2) 武装定时恢复（定时器由宿主机 systemd(PID 1) 管理）→ 停服务 → 改时间，全链 && 串联
+# 2) 武装定时恢复（定时器由宿主机 systemd(PID 1) 管理）→ 停服务 → 改时间。
+#    三条命令分次独立执行（执行通道不支持 && 串联）；前一条成功返回（武装以输出含
+#    Running timer as unit 为准）后再执行下一条，武装失败时不得继续
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-ntp \
-  sh -c 'systemctl start chronyd; chronyc makestep 2>/dev/null || true' &&
-systemctl stop chronyd &&
+  sh -c 'systemctl start chronyd; chronyc makestep 2>/dev/null || true'
+systemctl stop chronyd
 date -s "<offset>"   # 偏移量按演练目标确定，如 "+2 hours"（向前）、"-30 minutes"（向后）
 
-# 若两者都没有，改用 timedatectl 关闭同步（武装对应还原，同样全链 && 串联）：
+# 若两者都没有，改用 timedatectl 关闭同步（武装对应还原，同样逐条独立执行）：
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-ntp \
-  timedatectl set-ntp true &&
-timedatectl set-ntp false &&
+  timedatectl set-ntp true
+timedatectl set-ntp false
 date -s "<offset>"
 ```
 
 恢复命令（提前恢复；先停武装的定时器再手动还原）：
 ```bash
 # 0) 终止武装的定时器
-systemctl stop blade-restore-ntp 2>/dev/null
+systemctl stop blade-restore-ntp.timer 2>/dev/null
 
 # 1) 启回注入时停掉的那个服务（与注入步骤对应，不要盲试）
 systemctl start chronyd
@@ -93,3 +95,5 @@ ntpdate pool.ntp.org
 注意事项：
 - 时间偏移会影响所有依赖系统时钟的应用（日志、证书、定时器、分布式一致性）
 - 自恢复基于注入前武装的 systemd-run transient timer（到期自动启回时间同步服务并校时）；提前恢复仍用上方手动命令
+- 同名 transient timer 重复武装会报 `Unit blade-restore-ntp.service was already loaded`（上次武装命令执行失败时 unit 以 failed 状态残留所致）；重武装前先清理残留：`systemctl stop blade-restore-ntp.service; systemctl reset-failed blade-restore-ntp.service`（武装命令成功执行过的 unit 无残留，可直接重武装）
+- 恢复后时间是否立即校回取决于偏移量与 chrony.conf `makestep` 阈值（如 `makestep 10 3` 表示仅启动后前 3 次更新中偏差 >10 秒才自动步进）：偏移量 ≤ 阈值时 chronyd 走纯 slew 缓慢修正（实测 +10 秒偏移约 2.5 分钟收敛），时间敏感的恢复验证需预留等待窗口或手动 `date -s` 精确校回；`chronyc makestep` 在 chronyd 刚启动、尚未完成首次测量时执行是 no-op

@@ -9,7 +9,7 @@
 1. 确认目标应用已正常运行，且有对外网络调用（数据库、缓存、上下游服务等）
 2. 确认监控系统可观测网络请求成功率和延迟指标
 3. 确认目标 Pod 的标签选择器和命名空间
-4. 若走 kubectl-native 降级方案的 tc netem 路径：确认目标节点内核支持 netem（**内核级依赖，路径 A/B 都绕不开**）。netem 由宿主机内核的 sch_netem 模块提供，容器与宿主共享内核，换 Pod / 换临时容器都改变不了。只读探查：`kubectl exec <pod-name> -n <namespace> -- grep sch_netem /proc/modules`——有输出说明已加载；无输出**不能**判定不可行（注入时内核可能自动加载模块），记为待执行验证的假设。**判据以注入输出为准**：注入报 `RTNETLINK answers: Operation not supported` 或 `RTNETLINK answers: No such file or directory`（后者为节点上 sch_netem 模块文件本身缺失、内核自动加载失败，实测确证）即为内核不支持 netem 的确证
+4. 若走 kubectl-native 降级方案的 tc netem 路径：确认目标节点内核支持 netem（**内核级依赖，路径 A/B 都绕不开**）。netem 由宿主机内核的 sch_netem 模块提供，容器与宿主共享内核，换 Pod / 换临时容器都改变不了。只读探查：`kubectl exec <pod-name> -n <namespace> -- grep sch_netem /proc/modules`——有输出说明已加载；无输出时可用更强的前置确证（实测）：经 node debug 载体执行 `chroot /host modprobe sch_netem` 试载，报 `FATAL: Module sch_netem not found` 即模块文件本身缺失（内核自动加载不可能成功），**注入前即可定案不可行**；实测 ACK/ASI al8 内核（5.10.134-13.1.al8）即为此形态——同一节点 netem 全家（loss/delay/corrupt）全部不可行，而 sch_tbf 存在（带宽受限场景可用，见 `Pod_网络带宽不足_带宽受限`）。**判据以注入输出为准**：注入报 `RTNETLINK answers: Operation not supported`、`RTNETLINK answers: No such file or directory`（后者为节点上 sch_netem 模块文件本身缺失、内核自动加载失败）或 `Error: Specified qdisc kind is unknown.`（RC=2，另一实测形态）即为内核不支持 netem 的确证
 
 **演练步骤**：
 1. 确认目标 Pod 的标签选择器和命名空间：
@@ -28,7 +28,7 @@
    ```
    - `--source-port`：限定丢包端口（如 3306 丢弃 MySQL 流量、53 丢弃 DNS 流量）
    - 不指定端口时为全量丢包（慎用，影响所有流量包括监控和健康检查）
-3. 记录返回的 blade_uid，用于后续恢复
+3. 记录返回的 experiment_uid，用于后续恢复
 
 **注入验证**：
 1. 在目标 Pod 内验证网络连通性丧失：
@@ -45,7 +45,7 @@
 **注入恢复**：
 1. 销毁 ChaosBlade 实验：
    ```bash
-   blade destroy <blade_uid>
+   blade destroy <experiment_uid>
    ```
 2. 如 Pod 因丢包导致健康检查失败被重启，等待新 Pod Ready
 
@@ -83,9 +83,11 @@ kubectl exec <pod-name> -n <namespace> -- tc -Version
 
 ```bash
 # ── 路径 A：容器内确认是 iproute2 tc，且有 NET_ADMIN（CapEff 全零的容器会报 EPERM）
-# 先武装定时自删（后台进程与目标容器同 netns，到期自动移除规则；必须重定向后台化）
+# 先武装定时自删（后台进程与目标容器同 netns，到期自动移除规则；必须重定向后台化）。
+# 两条命令分两次独立执行——不能用 && 串联：第二段 kubectl 会沦为第一条 exec
+# 载荷（sh -c）的死参数，注入静默丢失
 kubectl exec <pod-name> -n <namespace> -- sh -c \
-  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &'
 kubectl exec <pod-name> -n <namespace> -- tc qdisc add dev eth0 root netem loss <percent>%
 
 # ── 路径 B：容器内无可用 tc（精简镜像的常态）。临时容器与目标容器共享网络命名空间，
@@ -108,9 +110,10 @@ kubectl get pod <pod-name> -n <namespace> \
   -o jsonpath='{range .status.ephemeralContainerStatuses[*]}{.name}{"="}{.state}{"\n"}{end}'
 
 # 经载体注入：载体与目标容器共享网络命名空间，操作 eth0 即操作目标 Pod 的网卡。
-# 同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）
+# 同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）。
+# 两条命令分两次独立执行——不能用 && 串联（第二段会沦为第一条 exec 载荷的死参数）
 kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- sh -c \
-  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &'
 kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev eth0 root netem loss <percent>%
 ```
 - `<verified-cluster-image>`：当前集群**已验证可拉取**且含 iproute2 的镜像。先看集群在用哪些仓库
@@ -119,15 +122,18 @@ kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev et
 - `--quiet`：不进入交互附着；**不要加 `-it`**
 - 载体名形如 `debugger-xxxxx`，注入/验证/恢复三步都要用同一个
 - **内核级依赖（两条路径相同）**：netem 需要宿主机内核支持 sch_netem。若注入报
-  `RTNETLINK answers: Operation not supported` 或 `RTNETLINK answers: No such file or directory`（模块文件缺失），即内核不支持 netem 的确证 —— 立即停止，
+  `RTNETLINK answers: Operation not supported`、`RTNETLINK answers: No such file or directory`
+  （模块文件缺失）或 `Error: Specified qdisc kind is unknown.`（RC=2，另一实测形态），
+  即内核不支持 netem 的确证 —— 立即停止，
   **不要重试、不要换 Pod 或重建临时容器**（内核是同一个，重试只是空转），发起 replan
   并附上该报错证据，改选其他可行方案（如 iptables 全丢）或判定不可行
 
 只需要「完全断开某个依赖」而非按比例丢包时，可用 iptables（需容器内真有 `iptables`，
 精简镜像通常没有；节点上一般有，但那要走 node 级用例）——同样先武装定时 `-D` 再 `-A`：
 ```bash
+# 两条命令分两次独立执行（&& 串联会使第二段沦为第一条 exec 载荷的死参数）：
 kubectl exec <pod-name> -n <namespace> -- sh -c \
-  '( sleep <duration>; iptables -D OUTPUT -p tcp --dport <port> -j DROP ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; iptables -D OUTPUT -p tcp --dport <port> -j DROP ) >/dev/null 2>&1 &'
 kubectl exec <pod-name> -n <namespace> -- iptables -A OUTPUT -p tcp --dport <port> -j DROP
 ```
 

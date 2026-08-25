@@ -62,16 +62,17 @@ df -h <path>
 # 1) 填充量 = 分区总容量 × 目标使用率 − 当前已用量
 #    例：分区 100G、已用 40G、目标 90% → 100×0.9 − 40 = 50G
 
-# 2) 先武装定时清理（到期自动删除填充文件，补齐自恢复能力），再填充
+# 2) 先武装定时清理（到期自动删除填充文件，补齐自恢复能力），再填充。
+#    两条命令分两次独立执行（执行通道不支持 && 串联）；武装成功（输出含 Running timer as unit）后再执行填充
 systemd-run --on-active=<recovery-seconds>s --unit=blade-rmfill-host \
-  rm -f <path>/app-archive.dat &&
+  rm -f <path>/app-archive.dat
 # 使用 fallocate 快速创建大文件（推荐，速度快）
 fallocate -l <算出的填充量>G <path>/app-archive.dat
 
-# 若主机无 fallocate：用 dd 替代上面命令链的 fallocate 部分（武装链保持不变，
-# 同样 && 串联，禁止单独执行 dd 而漏掉武装）：
+# 若主机无 fallocate：用 dd 替代上面的 fallocate 部分（武装保持不变，同样
+# 须先武装成功再填充，禁止单独执行 dd 而漏掉武装）：
 # systemd-run --on-active=<recovery-seconds>s --unit=blade-rmfill-host \
-#   rm -f <path>/app-archive.dat &&
+#   rm -f <path>/app-archive.dat
 # dd if=/dev/zero of=<path>/app-archive.dat bs=1M count=<填充量换算的MB数>
 ```
 > 量太小达不到目标使用率；量太大把分区填到 100% 会影响验证观察与恢复阶段写入，
@@ -79,7 +80,7 @@ fallocate -l <算出的填充量>G <path>/app-archive.dat
 
 恢复命令（提前恢复；先停武装的定时器再清理）：
 ```bash
-systemctl stop blade-rmfill-host 2>/dev/null
+systemctl stop blade-rmfill-host.timer 2>/dev/null
 truncate -s 0 <path>/app-archive.dat
 ```
 
@@ -87,3 +88,4 @@ truncate -s 0 <path>/app-archive.dat
 - 原生方式无法按百分比精确控制，需按**增量**手动计算填充大小（填充量 = 分区总容量 × 目标使用率 − 当前已用量）
 - 自恢复基于注入前武装的 systemd-run transient timer（到期自动删除填充文件）；提前恢复仍用上方手动命令
 - 注意不要对根分区执行填满操作
+- 同名 transient timer 重复武装会报 `Unit blade-rmfill-host.service was already loaded`（上次武装命令执行失败时 unit 以 failed 状态残留所致）；重武装前先清理残留：`systemctl stop blade-rmfill-host.service; systemctl reset-failed blade-rmfill-host.service`（武装命令成功执行过的 unit 无残留，可直接重武装）

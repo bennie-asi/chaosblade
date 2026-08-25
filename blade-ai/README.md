@@ -42,7 +42,7 @@ The generic plumbing — memory compaction, progressive skill loading — isn't 
 
 ## How it works
 
-BLADE AI orchestrates the whole drill lifecycle as a deterministic LangGraph state machine. Both entry paths — free-form natural language and deterministic `--direct` parameters — converge at the same `safety_check`, after which every run follows the identical ordered spine.
+BLADE AI orchestrates the whole drill lifecycle as a deterministic LangGraph state machine. Both entry forms — free-form natural language and structured CLI parameters — are parsed into the same fault intent, and every run follows the identical ordered spine after the same `safety_check`.
 
 ![Three-phase ReAct pipeline: Plan, Safety Check, Confirm Gate, Execute, Verify, plus an independent Recover subgraph](assets/pipeline.png)
 
@@ -101,10 +101,10 @@ Config priority: init args > `~/.blade-ai/config.json` > environment variables (
 # Natural-language mode
 blade-ai inject -i "inject 80% CPU pressure into my-pod in the default namespace for 120s"
 
-# Structured mode (CI/CD-friendly, zero LLM)
+# Structured mode (CI/CD-friendly)
 blade-ai inject --scope pod --target cpu --action fullload \
   -n "app=myapp" --namespace default \
-  -p "cpu-percent=80" -d 120 --direct
+  -p "cpu-percent=80" -d 120
 
 # List available scenarios
 blade-ai list
@@ -192,7 +192,7 @@ BLADE AI is layered: entry adapters on top, a unified LangGraph orchestration co
 
 *Click the image to open the full-resolution original for detail.*
 
-A single `AgentState` (organized by lifecycle: identity / intent / planning / safety / confirmation / execution / verification / recovery / loop-control / results / memory) is the source of truth; the deterministic `--direct` path and the LLM planning path merge at `safety_check`; the Recover graph is compiled independently with its own ReAct loop; and SSE streaming (token / tool / confirm / result …) threads through nodes → FastAPI → TUI as the unified real-time channel. Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+A single `AgentState` (organized by lifecycle: identity / intent / planning / safety / confirmation / execution / verification / recovery / loop-control / results / memory) is the source of truth; natural-language and structured inputs are planned by the LLM and every run converges at `safety_check`; the Recover graph is compiled independently with its own ReAct loop; and SSE streaming (token / tool / confirm / result …) threads through nodes → FastAPI → TUI as the unified real-time channel. Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 

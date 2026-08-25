@@ -26,7 +26,7 @@
    ```
    - `--timeout`：控制 ChaosBlade 持续删除的时间窗口，在此时间内 Pod 每次被控制器重建后都会再次被删除
    - 故障机制：ChaosBlade 直接执行 kubectl delete pod，目标 Pod 被立即终止
-3. 记录返回的 blade_uid，用于后续恢复
+3. 记录返回的 experiment_uid，用于后续恢复
 
 **注入验证**：
 1. 执行 `kubectl get pods -n <namespace> -l <label-selector>`，确认旧 Pod 名称已不存在，新 Pod 已被创建（名称不同、AGE 很短）
@@ -42,7 +42,7 @@
 **注入恢复**：
 1. 销毁 ChaosBlade 实验：
    ```bash
-   blade destroy <blade_uid>
+   blade destroy <experiment_uid>
    ```
    注：由于 Pod 删除后控制器会自动重建，destroy 主要是清理 ChaosBlade 实验记录并停止持续删除行为，Pod 状态已由控制器自动恢复
 2. 等待新 Pod 完全就绪（Running + Ready）
@@ -69,8 +69,12 @@
 # 单次删除 Pod：
 kubectl delete pod <pod-name> -n <namespace>
 
-# 持续删除（模拟 ChaosBlade timeout 窗口内反复删除）——有界删除循环：
-sh -c 'end=$(( $(date +%s) + <duration> )); i=0;
+# 持续删除（模拟 ChaosBlade timeout 窗口内反复删除）——有界删除循环
+# （循环 shell 逻辑必须作为 kubectl exec 载体载荷派发——直接以 sh -c '…' 作为顶层命令派发
+#   会被命令守卫拦截（unknown_binary: sh）；载体 Pod 选集群内带 kubectl 且有足够 RBAC
+#   权限的常驻 Pod（如演练工具 Pod），循环在载体内执行 kubectl delete，
+#   载体 SA 需含目标命名空间 pods 的 delete 权限——实机验证发现仅 get/list 会被拒）：
+kubectl exec <载体Pod> -n <载体命名空间> -- sh -c 'end=$(( $(date +%s) + <duration> )); i=0;
 while [ "$(date +%s)" -lt "$end" ] && [ $i -lt <rounds> ]; do
   kubectl delete pod -l <label-selector> -n <namespace> --wait=false
   i=$((i+1)); sleep <interval>

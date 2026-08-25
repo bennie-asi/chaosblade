@@ -65,41 +65,47 @@ blade destroy <experiment-uid>
 
 注入命令（**先武装定时恢复，再注入**——timer 由宿主机 systemd(PID 1) 管理，到期自动还原）：
 ```bash
-# 方式一：权限篡改 —— 先记录原权限并武装定时还原
-ORIG_MODE=$(stat -c %a <filepath>)
+# 方式一：权限篡改 —— 先记录原权限并武装定时还原。
+# 各命令独立执行（执行通道不支持 shell 变量与 && 串联）：先用只读 stat 取到
+# 原权限数字，再把数值直接写入下面的 timer 命令；武装成功（输出含 Running timer as unit）后再执行 chmod 000
+stat -c %a <filepath>
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-filemode \
-  chmod $ORIG_MODE <filepath> &&
+  chmod <stat取到的原权限数字> <filepath>
 chmod 000 <filepath>
 
-# 方式二：内容清空 —— 备份→武装→清空必须全链 && 串联：
+# 方式二：内容清空 —— 备份→武装→清空逐条独立执行：
 # 备份失败时武装与清空都不执行，避免「无备份却已清空」的不可恢复破坏
-cp <filepath> <filepath>.bak &&
+# （引号内的 && 属 timer 载荷，到期由目标机 shell 执行，保留原样）
+cp <filepath> <filepath>.bak
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-filecontent \
-  sh -c 'cp <filepath>.bak <filepath> && rm -f <filepath>.bak' &&
+  sh -c 'cp <filepath>.bak <filepath> && rm -f <filepath>.bak'
 truncate -s 0 <filepath>
 
-# 方式三：文件移走（同目录，避免跨文件系统）
+# 方式三：文件移走（同目录，避免跨文件系统）。
+# 两条命令分两次独立执行；武装成功（输出含 Running timer as unit）后再执行移走
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-filemove \
-  mv <filepath>.orig <filepath> &&
+  mv <filepath>.orig <filepath>
 mv <filepath> <filepath>.orig
 ```
 
 恢复命令（timer 到期前可提前手动恢复，同时停掉已武装的 timer）：
 ```bash
 # 方式一恢复：
-systemctl stop blade-restore-filemode 2>/dev/null
+systemctl stop blade-restore-filemode.timer 2>/dev/null
 chmod <original-mode> <filepath>
 
-# 方式二恢复：
-systemctl stop blade-restore-filecontent 2>/dev/null
-cp <filepath>.bak <filepath> && rm -f <filepath>.bak
+# 方式二恢复（两条命令独立执行；rm -f 收尾清理演练自建的备份文件）：
+systemctl stop blade-restore-filecontent.timer 2>/dev/null
+cp <filepath>.bak <filepath>
+rm -f <filepath>.bak
 
 # 方式三恢复：
-systemctl stop blade-restore-filemove 2>/dev/null
+systemctl stop blade-restore-filemove.timer 2>/dev/null
 mv <filepath>.orig <filepath>
 ```
 
 注意事项：
 - 操作前必须备份原文件，否则无法恢复
-- 自恢复基于 systemd-run transient timer 到期自动执行逆操作，补齐了 ChaosBlade `--timeout` 的自恢复能力；`&&` 串联保证武装失败时不会执行篡改操作；方式一的原权限必须在武装前用 `stat -c %a` 取真实值固化进 timer，不可事后猜测
+- 自恢复基于 systemd-run transient timer 到期自动执行逆操作，补齐了 ChaosBlade `--timeout` 的自恢复能力；武装与注入分次独立执行，须确认武装成功（输出含 `Running timer as unit`）后再执行篡改操作（等价于 `&&` 串联的失败短路保证）；方式一的原权限必须在武装前用 `stat -c %a` 取真实值固化进 timer，不可事后猜测
+- 同名 transient timer 重复武装会报 `Unit blade-restore-*.service was already loaded`（上次武装命令执行失败时 unit 以 failed 状态残留所致）；重武装前先清理残留：`systemctl stop <unit>.service; systemctl reset-failed <unit>.service`（武装命令成功执行过的 unit 无残留，可直接重武装）
 - chmod 000 对 root 用户无效（root 可绕过权限检查）

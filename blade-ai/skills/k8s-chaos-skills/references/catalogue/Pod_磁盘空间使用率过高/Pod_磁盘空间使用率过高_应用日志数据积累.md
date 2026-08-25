@@ -29,7 +29,7 @@
    - `--percent`：磁盘使用率目标百分比（优先级高于 `--size`）
    - `--size`：填充大小（MB），与 `--percent` 二选一
    - `--retain-handle`：是否保留文件句柄（保留时 rm 文件后空间不释放，更真实模拟日志占用）
-3. 记录返回的 blade_uid，用于后续恢复
+3. 记录返回的 experiment_uid，用于后续恢复
 
 **注入验证**：
 1. 进入应用 A 的 Pod，确认磁盘使用率已达目标：
@@ -50,7 +50,7 @@
 **注入恢复**：
 1. 销毁 ChaosBlade 磁盘填充实验：
    ```bash
-   blade destroy <blade_uid>
+   blade destroy <experiment_uid>
    ```
 2. 填充文件会随实验销毁自动清理
 3. 若使用 `--retain-handle` 且空间未释放，可重启 Pod
@@ -91,9 +91,11 @@ kubectl exec <pod-name> -n <namespace> -- df -h <目标目录>
 
 # 1) 填充量 = 文件系统总容量 × 目标使用率 − 当前已用量（或：可用量 − 少量保留，达到打满效果）
 
-# 2) 先武装定时清理（容器内后台定时器，到期自动删除填充文件），再填充
+# 2) 先武装定时清理（容器内后台定时器，到期自动删除填充文件），再填充。
+#    两条命令分两次独立执行——不能用 && 串联：第二段 kubectl 会沦为第一条 exec
+#    载荷（sh -c）的死参数，填充静默丢失
 kubectl exec <pod-name> -n <namespace> -- sh -c \
-  '( sleep <duration>; rm -f <目标目录>/fill_file ) >/dev/null 2>&1 &' &&
+  '( sleep <duration>; rm -f <目标目录>/fill_file ) >/dev/null 2>&1 &'
 # 使用 fallocate 快速填充磁盘
 kubectl exec <pod-name> -n <namespace> -- fallocate -l <算出的填充量>G <目标目录>/fill_file
 # 或使用 dd：
@@ -138,11 +140,19 @@ kubectl exec <pod-name> -n <namespace> -- rm -f <目标目录>/fill_file
    kubectl get pod <pod-name> -n <namespace> -o jsonpath={.spec.nodeName}
    ```
 
-2. 在节点上定位并确认设备归属。**宿主机路径规律（实测）**：
+2. 在节点上定位并确认设备归属。**宿主机路径规律（实测，前提是 kubelet root-dir 为默认值）**：
    ```
-   PVC/云盘 : /var/lib/kubelet/pods/<PodUID>/volumes/kubernetes.io~csi/<volumeHandle>/mount
-   emptyDir : /var/lib/kubelet/pods/<PodUID>/volumes/kubernetes.io~empty-dir/<卷名>
+   PVC/云盘 : <kubelet-root-dir>/pods/<PodUID>/volumes/kubernetes.io~csi/<volumeHandle>/mount
+   emptyDir : <kubelet-root-dir>/pods/<PodUID>/volumes/kubernetes.io~empty-dir/<卷名>
    ```
+   ⚠️ **kubelet root-dir 不一定是 `/var/lib/kubelet`（实测确证）**：有的集群 kubelet 带
+   `--root-dir=/home/t4/kubernetes/lib/kubelet` 之类的自定义参数，按默认路径拼会
+   `No such file or directory`。先从 kubelet 进程命令行推导真实 root-dir：
+   ```bash
+   kubectl debug node/<node-name> --image=<verified-cluster-image> --profile=sysadmin --quiet \
+     -- chroot /host sh -c 'tr "\0" " " < /proc/$(pidof kubelet)/cmdline | grep -o "root-dir=[^ ]*" || echo /var/lib/kubelet'
+   ```
+   下文的 `/var/lib/kubelet` 均按探测结果替换。
    ```bash
    # 列出该 Pod 的全部卷，并确认各自所在设备 —— 只有独立设备才继续
    kubectl debug node/<node-name> --image=<verified-cluster-image> --profile=sysadmin --quiet \
@@ -186,7 +196,8 @@ kubectl debug node/<node-name> --image=<verified-cluster-image> --profile=sysadm
 注意事项：
 - **写宿主机路径等于写进容器** —— 同一份存储的两个视角，容器内立刻可见
 - 目标路径必须是**步骤 2 实测确认过的**，不要凭规律直接拼 —— `volumeHandle` 目录名
-  （如 `d-hn3g3bxq9181lyh1roo4`）无法从 Pod spec 推导，只能实地 `ls`
+  （如 `d-hn3g3bxq9181lyh1roo4`）无法从 Pod spec 推导，只能实地 `ls`；同理 kubelet
+  root-dir 也必须先探测（见步骤 2 警示），实测有集群用 `/home/t4/kubernetes/lib/kubelet`
 - Pod UID 在此处**保持原样带 `-`**（`/var/lib/kubelet/pods/001f9dc7-7c42-...`），
   与 cgroup 路径要下划线化的规则相反，不要混用
 - Pod 重建后 `<PodUID>` 目录会更换，旧目录由 kubelet 回收；若注入后 Pod 已重建，

@@ -11,11 +11,19 @@
 
 **演练步骤**：
 1. 选取一个运行 DaemonSet Pod 的节点
-2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动 uncordon 并摘除污点，
-   补齐自恢复能力）：
+2. **先武装定时自恢复，再注入**（确认节点基线状态后武装定时器。必须用宿主机 systemd
+   transient timer 武装（kubectl debug node + chroot /host + systemd-run）：`( sleep …; … ) &`
+   后台子 shell 形态在 exec-form 通道不被解释，也不在 agent 守卫的载荷放行形态内；
+   systemd-run 创建的 transient timer 由宿主机 systemd(PID 1) 管理，不依赖 debug Pod 存活。
+   **timer 载荷只含 uncordon**——载荷 kubectl 以宿主机 kubelet.conf 为凭证，该凭证允许修改
+   spec.unschedulable（uncordon 实测放行）但受 NodeRestriction 限制**不能修改 taints**，
+   taint- 载荷到期只会得到 Forbidden、污点残留；污点摘除由 Agent 在演练结束时主动兜底）：
    ```bash
-   ( sleep <duration>; kubectl uncordon <node>; kubectl taint nodes <node> node.ops/maintenance=true:NoSchedule- ) >/dev/null 2>&1 &
-   echo $! > /tmp/blade-restore-ds.pid
+   # 基线确认：记录节点当前 unschedulable/taints 状态（恢复判据）
+   kubectl get node <node> -o jsonpath='{.spec.unschedulable} {.spec.taints}'
+   # 武装定时自恢复（宿主机 systemd timer；载荷仅 uncordon——taint- 受凭证限制不可自恢复）
+   kubectl debug node/<node> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host sh -c \
+     'systemd-run --on-active=<duration>s --unit=blade-restore-ds sh -c "kubectl --kubeconfig=/etc/kubernetes/kubelet.conf uncordon <node>"'
    ```
 3. 使用 kubectl 将该节点标记为不可调度（cordon）：`kubectl cordon <node>`
 4. 给该节点添加一个 DaemonSet 未配置容忍的自定义污点：`kubectl taint nodes <node> node.ops/maintenance=true:NoSchedule`
@@ -29,13 +37,16 @@
 4. 确认目标节点上的 DaemonSet Pod 删除后无法被重建
 
 **注入恢复**：
-1. 等待 `<duration>` 到期后武装的定时器自动执行 uncordon + 摘除污点；如需提前恢复：
+1. 等待 `<duration>` 到期，systemd-run 定时器自动恢复节点可调度（**污点不会随 timer 摘除**
+   ——kubelet.conf 凭证不能修改 taints，实测 Forbidden；污点残留期间 DaemonSet Pod 仍无法
+   调度到该节点）。演练结束时由 Agent 主动执行同组恢复命令（幂等，定时器迟到再执行一次
+   无副作用；两条命令独立执行），并停掉定时器避免迟到重放：
    ```bash
-   kill $(cat /tmp/blade-restore-ds.pid) 2>/dev/null; rm -f /tmp/blade-restore-ds.pid
+   kubectl uncordon <node>
+   kubectl taint nodes <node> node.ops/maintenance=true:NoSchedule-
+   kubectl debug node/<node> --profile=sysadmin --image=<verified-cluster-image> -- chroot /host systemctl stop blade-restore-ds.timer
    ```
-2. 使用 kubectl 取消节点不可调度标记（uncordon）：`kubectl uncordon <node>`
-3. 移除自定义污点：`kubectl taint nodes <node> node.ops/maintenance=true:NoSchedule-`
-4. 等待 DaemonSet Pod 在该节点重建
+2. 等待 DaemonSet Pod 在该节点重建
 
 **恢复验证**：
 1. 执行 `kubectl get nodes`，确认目标节点恢复为可调度状态

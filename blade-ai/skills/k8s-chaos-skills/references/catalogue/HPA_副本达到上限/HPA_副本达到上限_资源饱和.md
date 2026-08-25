@@ -52,10 +52,12 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'stress-ng --cpu 0 --cpu-load <p
 
 # 方式二：容器无 stress-ng，用 shell 循环。
 # 关键点：① 每个循环重定向到 /dev/null（否则 exec 会挂到 10s 超时）；
-# ② PID 落盘 + 按文件定时 kill 实现可靠自动恢复；③ 单核循环，多核需起多个（N）。
+# ② PID 落盘 + 按文件定时 kill 实现可靠自动恢复；③ 单核循环，多核需起多个（N）；
+# ④ 计数用 while 自增而非 $(seq)——busybox 1.33 无 seq applet（exit 127），
+#    $(seq 1 N) 展开为空会使 for 空转零注入（静默失败）。
 # 同样对每个 Pod 各执行一次。sh -c 的载荷整体是一个参数，内部的 for/while/&
 # 由容器内的 sh 解释，不需要外层 shell。
-kubectl exec <pod-name> -n <namespace> -- sh -c ': > /tmp/loadgen-worker.pids; for i in $(seq 1 <N>); do ( while :; do :; done ) >/dev/null 2>&1 & echo $! >> /tmp/loadgen-worker.pids; done; ( sleep <duration>; kill $(cat /tmp/loadgen-worker.pids) 2>/dev/null; rm -f /tmp/loadgen-worker.pids ) >/dev/null 2>&1 &'
+kubectl exec <pod-name> -n <namespace> -- sh -c ': > /tmp/loadgen-worker.pids; i=1; while [ $i -le <N> ]; do ( while :; do :; done ) >/dev/null 2>&1 & echo $! >> /tmp/loadgen-worker.pids; i=$((i+1)); done; ( sleep <duration>; kill $(cat /tmp/loadgen-worker.pids) 2>/dev/null; rm -f /tmp/loadgen-worker.pids ) >/dev/null 2>&1 &'
 ```
 
 恢复命令（从精确到兜底）：

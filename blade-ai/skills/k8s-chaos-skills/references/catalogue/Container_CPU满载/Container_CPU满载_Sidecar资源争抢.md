@@ -67,12 +67,16 @@
 # 方式一：容器内有 stress-ng（后台+重定向让 exec 立即返回，--timeout 自带自动恢复）
 kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- \
   sh -c 'stress-ng --cpu 0 --cpu-load <percent> --timeout <duration>s >/dev/null 2>&1 &'
-# 方式二：容器无 stress-ng，用 shell 循环（重定向避免 exec 挂起；PID 落盘定时自动 kill）：
+# 方式二：容器无 stress-ng，用 shell 循环（重定向避免 exec 挂起；PID 落盘定时自动 kill；
+# 计数用 while 自增而非 $(seq)——busybox 1.33 无 seq applet（exit 127），
+# $(seq 1 N) 展开为空会使 for 空转零注入（静默失败））：
 kubectl exec <pod-name> -c <sidecar-container-name> -n <namespace> -- sh -c '
   : > /tmp/loadgen-worker.pids
-  for i in $(seq 1 <N>); do
+  i=1
+  while [ $i -le <N> ]; do
     ( while :; do :; done ) >/dev/null 2>&1 &
     echo $! >> /tmp/loadgen-worker.pids
+    i=$((i+1))
   done
   ( sleep <duration>; kill $(cat /tmp/loadgen-worker.pids) 2>/dev/null; rm -f /tmp/loadgen-worker.pids ) >/dev/null 2>&1 &
 '

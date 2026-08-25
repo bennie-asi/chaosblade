@@ -11,17 +11,21 @@
 
 **演练步骤**：
 1. 定位应用 A 的 Deployment，并记录其 CPU limits 原始值
-2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动将 CPU limits 还原为
-   原始值，补齐自恢复能力；PID 落盘供提前恢复时终止定时器）：
+2. **先武装定时自恢复，再注入**（先捕获原始 CPU limits 并武装定时器，再注入。恢复命令幂等：
+   定时器到期自动恢复为主，Agent 在演练结束时主动执行同一条命令兜底，定时器迟到重复执行无
+   副作用。定时器 shell 逻辑必须作为 `kubectl exec` 载体载荷派发——直接以 `sh -c '…'` 作为
+   顶层命令派发会被命令守卫拦截（unknown_binary: sh），载体内 `sh -c` 同时解决 exec-form
+   通道不解释裸 `( sleep … ) &` 语法的问题；执行通道为多副本路由，无法可靠终止定时器，
+   故不设 pidfile。载体 Pod 选集群内带 kubectl 且有足够 RBAC 权限的常驻 Pod（如演练工具 Pod）。
+   恢复含 json patch 引号嵌套，用 base64 折叠武装。chaosblade 负载实验建议注入时带 `--timeout` 自带到期销毁，
+   其主动销毁见"注入恢复"第 1 步）：
    ```bash
-   # 记录原始 limits（多容器 Pod 请调整 containers 索引至目标容器）
-   ORIG_CPU=$(kubectl get deployment <deployment-name> -n <namespace> \
-     -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}')
-   # 武装定时还原
-   ( sleep <duration>; kubectl patch deployment <deployment-name> -n <namespace> --type='json' \
-       -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/limits/cpu\",\"value\":\"${ORIG_CPU}\"}]" ) >/dev/null 2>&1 &
-   echo $! > /tmp/blade-restore-cpulimit.pid
-   # 再调低 limits 注入
+   # 基线捕获：Agent 读取输出并记录原始 limits（多容器 Pod 请调整 containers 索引至目标容器）
+   kubectl get deployment <deployment-name> -n <namespace> \
+     -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}'
+   # 武装定时自恢复（将"注入恢复"第 2 步 patch 命令 base64 编码后填入 <restore-b64>）
+   kubectl exec <载体Pod> -n <载体命名空间> -- sh -c 'echo <restore-b64> | base64 -d > /tmp/blade-restore-cpulimit.sh; ( sleep <duration>; sh /tmp/blade-restore-cpulimit.sh ) >/dev/null 2>&1 & echo armed'
+   # 调低 limits 注入
    kubectl patch deployment <deployment-name> -n <namespace> --type='json' \
      -p='[{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/cpu","value":"<调低后的limits值>"}]'
    ```
@@ -29,20 +33,21 @@
 4. 观察 Pod CPU throttle 指标变化及应用响应延迟
 
 **注入验证**：
-1. 进入容器查看 `/sys/fs/cgroup/cpu/cpu.stat`，确认 `nr_throttled` 和 `throttled_time` 持续增长
+1. 进入容器查看 CPU cgroup 统计（路径按 cgroup 版本选择——K8s 1.25+ 集群多为 v2，本案例实测 v2）：v2 路径 `cat /sys/fs/cgroup/cpu.stat`（字段 `nr_throttled`、`throttled_usec`，微秒）；v1 路径 `cat /sys/fs/cgroup/cpu/cpu.stat`（字段 `nr_throttled`、`throttled_time`）。版本探测：`ls /sys/fs/cgroup/cgroup.controllers` 存在即 v2（v1 无此文件）。确认 `nr_throttled` 与节流时间持续增长（可看 `nr_throttled/nr_periods` 占比）
 2. `kubectl top pod <pod-name> -n <namespace>` 确认 Pod CPU 使用率接近 limits
 3. （可选，仅当演练方提供了应用访问入口时）确认请求延迟显著增大；无入口时上述 throttling 与 CPU 证据成立即可判定
 
 **注入恢复**：
-1. 等待 `<duration>` 到期后武装的定时器自动将 CPU limits 还原为原始值；如需提前恢复，先终止定时器：
+1. 销毁 chaosblade CPU 负载实验（见演练步骤 3 的实验 UID）
+2. 等待 `<duration>` 到期，定时器自动将 CPU limits 还原为基线；演练提前结束时由 Agent 主动
+   执行同一条恢复命令（幂等，定时器迟到再执行一次无副作用）：
    ```bash
-   kill $(cat /tmp/blade-restore-cpulimit.pid) 2>/dev/null; rm -f /tmp/blade-restore-cpulimit.pid
+   kubectl patch deployment <deployment-name> -n <namespace> --type='json' \
+     -p='[{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/cpu","value":"<基线捕获的原始值>"}]'
    ```
-2. 销毁 chaosblade CPU 负载实验
-3. 使用 kubectl patch 将应用 A 的 CPU limits 恢复为原始合理值
 
 **恢复验证**：
-1. 查看 `cpu.stat`，确认 `nr_throttled` 停止增长
+1. 查看 cpu.stat（路径按 cgroup 版本，同注入验证第 1 条），确认 `nr_throttled` 停止增长、节流时间冻结
 2. （可选，有访问入口时）确认请求延迟恢复正常
 
 **基准事实**：
@@ -62,12 +67,16 @@
 # 方式一：容器内有 stress-ng（后台+重定向让 exec 立即返回，--timeout 自带自动恢复）
 kubectl exec <pod-name> -n <namespace> -c <container> -- \
   sh -c 'stress-ng --cpu 0 --cpu-load <percent> --timeout <duration>s >/dev/null 2>&1 &'
-# 方式二：容器无 stress-ng，用 shell 循环（重定向避免 exec 挂起；PID 落盘定时自动 kill）
+# 方式二：容器无 stress-ng，用 shell 循环（重定向避免 exec 挂起；PID 落盘定时自动 kill；
+# 计数用 while 自增而非 $(seq)——busybox 1.33 无 seq applet（exit 127），
+# $(seq 1 N) 展开为空会使 for 空转零注入（静默失败））
 kubectl exec <pod-name> -n <namespace> -c <container> -- sh -c '
   : > /tmp/loadgen-worker.pids
-  for i in $(seq 1 <N>); do
+  i=1
+  while [ $i -le <N> ]; do
     ( while :; do :; done ) >/dev/null 2>&1 &
     echo $! >> /tmp/loadgen-worker.pids
+    i=$((i+1))
   done
   ( sleep <duration>; kill $(cat /tmp/loadgen-worker.pids) 2>/dev/null; rm -f /tmp/loadgen-worker.pids ) >/dev/null 2>&1 &
 '

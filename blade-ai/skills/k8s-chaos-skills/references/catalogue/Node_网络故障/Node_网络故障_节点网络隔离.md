@@ -1,10 +1,10 @@
 **用例名称** 节点网络隔离 导致 Node_网络故障
 
 **故障现象**：
-1. 节点上所有 Pod 的网络通信中断（或指定方向/端口的流量被屏蔽）
+1. 节点上 hostNetwork Pod（及宿主机进程）的网络通信中断（或指定方向/端口的流量被屏蔽）；非 hostNetwork Pod 是否受影响取决于注入手段（见基准事实与注意事项）
 2. 该节点上的 Pod 健康检查失败，可能触发驱逐和重新调度
 3. kubelet 与 API Server 通信中断时，节点状态变为 NotReady
-4. 影响范围为整个节点（宿主机网络栈），不限于单个 Pod
+4. 作用点为整个节点宿主机网络栈，不限于单个 Pod
 
 **资源准备**：
 1. 确认目标节点名称及其上运行的关键工作负载
@@ -42,7 +42,7 @@
    - `--destination-port`/`--source-port`：限定屏蔽端口范围（不指定则全量屏蔽，慎用）
    - `--network-traffic`：`in`（入站）或 `out`（出站）
    - `--timeout`：必须指定，超时后自动恢复
-3. 记录返回的 blade_uid，用于后续恢复
+3. 记录返回的 experiment_uid，用于后续恢复
 
 **注入验证**：
 
@@ -55,7 +55,7 @@
 
 1. **（主证据，必做）** 确认实验已生效：
    ```bash
-   blade status --uid <blade_uid>
+   blade status --uid <experiment_uid>
    ```
    状态为 Success/Running 即表示屏蔽规则已下到节点网络栈。
 2. **（只做与本次屏蔽范围匹配的分支）** 另一分支的现象在本次注入下**不可能出现**，直接标记为 `expected` 并跳过：
@@ -65,8 +65,8 @@
      ```
      预期变为 `NotReady`；`kubectl describe node <node-name>` 可见 `Kubelet stopped posting node status`。此条成立即可判定成功并收敛。
    - **端口级屏蔽（指定了端口且不含 6443/10250）**：**节点不会 NotReady，不要去等、也不要因为 Ready 就判失败**。改为验证被屏蔽端口不可达（见第 3 步），节点保持 `Ready` 是预期。
-3. **（按本次 `--network-traffic` 选择测试发起侧）** 验证被屏蔽端口的连通性：
-   - **`out`（出站屏蔽）**：从被隔离节点侧向外访问不通。若控制面通道未被切断可用 debug Pod 发起；已被切断则跳过（节点侧探测超时本身即佐证）
+3. **（按本次 `--network-traffic` 选择测试发起侧）** 验证被屏蔽端口的连通性（探测端/被测端须为 hostNetwork Pod 或宿主机进程——iptables OUTPUT/INPUT 链规则对非 hostNetwork Pod 的流量零传导，用非 hostNetwork 业务 Pod 探测会恒连通而误判，见注意事项）：
+   - **`out`（出站屏蔽）**：从被隔离节点侧向外访问不通。若控制面通道未被切断可用 debug Pod（hostNetwork）发起；已被切断则跳过（节点侧探测超时本身即佐证）
    - **`in`（入站屏蔽）**：**从其它正常节点上的 Pod 发起**，不要 exec 进被隔离节点
      ```bash
      kubectl exec <其它节点上的pod> -n <namespace> -- wget -qO- --timeout=5 http://<被隔离节点IP>:<被屏蔽端口>
@@ -87,7 +87,7 @@
 **注入恢复**：
 1. 销毁 ChaosBlade 实验：
    ```bash
-   blade destroy <blade_uid>
+   blade destroy <experiment_uid>
    ```
    若使用 DaemonSet 通道且网络已中断无法通过 API 恢复，等待 `--timeout` 自动恢复
 2. SSH 通道可直接通过 SSH 登录节点执行恢复
@@ -102,7 +102,8 @@
 
 **基准事实**：
 - **根因**：节点宿主机网络栈被注入 iptables DROP 规则，指定方向/端口的所有流量被丢弃，模拟网络分区或节点隔离场景
-- **必现现象**：节点上 Pod 网络中断；节点可能变为 NotReady（全量屏蔽时）；Pod 健康检查失败触发驱逐
+- **必现现象**：宿主机进程与 hostNetwork Pod 网络中断；节点可能变为 NotReady（全量屏蔽时）；Pod 健康检查失败触发驱逐
+- **传导边界（CNI 相关，实测 terway-eniip）**：非 hostNetwork Pod 的流量在宿主机网络栈走 FORWARD 链转发，不经 OUTPUT/INPUT 链——宿主机 iptables OUTPUT/INPUT DROP 对其零传导（实测出站方向：同一注入下 hostNetwork Pod 探测被拦、非 hostNetwork Pod 恒连通）。ChaosBlade 主方案（tc/网卡级注入）作用于网卡队列，对该类 Pod 同样有效；降级方案（iptables 链路级）与主方案存在此保真度差异
 
 ---
 
@@ -197,3 +198,4 @@ kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
 - systemd-run --on-active 创建的 transient timer 由宿主机 systemd 管理，不依赖 debug Pod 存活
 - 建议超时设置 30-120 秒，单节点故障影响面可控
 - 禁止使用无自恢复机制的全量 DROP 方案（可能导致节点永久失联）
+- **保真度边界（实测 terway-eniip）**：本降级方案走 iptables OUTPUT/INPUT 链，对非 hostNetwork Pod（流量走 FORWARD 链转发）零传导——若演练目标是业务 Pod（非 hostNetwork）的网络中断，本方案无效，须改用 ChaosBlade 主方案（tc/网卡级，作用于网卡队列、影响所有流量）或 Pod 级注入；本降级方案的实际效果为"宿主机与 hostNetwork Pod 隔离 + 节点 NotReady"

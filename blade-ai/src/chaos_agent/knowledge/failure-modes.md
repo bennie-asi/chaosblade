@@ -9,6 +9,10 @@ topics:
 fault_types:
   - all
 summary: "Decision trees for the five common failure modes during fault injection: partial injection (some targets succeed, others fail), blade_create CLI errors, verification cannot confirm fault effect, cascading impact beyond intended scope, and recovery / blade_destroy failures."
+phases:
+  - execute
+  - verify
+  - recover
 ---
 
 # Failure Modes & Recovery Guidance

@@ -17,7 +17,11 @@
 
 **注入验证**：
 
-> ⚠️ **自断链路判读**：若通过 exec 方式屏蔽 6443 断开 kubelet，注入命令自身会超时（如 task timed out after 10s）——这是预期成功信号，不要重试/换镜像；立即改从集群侧 `kubectl get nodes` / `get pods` 验证，拿到节点 NotReady + Pod Terminating 即可判定并收敛，勿反复探入被隔离节点。
+> ⚠️ **自断链路判读**：实测通过 exec 方式屏蔽 6443 后，注入命令**大概率正常返回**（不超时）
+> ——exec 通道走 apiserver→kubelet:10250 的**入向连接**，不受 OUTPUT 链 dport 6443 的
+> DROP 规则影响（被切断的只是 kubelet 主动发起的出向连接：watch/lease 上报）。
+> 因此「exec 超时」既不是成功信号也不是失败信号；判定注入是否生效以集群侧
+> `kubectl get nodes`（NotReady）+ `get pods`（Terminating）为准。
 1. 执行 `kubectl get pods`，确认目标 Pod 状态为 Terminating 且长时间未消失
 2. 执行 `kubectl get nodes`，确认目标节点状态为 NotReady
 3. 查看 Pod 详情，确认 deletionTimestamp 已设置但 Pod 未被实际清理
@@ -48,9 +52,12 @@
 ```bash
 # 屏蔽节点与 API Server 的通信并启动 systemd 定时自恢复
 kubectl debug node/<node-name> --profile=sysadmin --image=<verified-cluster-image> -- sleep <duration>
-# ⚠️ 关键顺序：先用 systemd-run 武装恢复（仅登记闹钟），再下 DROP。屏蔽 6443 会切断 exec 响应回程，
-# 若恢复排在 DROP 后，定时器可能未成功武装 → 永不恢复。
-# ✅ 注入后本条 exec 会因 6443 被切断而超时（如 timed out after 10s）——这是预期成功信号，**不要重试该 exec、不要换镜像**；立即改用集群侧 `kubectl get nodes`（应 NotReady）与 `kubectl get pods`（应 Terminating）验证。
+# ⚠️ 关键顺序：先用 systemd-run 武装恢复（仅登记闹钟），再下 DROP——防御性实践：
+# 若 DROP 与武装在同一条载荷内且武装排在后，一旦注入链路出现任何意外（如 kubelet 拦截、
+# 载体异常），定时器可能未成功武装 → 永不恢复。先武装可将风险窗口归零。
+# ✅ 注入后本条 exec 实测会正常返回（exit 0 + 武装确认回显）——exec 走 apiserver→kubelet:10250
+#    入向连接，不受 OUTPUT dport 6443 DROP 影响，不会自断；判定注入生效用集群侧
+#    `kubectl get nodes`（应 NotReady）与 `kubectl get pods`（应 Terminating）验证。
 kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
   systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-kubelet sh -c "iptables -D OUTPUT -p tcp --dport 6443 -j DROP" &&
   iptables -I OUTPUT -p tcp --dport 6443 -j DROP
@@ -61,7 +68,7 @@ kubectl exec <debug-pod> -n <debug-namespace> -- chroot /host sh -c '
 
 主恢复路径是注入时登记的 systemd 定时器，到期由宿主机 PID 1 自动执行 `iptables -D`，Agent 无需干预，也无需保持到该节点的连接。
 
-**提前恢复必须人工带外执行 —— Agent 不执行下面的命令。** 注入切断的正是 kubectl 到该节点的路径，所以任何经集群 API 的恢复方式（`kubectl exec` / `kubectl debug node`）此刻都不可达。若确需提前恢复，请通过 SSH / 控制台 / IPMI 手动执行：
+**提前恢复建议人工带外执行 —— Agent 优先不依赖集群 API。** 实测失联期间 `kubectl exec`/`kubectl debug node` **仍然可达**（exec 走 apiserver→kubelet:10250 入向连接，与被 DROP 的 kubelet 出向 6443 无关；实测 DROP 规则在位时 exec echo 正常回传）——但该路径依赖 debug Pod 存活，且与注入共用同一链路；SSH 带外仍是最稳路径：
 
 ```text
 ssh root@<node-ip> 'iptables -D OUTPUT -p tcp --dport 6443 -j DROP'

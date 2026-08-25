@@ -52,19 +52,20 @@ blade destroy <experiment-uid>
 
 注入命令（**先武装定时恢复，再注入**；到期自动删除 DNAT 规则，补齐自恢复能力）：
 ```bash
-# 1) 先武装定时还原（定时器由宿主机 systemd(PID 1) 管理），再注入规则
+# 1) 先武装定时还原（定时器由宿主机 systemd(PID 1) 管理），再注入规则。
+#    三条命令分次独立执行（执行通道不支持 && 串联）；武装成功（输出含 Running timer as unit）后再执行注入
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-dnsnat sh -c \
   'iptables -t nat -D OUTPUT -p udp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53; \
-   iptables -t nat -D OUTPUT -p tcp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53' &&
+   iptables -t nat -D OUTPUT -p tcp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53'
 # 2) 在网络层把本机发出的 DNS 查询重定向到伪造的解析器。
 # 比改 /etc/hosts 覆盖面更广：绕过 hosts 的应用（自带 DNS 缓存/直连解析器的）同样受影响。
-iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53 &&
+iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53
 iptables -t nat -A OUTPUT -p tcp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53
 ```
 
 恢复命令（提前恢复；先停武装的定时器再手动删除规则）：
 ```bash
-systemctl stop blade-restore-dnsnat 2>/dev/null
+systemctl stop blade-restore-dnsnat.timer 2>/dev/null
 # -D 与注入的 -A 参数逐字对应，是精确逆操作
 iptables -t nat -D OUTPUT -p udp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53
 iptables -t nat -D OUTPUT -p tcp --dport 53 -j DNAT --to-destination <redirect-dns-ip>:53
@@ -78,3 +79,4 @@ iptables -t nat -D OUTPUT -p tcp --dport 53 -j DNAT --to-destination <redirect-d
 - /etc/hosts 修改仅影响本机解析，不影响其他机器
 - 某些应用有独立 DNS 缓存，修改 hosts 后可能需要重启应用才生效
 - 自恢复基于注入前武装的 systemd-run transient timer（到期自动删除 DNAT 规则）；提前恢复仍用上方手动命令
+- 同名 transient timer 重复武装会报 `Unit blade-restore-dnsnat.service was already loaded`（上次武装命令执行失败时 unit 以 failed 状态残留所致）；重武装前先清理残留：`systemctl stop blade-restore-dnsnat.service; systemctl reset-failed blade-restore-dnsnat.service`（武装命令成功执行过的 unit 无残留，可直接重武装）

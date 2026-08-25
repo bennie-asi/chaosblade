@@ -44,8 +44,10 @@
 kubectl debug node/<node-name> --profile=sysadmin --image=<stress-ng-image> -- sh -c 'stress-ng --cpu 0 --cpu-load <percent> --timeout <duration>s'
 # 如无 stress-ng 镜像，用 busybox 模拟：每个循环用 timeout 到点自杀（前台 wait 保活容器）
 # N=目标核数；到期后 debug Pod 自动进入 Completed，故障自动停止
+# 计数用 while 自增而非 $(seq)——busybox 1.33 无 seq applet（exit 127），
+# $(seq 1 N) 展开为空会使 for 空转零注入（静默失败）
 kubectl debug node/<node-name> --profile=sysadmin --image=busybox -- sh -c \
-  'for i in $(seq 1 <N>); do timeout <duration> sh -c "while :; do :; done" & done; wait'
+  'i=1; while [ $i -le <N> ]; do timeout <duration> sh -c "while :; do :; done" & i=$((i+1)); done; wait'
 ```
 
 恢复命令：
@@ -57,6 +59,10 @@ kubectl delete pod <debug-pod-name> --force --grace-period=0
 
 注意事项：
 - debug Pod 运行在宿主机 PID namespace 中，CPU 压力会直接影响节点
-- busybox `timeout` 让循环到点自终止（自动恢复），无需依赖手动 kill；多核用 `seq 1 N` 起 N 个
-- debug 命令客户端会阻塞到 <duration> 或断连，但 debug Pod 服务端持续运行，客户端超时不代表注入失败
+- busybox `timeout` 让循环到点自终止（自动恢复），无需依赖手动 kill；多核循环计数用
+  `i=1; while [ $i -le <N> ]; …; i=$((i+1))`——busybox 1.33 无 seq applet，`$(seq 1 N)`
+  展开为空会零注入
+- debug 命令在**无 TTY 时立即返回**（不阻塞，仅打印 Pod creating 消息，注入由服务端
+  debug Pod 自行执行）；有 TTY 时才阻塞到 <duration> 或断连。无论客户端是否断开，
+  debug Pod 服务端持续运行，客户端断开/超时不影响注入与自动恢复
 - 与 ChaosBlade 相比，kubectl debug node 方式需手动清理 Completed 的 debug Pod

@@ -53,10 +53,13 @@
 2. 或等待 `--timeout` 到期后 ChaosBlade 自动停止杀进程
 3. 说明：进程被杀后容器 entrypoint 会自动拉起主进程，ChaosBlade 的 timeout 控制的是"持续杀进程"的时长，超时后不再杀进程，容器自行恢复
 4. 路径 B 持续模式（见降级方案）：等待 `systemd-run` timer 到期后循环自动终止；
-   如需提前终止，经 debug pod 执行：
+   如需提前终止，经 debug pod 依次执行两条命令——停掉 timer + 手动执行与 timer
+   载荷同款的终止 pkill（两条独立命令，不要串联；括号写法防 pkill 自匹配）：
    ```bash
    kubectl debug node/<node-name> --image=<verified-cluster-image> --profile=sysadmin --quiet \
-     -- chroot /host systemctl stop <unit-name>
+     -- chroot /host systemctl stop <unit-name>.timer
+   kubectl debug node/<node-name> --image=<verified-cluster-image> --profile=sysadmin --quiet \
+     -- chroot /host pkill -f 'crictl st[o]p -t 0'
    ```
 
 **恢复验证**：
@@ -88,10 +91,11 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'command -v kill; command -v pgr
 注入命令：
 ```bash
 # 杀死目标进程（SIGTERM）
-kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -15 $(pgrep -f <process-name>)'
+kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -15 $(pgrep -x <process-name>)'
 # 强制杀死（SIGKILL）：
-kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -9 $(pgrep -f <process-name>)'
+kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -9 $(pgrep -x <process-name>)'
 ```
+**必须用 `pgrep -x`（按进程名精确匹配），严禁 `pgrep -f`（按 cmdline 匹配）**——exec shell 自身的 cmdline 含进程名字面量，会被 -f 误匹配，kill 把 exec shell 一起杀掉（kubectl exec 报 `command terminated with exit code 143/137`，rc 判读混乱，实测复现）；理由同 Pod_进程异常_进程被挂起 路径 A 注记。
 
 恢复命令：
 ```bash
@@ -100,7 +104,8 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -9 $(pgrep -f <process-nam
 ```
 
 注意事项：
-- 必须确认实际进程名（通过 `ps aux` 确认），不可凭服务名猜测
+- 必须确认实际进程名（通过 `ps aux` 确认），不可凭服务名猜测；确认的进程名同时就是 `pgrep -x` 的匹配词
+- **验证"已杀死"不能用 pgrep/ps 存在性**：容器 PID 1 为非 init 程序（如 `sleep`、单二进制前台进程——单进程容器常态）时不收割子进程，被杀进程变僵尸（`/proc/<pid>/status` 的 State 为 `Z (zombie)`），pgrep/ps 仍列出它、`kill -9` 也"无效"（实测 busybox sleep 作 PID 1 复现，三个被杀 httpd 全部变 Z）。判死用 `/proc/<pid>/status` State（Z=已杀死未收割）或服务端口无响应；判活用 State 为 S/R
 - **目标进程是容器 PID 1 时本路径无效（实测确证）**：内核 PID namespace 对容器内
   init 有信号保护——未注册 handler 的 PID 1 会忽略 SIGTERM，连 SIGKILL 也投递不进去
   （实测 busybox `sleep` 作 PID 1，`kill -15 1` / `kill -9 1` 均无任何效果）。
@@ -163,11 +168,10 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -9 $(pgrep -f <process-nam
    ```bash
    kubectl debug node/<node-name> --image=<verified-cluster-image> --profile=sysadmin --quiet \
      -- chroot /host sh -c '
-     systemd-run --on-active=<duration>s --unit=blade-stoploop-<pod-name> sh -c "
-       pkill -f \"crictl sto\$((0+0))p -t 0\"; pkill -x crictl; true" &&
-     sh -c "for i in $(seq 1 <rounds>); do
-       CID=$(crictl ps -q --name <container-name> | head -1)
-       [ -n \"$CID\" ] && crictl stop -t 0 $CID
+     systemd-run --on-active=<duration>s --unit=blade-stoploop-<pod-name> sh -c "pkill -f \"crictl st[o]p -t 0\"; pkill -x crictl; true" &&
+     sh -c "for i in \$(seq 1 <rounds>); do
+       CID=\$(crictl ps -q --name <container-name> | head -1)
+       [ -n \"\$CID\" ] && crictl stop -t 0 \$CID
        sleep <interval>
      done"
    '
@@ -177,11 +181,23 @@ kubectl exec <pod-name> -n <namespace> -- sh -c 'kill -9 $(pgrep -f <process-nam
      应 ≥ `<rounds> × <interval>` 并留余量
    - `<interval>`：两轮 stop 的间隔（秒），建议 ≥ 15，给 kubelet 留出重建与退避爬坡空间
    - `<rounds>`：循环轮数上限，是 timer 之外的第二重保险
-   - **循环体内必须每轮用 `crictl ps -q --name` 重新解析容器 ID**——kubelet 每轮重建容器后
-     ID 会变化，把第 1 轮的 ID 固化进循环，第 2 轮起就会空转（实测教训）
-   - timer 载荷里的 `sto\$((0+0))p` 是防自匹配技巧：若直接写 `stop`，pkill -f 会先命中
-     timer 自己的 shell 命令行把它杀了，根本轮不到杀循环；用 `$((0+0))` 拆开后语义等价、
-     命令行不再含字面 `stop` 模式
+   - **循环体里的 `$(...)` 与 `$VAR` 必须整体转义**（`\$(...)`、`\$CID`）——外层
+     `sh -c '...'` 的双引号载荷里，未转义的 `$(...)`/`$CID` 会在**武装时刻**被外层
+     shell 提前展开：彼时变量未定义，`[ -n "" ]` 固化进命令文本恒假短路，
+     循环每轮空转零注入（静默失败，实测教训）
+   - **systemd-run 的 timer 载荷必须写成单行**（双引号内不得换行）——载荷含换行时
+     systemd 组装 transient unit 的 ExecStart 解析失败（journal 报
+     `/run/systemd/transient/<unit>.service:4: Missing '='`，终止器形同虚设，实测复现）
+   - `[ -n \"\$CID\" ]` 的 `]` 前必须有空格——POSIX test 语法要求，缺空格时 sh 报
+     `[ missing ']'` 且循环每轮短路，crictl stop 从不执行（零注入静默失败，实测复现；
+     守卫与 corpus 测试不执行 shell 语义，此类错误只能实测发现）
+   - **每轮必须用 `crictl ps -q --name` 重新解析容器 ID**——kubelet 每轮重建容器后
+     ID 会变化，把 ID 固化进循环（无论武装时刻还是第 1 轮），第 2 轮起就会空转（实测教训）
+   - timer 载荷里的 `st[o]p` 是防自匹配技巧（括号法）：若直接写 `stop`，pkill -f 的
+     正则会先命中 timer 自己的 shell 命令行把它杀了，根本轮不到杀循环；写成 `st[o]p`
+     后模式文本不含字面 `stop`（自身 cmdline 不自匹配），而正则字符类 `[o]` 仍匹配
+     `o`（目标 `crictl stop` 照常命中）。**不要用 `sto$((0+0))p` 算术拆开法**——timer
+     触发时第二层展开把 `$((0+0))` 求值为 `0`，模式变 `sto0p` 永不匹配，终止器形同虚设
    - timer 由宿主机 PID 1 管理，debug pod 删除后循环与自停恢复均不受影响
    - 提前终止见上方"注入恢复"第 4 条
 
@@ -200,7 +216,7 @@ kubectl describe pod <pod-name> -n <namespace>
 kubectl get pod <pod-name> -n <namespace> -o wide
 ```
 持续模式的恢复：等 `<duration>` 到期 timer 自动终止循环（或按上方"注入恢复"第 4 条
-`systemctl stop <unit-name>` 提前终止），之后 kubelet 完成最后一次重建即稳定。
+提前终止——停 `<unit-name>.timer` 并手动执行终止器 pkill），之后 kubelet 完成最后一次重建即稳定。
 恢复验证以"RESTARTS 停止增长 + Pod 1/1 Running"为准。
 
 注意事项：

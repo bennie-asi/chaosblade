@@ -650,7 +650,7 @@ kubectl delete chaosblade --all
    ```bash
    kubectl exec <pod> -n <tool-pod命名空间> -- blade create k8s <scenario> [flags] --kubeconfig=<path>
    ```
-4. 从 JSON 输出中提取 blade_uid 用于后续恢复
+4. 从 JSON 输出中提取 experiment_uid 用于后续恢复
 
 ### 示例：Pod 网络丢包
 
@@ -663,7 +663,7 @@ kubectl exec otel-c-tool-xxxxx -n <tool-pod命名空间> -- \
   --namespace cms-demo \
   --labels "app=myapp" \
   --kubeconfig=/path/to/config
-# 3. 从输出中提取 blade_uid
+# 3. 从输出中提取 experiment_uid
 # {"code":200,"success":true,"result":"abc123"}
 # 4. 恢复时同样通过 tool Pod 执行 blade destroy（需重新发现 Running Pod 及其命名空间）
 kubectl exec otel-c-tool-xxxxx -n <tool-pod命名空间> -- \

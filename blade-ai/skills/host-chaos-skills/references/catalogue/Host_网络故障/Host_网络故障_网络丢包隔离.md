@@ -79,9 +79,10 @@ blade destroy <experiment-uid>
 注入命令（**先武装定时恢复，再注入**；到期自动删除 DROP 规则，补齐自恢复能力）：
 ```bash
 # 1) 先武装定时还原（定时器由宿主机 systemd(PID 1) 管理；仅登记本次实际注入的那条 -D，
-#    下面三条按注入选择其一）
+#    下面三条按注入选择其一）。两条命令分两次独立执行（执行通道不支持 && 串联），
+#    武装成功（输出含 Running timer as unit）后再执行注入
 systemd-run --on-active=<recovery-seconds>s --unit=blade-restore-drop \
-  iptables -D OUTPUT -d <target-ip> -j DROP &&
+  iptables -D OUTPUT -d <target-ip> -j DROP
 # 2) 出站方向丢弃到特定 IP 的所有包
 iptables -I OUTPUT -d <target-ip> -j DROP
 
@@ -94,7 +95,7 @@ iptables -I INPUT -s <source-ip> -j DROP
 
 恢复命令（提前恢复；先停武装的定时器再手动删除规则）：
 ```bash
-systemctl stop blade-restore-drop 2>/dev/null
+systemctl stop blade-restore-drop.timer 2>/dev/null
 # 删除对应规则
 iptables -D OUTPUT -d <target-ip> -j DROP
 iptables -D OUTPUT -p tcp --dport <port> -d <target-ip> -j DROP
@@ -105,3 +106,4 @@ iptables -D INPUT -s <source-ip> -j DROP
 - iptables 规则立即生效，已建立的 TCP 连接可能需要等超时
 - 自恢复基于注入前武装的 systemd-run transient timer（到期自动删除注入的 DROP 规则）；提前恢复仍用上方手动命令
 - 注意不要误删其他 iptables 规则
+- 同名 transient timer 重复武装会报 `Unit blade-restore-drop.service was already loaded`（上次武装命令执行失败时 unit 以 failed 状态残留所致）；重武装前先清理残留：`systemctl stop blade-restore-drop.service; systemctl reset-failed blade-restore-drop.service`（武装命令成功执行过的 unit 无残留，可直接重武装）

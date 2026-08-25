@@ -55,18 +55,25 @@ blade destroy <experiment-uid>
 
 前提条件：需安装 `strace` 或具备 BPF/eBPF 工具
 
-近似注入（借 strace 的跟踪开销制造延迟，非精确注入）：
+近似注入（借 strace 的跟踪开销制造延迟，非精确注入；**先武装定时终止，再注入**——timer 到期自动 kill 掉 strace、目标进程恢复原速，补齐自恢复能力）：
 ```bash
 # 1) 先取目标 PID
 pgrep -f <process-name>
 
-# 2) attach 到该 PID。只允许 attach 形态：不带 -p 时 strace 会
+# 2) 先武装定时终止（定时器由宿主机 systemd(PID 1) 管理，到期自动 kill 掉
+#    strace）。各命令分次独立执行（执行通道不支持 && 串联）；武装成功
+#    （输出含 Running timer as unit）后再执行 attach
+systemd-run --on-active=<recovery-seconds>s --unit=blade-kill-strace \
+  sh -c 'kill $(pgrep -x strace)'
+
+# 3) attach 到该 PID。只允许 attach 形态：不带 -p 时 strace 会
 #    直接【启动】其参数，那是任意命令执行而非跟踪，会被拒绝。
 strace -p <pid> -e trace=<syscall> -T
 ```
 
-恢复命令：
+恢复命令（提前恢复；先停武装的定时器，再手动终止 strace）：
 ```bash
+systemctl stop blade-kill-strace.timer 2>/dev/null
 # 取 strace 自身的 PID 后终止，目标进程随即恢复原速
 pgrep -f strace
 kill <strace-pid>
@@ -76,3 +83,5 @@ kill <strace-pid>
 - 原生 strace 附加本身会对进程产生显著性能开销（约 10-100x 减速），但无法精确控制延迟量
 - 精确的 syscall 延迟注入是 ChaosBlade 的独特能力，原生命令难以完全等效替代
 - 如需更精确的替代方案，可考虑使用 BCC/bpftrace 工具
+- 自恢复基于注入前武装的 systemd-run transient timer（宿主机 PID 1 管理，到期自动终止 strace）；提前恢复仍用上方手动命令
+- 同名 transient timer 重复武装会报 `Unit blade-kill-strace.service was already loaded`（unit 以 failed 状态残留所致——武装命令执行失败，或手动恢复未先停 timer、到期 `kill $(pgrep -x strace)` 因无匹配 exit 1）；重武装前先清理残留：`systemctl stop blade-kill-strace.service; systemctl reset-failed blade-kill-strace.service`

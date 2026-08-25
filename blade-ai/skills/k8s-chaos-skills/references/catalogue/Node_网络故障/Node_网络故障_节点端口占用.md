@@ -41,7 +41,7 @@
    ```
    - `--port`：要占用的端口（必填）
    - `--force`：强制杀死当前使用该端口的进程后占用
-3. 记录返回的 blade_uid，用于后续恢复
+3. 记录返回的 experiment_uid，用于后续恢复
 
 **注入验证**：
 1. 确认端口已被占用（通过 SSH 或 debug Pod 检查节点）：
@@ -63,7 +63,7 @@
 **注入恢复**：
 1. 销毁 ChaosBlade 实验：
    ```bash
-   blade destroy <blade_uid>
+   blade destroy <experiment_uid>
    ```
 2. 或等待 `--timeout` 到期自动恢复
 3. 被杀的系统组件（如 kubelet）通常由 systemd 自动重启

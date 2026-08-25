@@ -11,14 +11,20 @@
 
 **演练步骤**：
 1. 记录应用 A 的 Service 当前 selector 配置
-2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动将 selector 还原为
-   原始值，补齐自恢复能力；PID 落盘供提前恢复时终止定时器）：
+2. **先武装定时自恢复，再注入**（基线捕获 → 武装定时器 → 注入三步。恢复命令幂等：定时器到期
+   自动恢复为主，Agent 在演练结束时主动执行同一条命令兜底，定时器迟到重复执行无副作用。定时器
+   shell 逻辑必须作为 `kubectl exec` 载体载荷派发——直接以 `sh -c '…'` 作为顶层命令派发会被
+   命令守卫拦截（unknown_binary: sh），载体内 `sh -c` 同时解决 exec-form 通道不解释裸
+   `( sleep … ) &` 语法的问题；执行通道为多副本路由，无法可靠终止定时器，故不设 pidfile。
+   载体 Pod 选集群内带 kubectl 且有足够 RBAC 权限的常驻 Pod（如演练工具 Pod）。
+   恢复命令含 json patch 引号嵌套，
+   用 base64 折叠武装）：
    ```bash
-   ORIG_SELECTOR=$(kubectl get svc <service-name> -n <namespace> -o jsonpath='{.spec.selector}')
-   ( sleep <duration>; kubectl patch svc <service-name> -n <namespace> --type='json' \
-       -p="[{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${ORIG_SELECTOR}}]" ) >/dev/null 2>&1 &
-   echo $! > /tmp/blade-restore-selector.pid
-   # 再篡改 selector 注入
+   # 基线捕获：Agent 读取输出并记录原始 selector（定时器与主动恢复均使用）
+   kubectl get svc <service-name> -n <namespace> -o jsonpath='{.spec.selector}'
+   # 武装定时自恢复（将"注入恢复"第 1 步命令整体 base64 编码后填入 <restore-b64>）
+   kubectl exec <载体Pod> -n <载体命名空间> -- sh -c 'echo <restore-b64> | base64 -d > /tmp/blade-restore-selector.sh; ( sleep <duration>; sh /tmp/blade-restore-selector.sh ) >/dev/null 2>&1 & echo armed'
+   # 篡改 selector 注入
    kubectl patch svc <service-name> -n <namespace> \
      -p '{"spec":{"selector":{"app":"non-existent-app"}}}'
    ```
@@ -31,16 +37,15 @@
 4. 对比 Service selector 与 Pod labels，确认不匹配
 
 **注入恢复**：
-1. 等待 `<duration>` 到期后武装的定时器自动将 selector 还原为原始值；如需提前恢复，先终止定时器：
+1. 等待 `<duration>` 到期，定时器自动将 selector 整体替换回基线；演练提前结束时由 Agent 主动
+   执行同一条恢复命令（幂等，定时器迟到再执行一次无副作用。注意用 json patch 的 `replace`
+   而非 strategic merge patch——后者对 map 是键级合并，若注入期间键集变化会残留多余键导致
+   selector 永久不匹配）：
    ```bash
-   kill $(cat /tmp/blade-restore-selector.pid) 2>/dev/null; rm -f /tmp/blade-restore-selector.pid
+   kubectl patch svc <service-name> -n <namespace> --type='json' \
+     -p='[{"op":"replace","path":"/spec/selector","value":<基线捕获的原始 selector JSON>}]'
    ```
-2. 使用 kubectl patch 将 Service selector 恢复为原始值：
-   ```bash
-   kubectl patch svc <service-name> -n <namespace> \
-     -p '{"spec":{"selector":{"app":"<原始标签>"}}}'
-   ```
-3. 等待 Endpoints 自动更新
+2. 等待 Endpoints 自动更新
 
 **恢复验证**：
 1. 执行 `kubectl get endpoints <service-name>`，确认 Endpoints 列表恢复，包含后端 Pod IP

@@ -45,7 +45,8 @@ blade create k8s node-mem load --mode ram --mem-percent <percent> --names <节�
 
 前提条件：集群需支持 `kubectl debug node` 功能（K8s 1.18+）；选择当前集群已验证可拉取且**包含 `stress-ng`** 的镜像（如 `ghcr.io/colinianking/stress-ng`）；切勿使用不含 stress-ng 的 alpine/busybox 基础镜像（会报 `stress-ng: not found`）。
 
-注入命令（`--vm-bytes` 必须按**增量**计算，不能拍脑袋给绝对值）：
+注入命令（`--vm-bytes` 必须按**增量**计算，不能拍脑袋给绝对值；若演练目标含压穿
+MemoryPressure/触发驱逐，还须按**物理口径**另行估算，见下方注意事项的口径说明）：
 ```bash
 # 1) 先测节点内存基线
 kubectl top node <node-name>
@@ -67,7 +68,16 @@ kubectl delete pod <debug-pod-name> --force --grace-period=0
 ```
 
 注意事项：
+- **top 口径 ≠ available 口径（两口径无推导关系）**：`kubectl top` 的内存百分比按
+  working set / allocatable 计算；而 MemoryPressure / hard eviction 按
+  `memory.available < 100Mi` 的**物理口径**判定。top 打到 100% 不等于触发驱逐——
+  实测 30G 节点注入 26G（top 100%）仍不触发，28.5G 才把 available 压穿。若目标是
+  触发 MemoryPressure/驱逐，分配量须按物理口径估算：压穿量 ≈ 物理容量 − 当前匿名
+  内存占用（页缓存可回收、不计入），建议分段逼近
+- **MemoryPressure 回落滞后 ~5 分钟**：注入释放/驱逐止血后，节点 condition
+  True→False 由 kubelet 周期同步，实测滞后约 5 分钟——恢复判读须纳入该窗口，
+  勿在止血后立即判「未恢复」
 - 必须使用 `--vm-bytes` 指定具体内存大小，而非百分比；大小按**增量**算（分配量 = 节点总内存 × 目标百分比 − 当前用量），按绝对值分配会超量触发 OOM killer
-- debug 命令客户端会阻塞到 --timeout 到期或断连，但 debug Pod 服务端持续运行，客户端超时不代表注入失败（--timeout 到期后自动释放=自动恢复）
+- debug 命令在**无 TTY 时立即返回**（不阻塞，仅打印 Pod creating 消息）；有 TTY 时才阻塞到 --timeout 到期或断连。debug Pod 服务端持续运行，--timeout 到期后自动释放=自动恢复
 - 与 ChaosBlade `--mode ram` 相比，stress-ng 默认会不断分配/释放内存（malloc/free 循环），效果等价
 - debug Pod 在节点 MemoryPressure 时可能被 OOM killer 终止，这本身就是预期行为

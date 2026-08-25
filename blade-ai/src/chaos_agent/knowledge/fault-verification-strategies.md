@@ -9,7 +9,7 @@ topics:
   - data interpretation pitfalls
   - coverage-verification
   - anomaly-detection
-  - application-impact-verification
+  - propagated-effect-observation
 fault_types:
   - pod-kill
   - cpu-stress
@@ -21,7 +21,10 @@ fault_types:
   - oom
   - node-disk-fill
   - node-cpu-stress
-summary: "Fault-specific verification methodology, kubectl verification mapping by fault type, data interpretation pitfalls, coverage/anomaly/application-impact verification. Includes verification command design principles."
+summary: "Fault-specific verification methodology, kubectl verification mapping by fault type, data interpretation pitfalls, coverage/anomaly verification, propagated-effect observation. Includes verification command design principles."
+phases:
+  - verify
+  - recover
 ---
 
 # Fault Verification Strategies and Methodology (for the Agent)
@@ -29,28 +32,28 @@ summary: "Fault-specific verification methodology, kubectl verification mapping 
 > **Purpose**: This document systematically lays out the layered verification model, the design principles for verification methods, verification plans for common fault scenarios, and the Agent's decision logic during the Layer 2 phase. It helps the Agent understand "how to verify a fault took effect" and design precise, executable verification plans.
 
 > **Agent quick-reference index**:
-> - **Verification model**: the three-layer model → [Q1](#q1-why-do-we-need-a-three-layer-verification-model-is-one-layer-not-enough); design principles → [Q2](#q2-how-do-you-design-an-effective-layer-2-verification-plan)
+> - **Verification model**: the layered model → [Q1](#q1-why-do-we-need-a-layered-verification-model-is-one-layer-not-enough); design principles → [Q2](#q2-how-do-you-design-an-effective-layer-2-verification-plan)
 > - **Pod-level verification**: CPU fullload → [Q3](#q3-what-is-the-verification-plan-for-pod-cpu-fullload); memory/OOM → [Q4](#q4-what-is-the-verification-plan-for-pod-memory-pressure--oom); network delay → [Q5](#q5-what-is-the-verification-plan-for-pod-network-delay); packet loss → [Q6](#q6-what-is-the-verification-plan-for-pod-packet-loss); DNS fault → [Q7](#q7-what-is-the-verification-plan-for-a-pod-dns-fault); disk filling → [Q8](#q8-what-is-the-verification-plan-for-pod-disk-filling)
 > - **Node-level verification**: CPU fullload → [Q9](#q9-what-is-the-verification-plan-for-node-cpu-fullload); disk full → [Q10](#q10-what-is-the-verification-plan-for-a-full-node-disk); high disk IO → [Q11](#q11-what-is-the-verification-plan-for-high-node-disk-io)
 > - **Failure handling**: handling verification failure → [Q12](#q12-if-layer-2-verification-fails-what-should-the-agent-do); distinguishing timeouts → [Q13](#q13-how-do-you-tell-verification-failure-apart-from-verification-timeout)
 > - **Skill conventions**: writing the verification method → [Q14](#q14-what-should-a-skills-verification-method-section-contain)
 > - **Data pitfalls**: common data-interpretation pitfalls → [Q15](#q15-what-are-the-common-data-interpretation-pitfalls-in-layer-2-verification)
-> - **Coverage verification**: coverage → [Q16](#q16-how-do-you-verify-that-the-injections-coverage-is-complete); anomalous-metric detection → [Q17](#q17-how-do-you-detect-and-investigate-unexpected-metric-changes); application-impact verification → [Q18](#q18-how-do-you-verify-the-faults-impact-at-the-application-level)
+> - **Coverage verification**: coverage → [Q16](#q16-how-do-you-verify-that-the-injections-coverage-is-complete); anomalous-metric detection → [Q17](#q17-how-do-you-detect-and-investigate-unexpected-metric-changes); propagated-effect observation → [Q18](#q18-how-should-the-agent-handle-the-faults-propagated-effects-at-the-application-level)
 
 ---
 
 ## 1. Recap of the layered verification model
 
-### Q1: Why do we need a three-layer verification model? Is one layer not enough?
+### Q1: Why do we need a layered verification model? Is one layer not enough?
 
-**A1**: The three-layer model is the core framework of fault verification; see the full treatment in `chaos-engineering-principles.md` Q7-Q8.
+**A1**: The layered model is the core framework of fault verification; see the full treatment in `chaos-engineering-principles.md` Q7-Q8.
 
 A brief comparison:
 - **Layer 1 (injection-action verification)**: confirms the ChaosBlade experiment was created → filters out ineffective injections fast
 - **Layer 2 (symptom verification)**: uses kubectl to confirm the fault symptom really appeared → sees through blade's status abstraction to the real system state
-- **Layer 3 (impact verification)**: lateral comparison to confirm the blast radius is contained → verifies the blast radius
+- **Layer 3 (propagated-effect observation)**: lateral comparison to note the blast radius → observational record, never a verdict criterion
 
-The Agent's strategy: Layer 1 + Layer 2 are mandatory; Layer 3 is optional (depends on the Skill's definition). On verification failure, trigger a rollback (blade destroy).
+The Agent's strategy: Layer 1 + Layer 2 decide the verdict; Layer 3 is an optional observational record (record evidence already in hand, never wait or sample for it). On verification failure the framework cleans up the experiment automatically — recovery is not the verifier LLM's job.
 
 ---
 
@@ -119,13 +122,13 @@ Verification should run within a reasonable time window after injection; too ear
 > - After a successful injection, wait briefly (**2-5 seconds**) for the fault to take effect
 > - Then run Layer 2 verification
 > - On failure, retry **1-2 times** (3-5 seconds apart) to rule out a timing issue
-> - If it still fails after the retries, declare verification failed and trigger a rollback
+> - If it still fails after the retries, declare verification failed; the framework then rolls back automatically
 
 ---
 
-#### 2.5 Stay rollback-safe
+#### 2.5 Stay recovery-safe
 
-Verification must not introduce new side effects, so a failed verification can always roll back safely.
+Verification must not introduce new side effects, so a failed drill can always be recovered safely.
 
 **Comparison**:
 - ❌ **With side effects**: `kubectl exec my-pod -- rm -rf /data/*` (deletes data irrecoverably)
@@ -134,7 +137,7 @@ Verification must not introduce new side effects, so a failed verification can a
 > **🤖 How the Agent implements this**:
 > - Layer 2 verification must use **read-only commands** only (get, describe, top, logs, and query-style commands under exec)
 > - If a command with side effects is needed (e.g. cleaning up disk-filler files), run it in the **recovery phase**, not during verification
-> - On verification failure, **call** `blade destroy` **immediately** without performing extra cleanup
+> - On verification failure, submit the failed verdict immediately — the framework handles experiment cleanup (the verifier's toolset has no `blade_destroy`)
 
 ---
 
@@ -160,9 +163,9 @@ Expected: the output contains a chaos_cpu process with high CPU usage
 **Method 3: verify increased latency from application logs**
 Expected: the logs contain keywords such as timeout, slow request, high latency
 
-**Layer 3 verification** (optional):
+**Propagated-effect observation** (optional, non-verdict):
 - Lateral comparison: is CPU normal on the Deployment's other Pods? Expected: only the target Pod has high CPU; the others are normal (< 20%)
-- Verify whether HPA scaled out. Expected: if currentReplicas < maxReplicas and CPU stays high, currentReplicas should increase
+- Observe whether HPA scaled out. Expected: if currentReplicas < maxReplicas and CPU stays high, currentReplicas should increase
 
 **Possible reasons verification fails**:
 - The Pod's CPU limit is too large (e.g. 4 cores) for the chaos process to saturate
@@ -172,7 +175,7 @@ Expected: the logs contain keywords such as timeout, slow request, high latency
 > **🤖 The Agent's decision logic**:
 > - If `top pod` shows CPU < 50% of the limit, declare verification failed
 > - Retry 1-2 times to rule out a timing issue
-> - If it still fails, call `blade destroy` to roll back and record the failure reason in the experiment history
+> - If it still fails, submit the failed verdict; the framework rolls back automatically and the failure reason is recorded in the experiment history
 
 ---
 
@@ -194,9 +197,9 @@ Expected: Events contain "OOMKilling" or "Memory cgroup out of memory"
 **Method 4: verify the pre-crash logs via kubectl logs --previous**
 Expected: the logs contain keywords such as "out of memory", "Killed", "signal 9"
 
-**Layer 3 verification** (optional):
-- Verify the Deployment recreates the Pod automatically. Expected: availableReplicas dips briefly, then recovers
-- Verify the new Pod starts healthily. Expected: the new Pod is Running with READY=1/1
+**Propagated-effect observation** (optional, non-verdict):
+- Observe the Deployment recreates the Pod automatically. Expected: availableReplicas dips briefly, then recovers
+- Observe the new Pod starts healthily. Expected: the new Pod is Running with READY=1/1
 
 **Possible reasons verification fails**:
 - `--mem-size` is set too low to reach the memory limit
@@ -240,9 +243,9 @@ Expected: the logs contain keywords such as "timeout", "i/o timeout", "deadline 
 **Method 4: verify connection state with kubectl exec ss/netstat**
 Expected: connections are visible in ESTABLISHED state, but there may be many retransmissions
 
-**Layer 3 verification** (optional):
-- Verify whether downstream calls are affected. Expected: the upstream service's logs show retry, fallback, circuit breaker open records
-- Verify the Service's overall error rate. Expected: Endpoints is non-empty (network delay alone does not remove a Pod from Endpoints unless the health check fails)
+**Propagated-effect observation** (optional, non-verdict):
+- Observe whether downstream calls are affected. Expected: the upstream service's logs show retry, fallback, circuit breaker open records
+- Observe the Service's overall error rate. Expected: Endpoints is non-empty (network delay alone does not remove a Pod from Endpoints unless the health check fails)
 
 **Possible reasons verification fails**:
 - The injected delay is too small (e.g. 10ms) and is masked by network jitter
@@ -252,7 +255,7 @@ Expected: connections are visible in ESTABLISHED state, but there may be many re
 > - Parse the ping or curl output and extract the latency (in ms)
 > - If the latency is < 50% of the injected value, declare verification failed (some error margin is allowed)
 > - Retry 1-2 times to rule out network jitter
-> - If it still fails, call `blade destroy` to roll back
+> - If it still fails, submit the failed verdict; the framework rolls back automatically
 
 ---
 
@@ -274,9 +277,9 @@ Expected: some requests fail with errors such as "Connection reset by peer", "Op
 **Method 3: verify connection resets from application logs**
 Expected: the logs contain keywords such as "connection reset", "broken pipe", "no route to host", "retry"
 
-**Layer 3 verification** (optional):
-- Verify the retry mechanism works. Expected: the upstream service's logs show "retrying request", "attempt 2/3" records
-- Verify whether the circuit breaker trips. Expected: with a high loss rate over a long period, the breaker may open and the logs show "circuit breaker open"
+**Propagated-effect observation** (optional, non-verdict):
+- Observe the retry mechanism works. Expected: the upstream service's logs show "retrying request", "attempt 2/3" records
+- Observe whether the circuit breaker trips. Expected: with a high loss rate over a long period, the breaker may open and the logs show "circuit breaker open"
 
 **Possible reasons verification fails**:
 - The loss rate is too low (e.g. 5%) and is masked by TCP retransmission, so the application layer never notices
@@ -287,7 +290,7 @@ Expected: the logs contain keywords such as "connection reset", "broken pipe", "
 > - Parse the ping output and extract the loss percentage
 > - If the loss rate is < 50% of the injected value, declare verification failed
 > - Retry 1-2 times to rule out randomness
-> - If it still fails, call `blade destroy` to roll back
+> - If it still fails, submit the failed verdict; the framework rolls back automatically
 
 ---
 
@@ -315,9 +318,9 @@ Expected: `ping <another domain>` resolves to its normal IP, proving the hijack 
 **nslookup/dig do NOT apply to this fault type**:
 nslookup and dig query the DNS server directly and bypass /etc/hosts entirely. They therefore always return the real DNS record rather than the hijack entry in /etc/hosts. Using nslookup/dig to verify this kind of DNS hijack yields the WRONG conclusion that "the fault did not take effect".
 
-**Layer 3 verification** (optional):
-- Verify DNS caching behaviour. Expected: if the application caches DNS, a second lookup may still succeed (cache not yet expired)
-- Verify CoreDNS itself is healthy (it must NOT be affected). Expected: the CoreDNS Pod is Running (proving the fault only affects the target Pod, not cluster DNS)
+**Propagated-effect observation** (optional, non-verdict):
+- Observe DNS caching behaviour. Expected: if the application caches DNS, a second lookup may still succeed (cache not yet expired)
+- Observe CoreDNS itself is healthy (it must NOT be affected). Expected: the CoreDNS Pod is Running (proving the fault only affects the target Pod, not cluster DNS)
 
 **Possible reasons verification fails**:
 - The application connects by IP rather than by domain, so the DNS fault does not affect it
@@ -327,7 +330,7 @@ nslookup and dig query the DNS server directly and bypass /etc/hosts entirely. T
 
 > **The Agent's decision logic**:
 > - Prefer `cat /etc/hosts` to confirm the hijack entry (direct evidence), then use `ping` or `wget` to confirm the effect (application-level evidence)
-> - If the target application does not depend on the hijacked domain, mark application-impact verification as skipped and advise the user to pick a domain the application actually uses
+> - If the target application does not depend on the hijacked domain, mark the propagated-effect steps 'not_applicable' and advise the user to pick a domain the application actually uses
 > - Do NOT use `nslookup` or `dig` to verify a ChaosBlade DNS fault
 
 ---
@@ -353,9 +356,9 @@ Expected: the logs contain keywords such as "no space left on device", "write er
 **Method 4: verify new files cannot be created via kubectl exec touch**
 Expected: returns the error "No space left on device"
 
-**Layer 3 verification** (optional):
-- Verify whether other Pods on the same node are affected. Expected: only the target Pod's mounted volume is filled; other Pods are unaffected (unless they share the same PV)
-- Verify log rotation works. Expected: if the application rotates logs, old log files should be cleaned up, freeing some space
+**Propagated-effect observation** (optional, non-verdict):
+- Observe whether other Pods on the same node are affected. Expected: only the target Pod's mounted volume is filled; other Pods are unaffected (unless they share the same PV)
+- Observe log rotation works. Expected: if the application rotates logs, old log files should be cleaned up, freeing some space
 
 **Possible reasons verification fails**:
 - `--size` is set too small to reach the disk's capacity ceiling
@@ -366,7 +369,7 @@ Expected: returns the error "No space left on device"
 > - Parse the `df -h` output and extract the Use% field
 > - If Use% < 90%, declare verification failed
 > - Retry 1-2 times to rule out filesystem-statistics lag
-> - If it still fails, call `blade destroy` to roll back
+> - If it still fails, submit the failed verdict; the framework rolls back automatically
 > - **Important**: when `--retain=true` (the default), remind the user to clean up the filler files manually after recovery
 
 ---
@@ -389,9 +392,9 @@ Expected: Ready=True in Conditions (unless CPU is high enough to affect kubelet)
 **Method 3: verify Pods on the same node are affected via kubectl top pod**
 Expected: CPU usage of Pods on the same node may rise (because of CPU contention)
 
-**Layer 3 verification** (optional):
-- Verify the scheduler avoids that node. Expected: new Pods are not scheduled onto worker-1 (provided other nodes have free capacity)
-- Verify whether HPA scales out because of the node's high CPU. Expected: if Pod CPU rises through node contention, HPA may trigger a scale-out
+**Propagated-effect observation** (optional, non-verdict):
+- Observe the scheduler avoids that node. Expected: new Pods are not scheduled onto worker-1 (provided other nodes have free capacity)
+- Observe whether HPA scales out because of the node's high CPU. Expected: if Pod CPU rises through node contention, HPA may trigger a scale-out
 
 **Possible reasons verification fails**:
 - The node has too many CPU cores (e.g. 32) and `--cpu-count` was not specified, so only some cores were affected
@@ -402,7 +405,7 @@ Expected: CPU usage of Pods on the same node may rise (because of CPU contention
 > - Parse the `top node` output and extract the CPU% field
 > - If CPU% < 70% of the injected value, declare verification failed (node-level verification allows a wider margin)
 > - Retry 1-2 times to rule out transient fluctuation
-> - If it still fails, call `blade destroy` to roll back
+> - If it still fails, submit the failed verdict; the framework rolls back automatically
 
 ---
 
@@ -458,9 +461,9 @@ Expected: Use% close to 100%
 - **exec-os mode** (running `blade` directly on the host): `--path` is a literal host path. `/tmp` fills the host's `/tmp`, backed by nodefs
 - When verifying, reason about which partition the filling acts on from the injection mode and the `--path` value
 
-**Layer 3 verification** (optional):
-- Verify whether Pods on the node are affected. Expected: some Pods may be Pending or FailedMount
-- Verify the kubelet log. Expected: the log contains records such as "disk pressure", "evicting pods"
+**Propagated-effect observation** (optional, non-verdict):
+- Observe whether Pods on the node are affected. Expected: some Pods may be Pending or FailedMount
+- Observe the kubelet log. Expected: the log contains records such as "disk pressure", "evicting pods"
 
 **Possible reasons verification fails**:
 - `--size` is set too small to reach the disk's capacity ceiling
@@ -578,15 +581,12 @@ blade-ai has two tools for querying experiment state, with different purposes:
 
 > **Analysis + decision**: the failure-cause taxonomy and the retry/rollback decision logic are in `failure-modes.md` Mode 3 (Verification Failure) and `verification-heuristics.md`. What follows covers only the **execution-level procedure**.
 
-**Executing the rollback**:
+**Who rolls back**: recovery is the framework's job, not the verifier LLM's. When the submitted verdict is failed, the injection graph automatically invokes `blade destroy <uid>` (the verifier's toolset is read-only and contains no `blade_destroy`).
 
-```bash
-blade destroy <uid>
-```
-
-- Confirm `blade status --uid <uid>` returns Status="Destroyed" (`blade status` does not support the `--kubeconfig` flag; the Agent passes credentials via an environment variable internally)
-- Record the failure reason in the experiment history (Operational Memory)
-- Return a clear error message to the user, including:
+After the automatic rollback:
+- The framework confirms `blade status --uid <uid>` returns Status="Destroyed" (`blade status` does not support the `--kubeconfig` flag; credentials are passed via an environment variable internally)
+- The failure reason is recorded in the experiment history (Operational Memory)
+- The user receives a clear error message, including:
   - The injected fault type and target
   - The verification-failure detail (e.g. "CPU utilisation was only 15%, expected > 80%")
   - Suggested troubleshooting steps (e.g. "check whether the Pod's CPU limit is set too high")
@@ -605,7 +605,7 @@ blade destroy <uid>
 **Verification failure**:
 - The verification command ran successfully, but the output does not match expectations
 - Example: `kubectl top pod` returns CPU=10% where > 80% was expected
-- **Handling**: roll back immediately and record the failure reason
+- **Handling**: submit the failed verdict — the framework rolls back automatically and records the failure reason
 
 **Verification timeout**:
 - The verification command timed out (e.g. `kubectl exec` unresponsive for over 60 seconds)
@@ -613,14 +613,14 @@ blade destroy <uid>
 - **Handling**:
   - First check `blade status --uid <uid>` to confirm the experiment's state
   - If Status="Running", the problem is likely the verification command itself — try the fallback verification method
-  - If Status="Error" or the query times out, chaosblade-operator may be malfunctioning — force a rollback
+  - If Status="Error" or the query times out, chaosblade-operator may be malfunctioning — the framework forces a rollback
   - Record the timeout as a diagnostic clue
 
 > **🤖 How the Agent implements this**:
 > - Give every verification command a reasonable timeout (e.g. 60 seconds for kubectl exec)
 > - Catch the timeout exception and distinguish a command timeout from an experiment anomaly
 > - On a command timeout, try a simpler verification method (e.g. `kubectl get` instead of `kubectl exec`)
-> - If every verification method times out, treat it as a serious anomaly: force a rollback and raise an alert
+> - If every verification method times out, treat it as a serious anomaly: submit the failed verdict (the framework forces the rollback) and raise an alert
 
 ---
 
@@ -672,11 +672,11 @@ If verification fails, check these possible causes:
 3. Not enough time was allowed after injection, so the chaos process has not fully started
 ```
 
-**4. Layer 3 verification (optional)**
+**4. Propagated-effect observation (optional, non-verdict)**
 ```markdown
-### Layer 3 verification (optional)
+### Propagated-effect observation (optional, non-verdict)
 
-To verify the blast radius, run:
+To observe the blast radius, run:
 ```bash
 kubectl top pod -l app={{app_label}} -n {{namespace}}
 ```
@@ -806,11 +806,11 @@ kubectl top pod <name> -n <ns>  # run twice in a row and see whether the values 
 - If the anomaly can be proven irrelevant (e.g. the Pod restart is unrelated to the injection), explain why in Negative Evidence
 - If the anomaly cannot be explained, it weakens the credibility of the verification conclusion
 
-### Q18: How do you verify the fault's impact at the application level?
+### Q18: How should the Agent handle the fault's propagated effects at the application level?
 
-**A18**: Application impact means observable degradation of application behaviour caused by the injection (higher latency, higher error rate, lower availability). This is verification's ultimate goal — confirming the fault's "blast radius" really reached the application layer.
+**A18**: Application impact means observable degradation of application behaviour caused by the injection (higher latency, higher error rate, lower availability). It is a propagated effect, NOT a verdict criterion: the verdict answers exactly one question — did the injection take effect on the target. Record propagated effects with evidence already in hand; otherwise mark the step 'expected'/'not_applicable' and never wait, retry or sample for them.
 
-**Verification methods** (using the kubectl tool only):
+**Observation methods** (using the kubectl tool only):
 
 **Method 1: search application logs for anomaly keywords with kubectl logs**
 ```bash
@@ -847,10 +847,10 @@ kubectl get endpoints <service> -n <ns>
 - The Service has no external endpoint: check for changes via `kubectl get endpoints`
 
 **Decision rules**:
-- Application-impact verification steps required by the Skill case **must NOT be skipped**; when they cannot be run, mark them `[SKIPPED]` and state why
-- Application-impact verification passes → strengthens the credibility of the Layer 2 conclusion
-- Application-impact verification fails (e.g. latency did not rise) → investigate why (did the fault's effect really propagate to the application layer?)
-- Application-impact verification skipped (no tooling available) → note it in a Warning; do NOT downgrade the Layer 2 status
+- Propagated-effect steps are answer-based: record evidence already in hand; when no observation is available, mark them 'expected'/'not_applicable' and state why — never wait, retry or sample for them
+- Recorded propagated effects enrich the report but never gate the verdict
+- Absence of a propagated effect (e.g. latency did not rise) is NOT counter-evidence against the injection being in effect — record it as an observation
+- Propagated effects belong in the report (Warnings/findings); they never downgrade the injection verdict
 
 ---
 
@@ -960,7 +960,7 @@ When recovery verification finds residual impact:
 |------|------|
 | Layer 1 verification | Confirming the experiment's state via `blade status` |
 | Layer 2 verification | Using kubectl to verify the fault symptom appeared |
-| Layer 3 verification | Lateral comparison to verify the blast radius is contained |
+| Layer 3 verification | Propagated-effect observation — records the fault's blast radius (observational, non-verdict) |
 | Verification failure | The verification command ran successfully, but the output does not match expectations |
 | Verification timeout | The verification command timed out, so no result could be obtained |
 | Rollback | Calling `blade destroy` to stop the injection |

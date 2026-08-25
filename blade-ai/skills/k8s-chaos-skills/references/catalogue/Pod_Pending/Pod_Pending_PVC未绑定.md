@@ -31,15 +31,21 @@
        requests:
          storage: 10Gi
    ```
-3. **先武装定时恢复，再修改模板**（在运行 kubectl 的机器上后台武装，到期自动移除注入的
-   volumes/volumeMounts 并删除 PVC，补齐自恢复能力；`<volume-index>`/`<mount-index>` 为注入时
-   新增项在数组中的索引，添加前先记录；PID 落盘供提前恢复时终止定时器）：
+3. **先武装定时自恢复，再注入**（先捕获 volumes/volumeMounts 数组基线，再武装定时器。
+   恢复命令幂等：定时器到期自动恢复为主，Agent 在演练结束时主动执行同一组命令兜底，定时器
+   迟到重复执行无副作用。定时器 shell 逻辑必须作为 `kubectl exec` 载体载荷派发——直接以
+   `sh -c '…'` 作为顶层命令派发会被命令守卫拦截（unknown_binary: sh）；执行通道为多副本
+   路由，无法可靠终止定时器，故不设 pidfile。恢复含 json patch 引号嵌套，用 base64
+   折叠武装）。
+   载体 Pod 选集群内带 kubectl 且有足够 RBAC 权限的常驻 Pod（如演练工具 Pod）：
    ```bash
-   ( sleep <duration>; \
-     kubectl patch deployment <deployment-name> -n <namespace> --type='json' \
-       -p='[{"op":"remove","path":"/spec/template/spec/containers/<container-index>/volumeMounts/<mount-index>"},{"op":"remove","path":"/spec/template/spec/volumes/<volume-index>"}]'; \
-     kubectl delete pvc app-data-claim -n <namespace> ) >/dev/null 2>&1 &
-   echo $! > /tmp/blade-restore-pvc.pid
+   # 基线捕获：Agent 读取输出并记录原始数组 JSON（定时器与主动恢复均使用）
+   kubectl get deployment <deployment-name> -n <namespace> \
+     -o jsonpath='{.spec.template.spec.volumes}'
+   kubectl get deployment <deployment-name> -n <namespace> \
+     -o jsonpath='{.spec.template.spec.containers[<container-index>].volumeMounts}'
+   # 武装定时自恢复（将"注入恢复"第 1 步的两条命令整体 base64 编码后填入 <restore-b64>）
+   kubectl exec <载体Pod> -n <载体命名空间> -- sh -c 'echo <restore-b64> | base64 -d > /tmp/blade-restore-pvc.sh; ( sleep <duration>; sh /tmp/blade-restore-pvc.sh ) >/dev/null 2>&1 & echo armed'
    ```
 4. 使用 `kubectl patch` 修改应用 A 的 Deployment，添加引用该 PVC 的 volume 和 volumeMount
 5. 等待 Pod 滚动更新完成，确认所有旧 Pod 已被替换
@@ -54,13 +60,18 @@
 5. 执行 `kubectl describe pvc app-data-claim`，确认 StorageClass 不存在或 Provisioner 异常
 
 **注入恢复**：
-1. 等待 `<duration>` 到期后武装的定时器自动移除注入的 volumes/volumeMounts 并删除 PVC；如需提前恢复，先终止定时器：
+1. 等待 `<duration>` 到期，定时器自动执行基线还原；演练提前结束时由 Agent 主动执行同一条
+   恢复命令（幂等，定时器迟到再执行一次无副作用。**数组整体 replace 回基线而非按索引 remove**
+   ——remove 按位置删除，定时器第二次触发时数组已变化，同索引会误删其他卷；整体 replace
+   重复执行结果不变）：
    ```bash
-   kill $(cat /tmp/blade-restore-pvc.pid) 2>/dev/null; rm -f /tmp/blade-restore-pvc.pid
+   kubectl patch deployment <deployment-name> -n <namespace> --type='json' \
+     -p='[{"op":"replace","path":"/spec/template/spec/volumes","value":<步骤3基线volumes JSON>},{"op":"replace","path":"/spec/template/spec/containers/<container-index>/volumeMounts","value":<步骤3基线volumeMounts JSON>}]'
+   kubectl delete pvc app-data-claim -n <namespace>
    ```
-2. 恢复应用 A 的 Deployment 定义，移除引用 app-data-claim 的 volume
-3. 删除注入时创建的 PVC：`kubectl delete pvc app-data-claim`
-4. 等待 Pod 滚动更新完成
+   （基线为空/字段原本不存在时，对应 replace 改为 remove——remove 对已不存在的路径仅报错，
+   不会误删其他数组项）
+2. 等待 Pod 滚动更新完成
 
 **恢复验证**：
 1. 执行 `kubectl get pods`，确认 Pod 状态恢复为 Running

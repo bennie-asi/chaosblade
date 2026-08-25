@@ -15,7 +15,7 @@
 3. 确认监控系统可观测网络流量和包计数指标
 4. 确认有可用的 **iproute2** `tc`（见演练步骤 3 —— 精简镜像里常有同名的 BusyBox applet，它不支持 netem）
 5. 若需走临时容器路径：先确认当前集群**能拉取**一个含 iproute2 的镜像。不要假定公网镜像可用 —— 内网/离线集群常拉不到 Docker Hub，需换成集群已在使用的仓库地址
-6. 确认目标节点内核支持 netem（**内核级依赖，路径 A/B 都绕不开**）：netem 由宿主机内核的 sch_netem 模块提供，容器与宿主共享内核，换 Pod / 换临时容器都改变不了。只读探查：`kubectl exec <pod-name> -n <namespace> -- grep sch_netem /proc/modules`（临时容器载体同样可用）——有输出说明已加载；无输出**不能**判定不可行（注入时内核可能自动加载模块），记为待 Phase 2 验证的假设。**判据以注入输出为准**：注入报 `RTNETLINK answers: Operation not supported` 或 `RTNETLINK answers: No such file or directory`（后者为节点上 sch_netem 模块文件本身缺失、内核自动加载失败，实测确证）即为内核不支持 netem 的确证，见演练步骤 4
+6. 确认目标节点内核支持 netem（**内核级依赖，路径 A/B 都绕不开**）：netem 由宿主机内核的 sch_netem 模块提供，容器与宿主共享内核，换 Pod / 换临时容器都改变不了。只读探查：`kubectl exec <pod-name> -n <namespace> -- grep sch_netem /proc/modules`（临时容器载体同样可用）——有输出说明已加载；无输出时可用更强的前置确证（实测）：经 node debug 载体执行 `chroot /host modprobe sch_netem` 试载，报 `FATAL: Module sch_netem not found` 即模块文件本身缺失（内核自动加载不可能成功），**注入前即可定案不可行**；实测 ACK/ASI al8 内核（5.10.134-13.1.al8）即为此形态——同一节点 netem 全家（loss/delay/corrupt）全部不可行，而 sch_tbf 存在（带宽受限场景可用，见 `Pod_网络带宽不足_带宽受限`）。**判据以注入输出为准**：注入报 `RTNETLINK answers: Operation not supported`、`RTNETLINK answers: No such file or directory`（后者为节点上 sch_netem 模块文件本身缺失、内核自动加载失败）或 `Error: Specified qdisc kind is unknown.`（RC=2，另一实测形态）即为内核不支持 netem 的确证，见演练步骤 4
 
 **演练步骤**：
 1. 确认目标 Pod 的标签选择器和命名空间：
@@ -42,8 +42,10 @@
    **先武装定时自删，再注入规则**（后台进程与目标容器同 netns，到期自动移除规则；
    必须重定向后台化，否则 exec 挂住）：
    ```bash
+   # 两条命令分两次独立执行——不能用 && 串联：第二段 kubectl 会沦为第一条
+   # exec 载荷（sh -c）的死参数，注入静默丢失
    kubectl exec <pod-name> -n <namespace> -- sh -c \
-     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &'
    kubectl exec <pod-name> -n <namespace> -- tc qdisc add dev eth0 root netem duplicate <percent>
    ```
 
@@ -51,15 +53,15 @@
    **共享同一个网络命名空间**，所以在它里面对 `eth0` 操作等价于对目标 Pod 的网卡操作；
    `tc` 来自调试镜像而非目标镜像，`--profile=netadmin` 提供 NET_ADMIN capability：
    ```bash
-   # 1) 先建一个【长驻】临时容器作为执行载体。必须用 `sleep` 保活 ——
-   #    若直接把 tc 命令交给 kubectl debug，命令跑完容器立即终止，
-   #    后续 `kubectl exec -c <debugger>` 会报 `container not found`，故障就没法恢复了。
    # 0) 前置安全检查：确认目标 Pod 不是 hostNetwork。hostNetwork=true 的 Pod
    #    其网络命名空间【就是宿主机】，临时容器里的 tc 会打穿整个节点，
    #    爆炸半径从单 Pod 扩大到整台机器。为 true 时禁止此路径，改用 node 级用例。
    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.hostNetwork}'
    # 期望输出为空或 false；输出 true 则停止。
 
+   # 1) 先建一个【长驻】临时容器作为执行载体。必须用 `sleep` 保活 ——
+   #    若直接把 tc 命令交给 kubectl debug，命令跑完容器立即终止，
+   #    后续 `kubectl exec -c <debugger>` 会报 `container not found`，故障就没法恢复了。
    kubectl debug <pod-name> -n <namespace> --image=<verified-cluster-image> \
      --target=<container-name> --profile=netadmin --quiet -- sleep <duration>
 
@@ -69,9 +71,10 @@
 
    # 3) 经载体注入。载体与目标容器共享同一个网络命名空间，操作 eth0 即操作目标 Pod 的网卡；
    #    tc 来自调试镜像，--profile=netadmin 提供 NET_ADMIN capability。
-   #    同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）
+   #    同样先武装定时自删（在载体内后台运行；载体保活 sleep 必须 ≥ <duration>）。
+   #    两条命令分两次独立执行——不能用 && 串联（第二段会沦为第一条 exec 载荷的死参数）
    kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- sh -c \
-     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &' &&
+     '( sleep <duration>; tc qdisc del dev eth0 root ) >/dev/null 2>&1 &'
    kubectl exec <pod-name> -n <namespace> -c <debugger-name> -- tc qdisc add dev eth0 root netem duplicate <percent>
    ```
    - `<verified-cluster-image>`：必须是当前集群**已验证可拉取**且含 **iproute2**（非 BusyBox）的镜像。
@@ -86,7 +89,9 @@
    - `eth0`：网络接口名称，根据实际情况调整（可通过 `ip link show` 确认）
    - 原理：tc netem 的 duplicate 选项对出站包进行复制，接收端会收到重复数据包
    - **内核级依赖（两条路径相同）**：netem 需要宿主机内核支持 sch_netem。若注入报
-     `RTNETLINK answers: Operation not supported` 或 `RTNETLINK answers: No such file or directory`（模块文件缺失），即内核不支持 netem 的确证 —— 立即停止，
+     `RTNETLINK answers: Operation not supported`、`RTNETLINK answers: No such file or directory`
+     （模块文件缺失）或 `Error: Specified qdisc kind is unknown.`（RC=2，另一实测形态），
+     即内核不支持 netem 的确证 —— 立即停止，
      **不要重试、不要换 Pod 或重建临时容器**（内核是同一个，重试只是空转），发起 replan
      并附上该报错证据，由 Phase 1 改选其他可行方案或判定不可行
 

@@ -49,15 +49,14 @@ def query_node_capacity(node: str) -> tuple[int, int, int]:
                      "jsonpath={.metadata.annotations.k8s\\.aliyun\\.com/max-available-ip}"])
     ip_pool = safe_int(r.stdout) if r.returncode == 0 else 0
 
-    # 计算节点上所有非终态 Pod（Running + Pending + ContainerCreating 都占 pod slot）
+    # 统计节点上所有 Pod（含终态未 GC 的 Evicted/Completed 尸体）——kubelet 的 pod slot
+    # 计数同样包含它们，按 phase 过滤会低估占用，导致副本数超发并撞 OutOfpods
     r = run_kubectl(["get", "pods", "--all-namespaces",
                      f"--field-selector=spec.nodeName={node}",
                      "-o", "jsonpath={range .items[*]}{.status.phase}{'\\n'}{end}"])
     current_pods = 0
     if r.returncode == 0 and r.stdout.strip():
-        for phase in r.stdout.strip().splitlines():
-            if phase.strip() not in ("Succeeded", "Failed"):
-                current_pods += 1
+        current_pods = len(r.stdout.strip().splitlines())
 
     return pod_capacity, ip_pool, current_pods
 
@@ -95,6 +94,20 @@ def main():
         fail(result,
              f"无法获取节点 IP pool 大小（annotation k8s.aliyun.com/max-available-ip 缺失）。"
              f"pod_capacity={pod_capacity}, current_pods={current_pods}")
+
+    if pod_capacity <= 0:
+        fail(result, f"无法获取节点 pod 容量（status.allocatable.pods）。"
+                     f"ip_pool={ip_pool}, current_pods={current_pods}")
+
+    # pod 容量与 IP 池余量核查：二者接近时，批量 Pod 会先撞满 pod 容量（K8s 1.31+
+    # 呈 OutOfpods 且与 Deployment 删除重建形成自锁），「IP 耗尽」判据结构性不可达——
+    # fail-fast 并提示换节点，禁止继续注入
+    if pod_capacity - ip_pool < 5:
+        fail(result,
+             f"节点 pod 容量与 IP 池过于接近（pod_capacity={pod_capacity}, "
+             f"ip_pool={ip_pool}，余量 {pod_capacity - ip_pool} < 5）：批量 Pod 会先撞满 "
+             f"pod 容量出现 OutOfpods 自锁，IP 耗尽判据不可达。请换用 pod 容量远大于 "
+             f"IP 池的节点，或终止演练")
 
     # 2. 计算副本数
     if args.replicas > 0:

@@ -21,6 +21,9 @@ fault_types:
   - node-disk
   - node-network
 summary: "Long-form examples and flag references for ChaosBlade K8s scenarios across pod / container / node scopes, plus the three-tier injection method switching catalogue (blade_create → kubectl exec into tool pod → kubectl-native scale/cordon/patch/taint)."
+phases:
+  - execute
+  - recover
 ---
 
 # ChaosBlade CLI Flag Catalogue & Injection Method Switching

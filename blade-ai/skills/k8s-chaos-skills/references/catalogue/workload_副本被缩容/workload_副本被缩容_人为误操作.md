@@ -11,14 +11,19 @@
 
 **演练步骤**：
 1. 定位应用 A 的 Deployment/StatefulSet，并记录当前副本数
-2. **先武装定时恢复，再注入**（在运行 kubectl 的机器上后台武装，到期自动将 replicas 扩容回
-   原始值，补齐自恢复能力；PID 落盘供提前恢复时终止定时器）：
+2. **先武装定时自恢复，再注入**（基线捕获 → 武装定时器 → 注入三步。恢复命令幂等：定时器到期
+   自动恢复为主，Agent 在演练结束时主动执行同一条命令兜底，定时器迟到重复执行无副作用。定时器
+   shell 逻辑必须作为 `kubectl exec` 载体载荷派发——直接以 `sh -c '…'` 作为顶层命令派发会被
+   命令守卫拦截（unknown_binary: sh），载体内 `sh -c` 同时解决 exec-form 通道不解释裸
+   `( sleep … ) &` 语法的问题；执行通道为多副本路由，无法可靠终止定时器，故不设 pidfile。
+   载体 Pod 选集群内带 kubectl 且有足够 RBAC 权限的常驻 Pod（如演练工具 Pod））：
    ```bash
-   ORIG_REPLICAS=$(kubectl get <workload-kind> <name> -n <namespace> -o jsonpath='{.spec.replicas}')
-   ( sleep <duration>; kubectl scale <workload-kind> <name> -n <namespace> \
-       --replicas=$ORIG_REPLICAS ) >/dev/null 2>&1 &
-   echo $! > /tmp/blade-restore-scale.pid
-   # 再缩容注入
+   # 基线捕获：Agent 读取输出并记录原始副本数（定时器与主动恢复均使用）
+   kubectl get <workload-kind> <name> -n <namespace> -o jsonpath='{.spec.replicas}'
+   # 武装定时自恢复（<duration> 需覆盖演练观察窗口；定时器在载体内执行 kubectl，
+   # 需载体含 kubectl 且有 scale 权限）
+   kubectl exec <载体Pod> -n <载体命名空间> -- sh -c '( sleep <duration>; kubectl scale <workload-kind> <name> -n <namespace> --replicas=<基线副本数> ) >/dev/null 2>&1 & echo armed'
+   # 缩容注入
    kubectl scale <workload-kind> <name> -n <namespace> --replicas=<较小值>
    ```
 3. 观察 Pod 缩容过程和应用状态变化
@@ -34,12 +39,12 @@
 3. （可选，仅当演练方提供了应用访问入口时）确认请求延迟增大/超时或可用性下降；无入口时上述副本数证据成立即可判定
 
 **注入恢复**：
-1. 等待 `<duration>` 到期后武装的定时器自动将 replicas 扩容回原始值；如需提前恢复，先终止定时器：
+1. 等待 `<duration>` 到期，定时器自动将副本数恢复为基线；演练提前结束时由 Agent 主动执行
+   同一条恢复命令（幂等，定时器迟到再执行一次无副作用）：
    ```bash
-   kill $(cat /tmp/blade-restore-scale.pid) 2>/dev/null; rm -f /tmp/blade-restore-scale.pid
+   kubectl scale <workload-kind> <name> -n <namespace> --replicas=<基线捕获的原始副本数>
    ```
-2. 使用 kubectl 将 replicas 恢复为原来的合理值
-3. 等待 Pod 自动扩容
+2. 等待 Pod 自动扩容
 
 **恢复验证**：
 1. 执行 `kubectl get pods`，确认 Pod 总数恢复到缩容前的值

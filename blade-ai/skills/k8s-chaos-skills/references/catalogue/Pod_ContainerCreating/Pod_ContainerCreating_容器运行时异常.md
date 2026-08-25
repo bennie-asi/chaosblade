@@ -75,5 +75,10 @@ ssh root@<node-ip> 'kill -CONT $(pidof containerd)'
 
 注意事项：
 - 挂起 containerd 后节点上所有容器操作均失效（包括 kubectl debug/exec/logs），恢复只能通过 SSH 或等待超时自恢复
+- **实测形态与主路径判据有偏差（SIGSTOP 全冻结）**：新 Pod 停留 Pending（已调度但 kubelet
+  首次 CRI 调用同步阻塞，Pod status 不更新为 ContainerCreating）；节点保持 Ready（kubelet
+  lease 心跳走独立通道不经过 CRI，阻塞调用不报错，RuntimeNotReady 不触发）。注入生效信号
+  以「Pod 已调度但 status 长时间停滞 + 节点上 exec/logs 全部超时失效」为准，不以
+  ContainerCreating/NotReady 为准
 - 建议超时设置 30-120 秒
 - 若节点使用 docker 而非 containerd，将 `pidof containerd` 替换为 `pidof dockerd`
