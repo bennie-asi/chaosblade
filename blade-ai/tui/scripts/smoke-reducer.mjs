@@ -18,9 +18,9 @@
 // real reducer / client modules, not the bundled output.
 import { tsImport } from "tsx/esm/api";
 
-const reducerMod = await tsImport("../src/state/reducer.ts", import.meta.url);
-const typesMod = await tsImport("../src/state/types.ts", import.meta.url);
-const clientMod = await tsImport("../src/api/client.ts", import.meta.url);
+const reducerMod = await tsImport("../../core/src/state/reducer.ts", import.meta.url);
+const typesMod = await tsImport("../../core/src/state/types.ts", import.meta.url);
+const clientMod = await tsImport("../../core/src/api/client.ts", import.meta.url);
 
 const { reducer } = reducerMod;
 const { initialAppState } = typesMod;

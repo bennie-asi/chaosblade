@@ -23,7 +23,7 @@
  * destructuring all three names.
  */
 
-import type { SessionInfo } from "../state/types.js";
+import type { SessionInfo } from "@blade-ai/core";
 
 interface Props {
   version: string;

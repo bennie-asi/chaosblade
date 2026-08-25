@@ -30,9 +30,9 @@
 
 import { memo } from "react";
 import { Box, Text } from "ink";
-import { useAppSelector } from "../state/store.js";
+import { useAppSelector } from "@blade-ai/core";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
-import { t } from "../i18n/index.js";
+import { t } from "@blade-ai/core";
 import { Theme } from "../theme/colors.js";
 import {
   contextSizeSeverity,

@@ -11,7 +11,7 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import { ResultCard } from "./ResultCard.js";
-import type { ResultItem } from "../../state/types.js";
+import type { ResultItem } from "@blade-ai/core";
 
 const baseResult = (
   overrides: Partial<ResultItem> = {},
@@ -21,7 +21,7 @@ const baseResult = (
   taskId: "task-6fa97268",
   status: "success",
   faultType: "node-cpu-fullload",
-  bladeUid: "b02c7d1a745dcd54",
+  experimentUid: "b02c7d1a745dcd54",
   duration: "13m14s",
   summary: "CPU sustained at 78-82% for the full 600s window",
   locator: "E1",
@@ -112,7 +112,7 @@ describe("ResultCard", () => {
   describe("failed status", () => {
     const item = baseResult({
       status: "failed",
-      bladeUid: "",
+      experimentUid: "",
       duration: "8s",
       summary: "",
       cause: "blade create failed: target pod not found",
@@ -192,7 +192,7 @@ describe("ResultCard", () => {
       // as a dangling label with no body underneath.
       const item = baseResult({
         faultType: "",
-        bladeUid: "",
+        experimentUid: "",
         duration: "",
         summary: "",
       });
@@ -203,7 +203,7 @@ describe("ResultCard", () => {
     it("still renders the title row when only status + taskId are set", () => {
       const item = baseResult({
         faultType: "",
-        bladeUid: "",
+        experimentUid: "",
         duration: "",
         summary: "",
       });

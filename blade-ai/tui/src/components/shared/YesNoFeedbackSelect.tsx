@@ -28,7 +28,7 @@
  */
 
 import { Select, type SelectItem } from "./Select.js";
-import { t } from "../../i18n/index.js";
+import { t } from "@blade-ai/core";
 
 /**
  * Discriminator returned to the caller. ``"yes"`` / ``"no"`` mean

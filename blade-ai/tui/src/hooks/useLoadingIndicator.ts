@@ -57,9 +57,9 @@
  */
 
 import { useEffect, useState } from "react";
-import { t } from "../i18n/index.js";
-import { useAppSelector } from "../state/store.js";
-import { streamingResponseCharsRef } from "../state/streamingRefs.js";
+import { t } from "@blade-ai/core";
+import { useAppSelector } from "@blade-ai/core";
+import { streamingResponseCharsRef } from "@blade-ai/core";
 import { isNarrow, useTerminalSize } from "./useTerminalSize.js";
 import { useAnimationFrame } from "./useAnimationFrame.js";
 import { getPool } from "../utils/phrasePool.js";

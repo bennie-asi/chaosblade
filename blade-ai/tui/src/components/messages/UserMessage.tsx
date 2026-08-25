@@ -30,7 +30,7 @@ import { Box, Text } from "ink";
 import { memo } from "react";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
-import type { UserItem } from "../../state/types.js";
+import type { UserItem } from "@blade-ai/core";
 import { useTerminalBg } from "../../theme/TerminalBgContext.js";
 import { useBootCardWidth } from "../boot/BootCardFrame.js";
 

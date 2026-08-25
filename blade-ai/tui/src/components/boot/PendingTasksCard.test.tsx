@@ -10,7 +10,7 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import { PendingTasksCard } from "./PendingTasksCard.js";
-import type { PendingTasksCardItem } from "../../state/types.js";
+import type { PendingTasksCardItem } from "@blade-ai/core";
 
 const EMPTY: PendingTasksCardItem = {
   kind: "pending_tasks_card",

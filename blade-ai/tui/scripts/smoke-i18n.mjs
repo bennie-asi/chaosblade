@@ -5,25 +5,46 @@
  * we cannot exercise multiple languages from a single process. We
  * spawn a child Node process per case with the appropriate env
  * variables set, run a tiny TS snippet that imports the module and
- * prints ``ACTIVE_LANG`` + a sample translation, and assert against
- * stdout.
+ * prints ``getActiveLang()`` + a sample translation, and assert
+ * against stdout.
  */
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const tsxBin = resolve(__dirname, "..", "node_modules", ".bin", "tsx");
-const probeScript = resolve(__dirname, "..", "src", "i18n", "index.ts");
+
+// npm workspaces hoists devDeps to the repo-root node_modules, so the
+// bin may live in tui/node_modules/.bin (standalone install) OR in the
+// root node_modules/.bin (workspace install). Walk up until found.
+function findBin(name) {
+  let dir = resolve(__dirname, "..");
+  for (;;) {
+    const candidate = resolve(dir, "node_modules", ".bin", name);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) {
+      throw new Error(
+        `${name} binary not found — run \`npm install\` at the repo root first`,
+      );
+    }
+    dir = parent;
+  }
+}
+const tsxBin = findBin("tsx");
+// i18n now lives in the shared @blade-ai/core package (P0 extraction) —
+// probe the source there directly.
+const probeScript = resolve(__dirname, "..", "..", "core", "src", "i18n", "index.ts");
 
 function run(env) {
   const result = spawnSync(
     tsxBin,
     [
       "-e",
-      `import { ACTIVE_LANG, t } from "${probeScript}";` +
-        `console.log("LANG=" + ACTIVE_LANG);` +
+      `import { getActiveLang, t } from "${probeScript}";` +
+        `console.log("LANG=" + getActiveLang());` +
         `console.log("CLEAR=" + t("command.clear.desc"));` +
         `console.log("MISS=" + t("nonexistent.key"));` +
         `console.log("FALLBACK=" + t("error.next_label"));`,

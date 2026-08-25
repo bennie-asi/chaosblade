@@ -24,10 +24,10 @@
  */
 
 import { useEffect } from "react";
-import type { BladeClient } from "../../api/client.js";
-import { t } from "../../i18n/index.js";
-import { useAppDispatch } from "../../state/store.js";
-import type { HistoryItem } from "../../state/types.js";
+import type { BladeClient } from "@blade-ai/core";
+import { t } from "@blade-ai/core";
+import { useAppDispatch } from "@blade-ai/core";
+import type { HistoryItem } from "@blade-ai/core";
 
 export interface BootOrchestratorProps {
   client: BladeClient;

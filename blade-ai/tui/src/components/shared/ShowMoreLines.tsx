@@ -12,8 +12,8 @@
 
 import { Box, Text } from "ink";
 import { useOverflowState } from "../../contexts/OverflowContext.js";
-import { useAppSelector } from "../../state/store.js";
-import { t } from "../../i18n/index.js";
+import { useAppSelector } from "@blade-ai/core";
+import { t } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 
 export const ShowMoreLines: React.FC = () => {

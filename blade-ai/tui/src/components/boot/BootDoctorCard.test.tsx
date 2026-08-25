@@ -11,7 +11,7 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import { BootDoctorCard } from "./BootDoctorCard.js";
-import type { BootDoctorCardItem } from "../../state/types.js";
+import type { BootDoctorCardItem } from "@blade-ai/core";
 
 const HAPPY: BootDoctorCardItem = {
   kind: "boot_doctor_card",

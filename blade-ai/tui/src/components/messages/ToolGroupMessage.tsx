@@ -28,7 +28,7 @@
 
 import { Box } from "ink";
 import { memo } from "react";
-import type { ToolGroupItem } from "../../state/types.js";
+import type { ToolGroupItem } from "@blade-ai/core";
 import { ToolMessage } from "./ToolMessage.js";
 
 const ToolGroupMessageInternal: React.FC<{

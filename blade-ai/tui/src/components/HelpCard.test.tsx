@@ -19,7 +19,7 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import { HelpCard } from "./HelpCard.js";
-import type { HelpCardItem } from "../state/types.js";
+import type { HelpCardItem } from "@blade-ai/core";
 
 const SAMPLE: HelpCardItem = {
   kind: "help_card",

@@ -14,7 +14,7 @@
 import { render } from "ink-testing-library";
 import { afterEach, describe, expect, it } from "vitest";
 import { WelcomeCard } from "./WelcomeCard.js";
-import type { WelcomeCardItem } from "../../state/types.js";
+import type { WelcomeCardItem } from "@blade-ai/core";
 
 const SAMPLE: WelcomeCardItem = {
   kind: "welcome_card",

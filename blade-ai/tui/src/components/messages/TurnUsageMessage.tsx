@@ -15,9 +15,9 @@
 
 import { Box, Text } from "ink";
 import { memo } from "react";
-import { t } from "../../i18n/index.js";
+import { t } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
-import type { TurnUsageItem } from "../../state/types.js";
+import type { TurnUsageItem } from "@blade-ai/core";
 
 /** Format a raw token count for compact display. ≥1000 collapses to
  *  ``X.Yk`` so a chunky ``"6273 tokens"`` line shrinks to ``"6.3k

@@ -20,7 +20,7 @@ import { Box, Static, measureElement } from "ink";
 import { BootProgress } from "./boot/BootProgress.js";
 import { Header } from "./Header.js";
 import { HistoryItemDisplay } from "./HistoryItemDisplay.js";
-import { useAppSelector } from "../state/store.js";
+import { useAppSelector } from "@blade-ai/core";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { OverflowProvider } from "../contexts/OverflowContext.js";
 import { ShowMoreLines } from "./shared/ShowMoreLines.js";
@@ -51,31 +51,35 @@ interface StaticEntry {
  *
  * Kept at **26** to track the Forge × Operator redesign + thinking-
  * body padding accumulation, in case the dynamic measurement is
- * unavailable:
+ * unavailable. (1 of the 26 rows was formerly budgeted to the phase
+ * stepper strip; the TUI no longer renders it, so that row is now
+ * just extra headroom — the conservative direction, left in place.)
  *
- *   PhaseStepperCard (round border + title + 5 step rows) ........ 8
  *   LoadingIndicator (header 1 + separator 1 + body padded 8) .. 10
  *   InputPrompt (top fence + body + bottom fence) ................ 5
  *   Footer (help hint + status) .................................. 1
  *   Composer outer marginTop ..................................... 1
  *   Safety buffer (off-by-one Yoga measurement, breathing) ....... 1
+ *   Headroom (hint rows, tooltips, future chrome) ................ 7
  *                                                                 = 26
  *
  * The previous value (16) was set when the LoadingIndicator body
- * grew naturally (1-3 rows typical) and PhaseStepperCard was the
- * lighter horizontal HUD design. Both have since gained rows
- * (padded body + bordered list-style stepper); under-reserving by
- * 8-10 rows let pending items render past stdout.rows and triggered
- * the user-reported "重复输出 + 闪烁" via the scrollback-pollution
- * path. The probe showed pendingH growing to 39 / frameH to 56 on
- * a 46-row terminal — exactly chrome=25 + (46-16)=30 budget. With
- * the corrected reserve pendingH caps at ~20 and frameH stays
- * inside viewport.
+ * grew naturally (1-3 rows typical) and the stepper was a lighter
+ * horizontal HUD design; under-reserving let pending items render
+ * past stdout.rows and triggered the user-reported "重复输出 + 闪烁"
+ * via the scrollback-pollution path. The probe showed pendingH
+ * growing to 39 / frameH to 56 on a 46-row terminal — exactly
+ * chrome=25 + (46-16)=30 budget. With the corrected reserve
+ * pendingH caps at ~20 and frameH stays inside viewport. The value
+ * is deliberately kept at 26 even though the honest first-paint
+ * chrome sums to ~19: over-reserving only shrinks the pending
+ * budget for one frame (safe), while under-reserving re-opens the
+ * pollution bug (fatal).
  *
- * PhaseStepperCard is only active during inject turns; we always
+ * The phase strip is only active during inject turns; we always
  * reserve for it because the alternative is a budget that grows
  * mid-turn and re-truncates pending items dynamically, which
- * manifests visually as content "popping in" as the stepper
+ * manifests visually as content "popping in" as the strip
  * appears.
  */
 const CHROME_ROWS_RESERVE = 26;
@@ -129,8 +133,9 @@ export function initialReplayCount(length: number): number {
 }
 
 /** Absolute upper bound on a "real" chrome measurement on blade-ai's
- *  current layout — LoadingIndicator (10) + PhaseStepper (8) +
- *  InputPrompt (5) + Footer (1) + margins (2) + comfortable head-room.
+ *  current layout — LoadingIndicator (10) + InputPrompt (5) + Footer
+ *  (1) + margins (2) + comfortable head-room (includes 1 row formerly
+ *  budgeted to the phase stepper, no longer rendered by the TUI).
  *  Readings higher than this are almost certainly a Yoga bug or a
  *  terminal reporting the full viewport. */
 const ABS_CHROME_CAP = 35;
@@ -552,15 +557,10 @@ export const MainContent: React.FC<Props> = ({ version, serverUrl }) => {
        *  meaningless) don't pollute the set. */}
       <OverflowProvider>
         <Box flexDirection="column" ref={setProbePendingRef}>
-          {/* The live phase-stepper lives in ``state.currentPhaseStepper``
-              (a dedicated slot, NOT in pending) so its perpetual mutation
-              during the turn doesn't block the leading-stable flush in
-              TOKEN_APPENDED. Composer renders it as a sticky strip above
-              InputPrompt; ``commitPending`` finalises and prepends it to
-              pending right before the history flush, so it lands in
-              scrollback at the top of the turn block in the right
-              chronological position. No filter is needed here — pending
-              never contains a phase_stepper mid-turn.
+          {/* ``commitPending`` still appends a finalised ``phase_stepper``
+              item at the END of pending (shared-core behaviour, consumed
+              by the web UI's live session history); HistoryItemDisplay
+              renders it as null in the TUI, so no filter is needed here.
 
               ``isPending={true}`` + ``availableTerminalHeight`` together
               tell each pending component how many rows it can paint

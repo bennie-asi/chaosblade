@@ -18,8 +18,8 @@
 
 import { Box, Text } from "ink";
 import { memo } from "react";
-import { t } from "../i18n/index.js";
-import type { SessionCardItem, SessionCardRow } from "../state/types.js";
+import { t } from "@blade-ai/core";
+import type { SessionCardItem, SessionCardRow } from "@blade-ai/core";
 import { Theme } from "../theme/colors.js";
 import { Icons, isAsciiMode } from "../theme/icons.js";
 import { useBootCardWidth } from "./boot/BootCardFrame.js";

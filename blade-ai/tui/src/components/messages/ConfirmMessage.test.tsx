@@ -15,12 +15,12 @@ import {
   ConfirmContextMessage,
   ConfirmPromptMessage,
 } from "./ConfirmMessage.js";
-import { StoreProvider } from "../../state/store.js";
+import { StoreProvider } from "@blade-ai/core";
 import { Icons } from "../../theme/icons.js";
 import type {
   ConfirmContextItem,
   ConfirmPromptItem,
-} from "../../state/types.js";
+} from "@blade-ai/core";
 
 const baseContext = (
   overrides: Partial<ConfirmContextItem> = {},
@@ -793,11 +793,11 @@ describe("ConfirmContextMessage", () => {
           type: "plan_change",
           reason: "original fault not viable",
           original: {
-            scope: "pod", blade_target: "network", blade_action: "delay",
+            scope: "pod", fault_target: "network", fault_action: "delay",
             fault_spec: { duration_seconds: 60 },
           },
           proposed: {
-            scope: "pod", blade_target: "network", blade_action: "drop",
+            scope: "pod", fault_target: "network", fault_action: "drop",
             fault_spec: { duration_seconds: 300 },
           },
         },

@@ -38,15 +38,16 @@ import { App } from "../../App.js";
 import {
   BladeClient,
   TUI_PROTOCOL_VERSION,
-} from "../../api/client.js";
+} from "@blade-ai/core";
 import {
   resolveServer,
   type ServerHandle,
 } from "../../api/server-process.js";
+import { resolveServerToken } from "../../api/auth.js";
 import { WizardClient } from "../../api/wizard.js";
-import { t } from "../../i18n/index.js";
-import { useAppDispatch, useAppSelector } from "../../state/store.js";
-import type { HistoryItem } from "../../state/types.js";
+import { t } from "@blade-ai/core";
+import { useAppDispatch, useAppSelector } from "@blade-ai/core";
+import type { HistoryItem } from "@blade-ai/core";
 import { WizardCard } from "../wizard/WizardCard.js";
 
 export interface BootRunnerProps {
@@ -170,6 +171,7 @@ export const BootRunner: React.FC<BootRunnerProps> = ({
           text: t("boot.progress.health"),
         });
         const c = new BladeClient(spawnedServer.url, {
+          getAuthToken: resolveServerToken,
           onProtocolError: debug
             ? (frame, e) => {
                 process.stderr.write(

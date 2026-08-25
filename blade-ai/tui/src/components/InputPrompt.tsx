@@ -49,13 +49,13 @@
 import { Box, Text, useInput } from "ink";
 import { useCallback, useEffectEvent, useMemo, useState } from "react";
 import { useInputHistory } from "../hooks/useInputHistory.js";
-import { t } from "../i18n/index.js";
+import { t } from "@blade-ai/core";
 import {
   SLASH_GROUP_ORDER,
   type SlashCommand,
   type SlashCommandRegistry,
   type SlashSubcommand,
-} from "../state/commands.js";
+} from "@blade-ai/core";
 import { Theme } from "../theme/colors.js";
 import { Icons, isAsciiMode } from "../theme/icons.js";
 import {

@@ -13,7 +13,7 @@
 
 import { Box, Text } from "ink";
 import InkSpinner from "ink-spinner";
-import type { ToolStatus } from "../../state/types.js";
+import type { ToolStatus } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { Icons } from "../../theme/icons.js";
 import { ToolSpinner } from "../../theme/spinners.js";

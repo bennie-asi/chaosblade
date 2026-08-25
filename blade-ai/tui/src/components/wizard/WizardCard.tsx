@@ -32,7 +32,7 @@ import { useEffect, useReducer, useState } from "react";
 import { WizardClient, type ValidationResult } from "../../api/wizard.js";
 import { Icons } from "../../theme/icons.js";
 import { Theme } from "../../theme/colors.js";
-import { t } from "../../i18n/index.js";
+import { t } from "@blade-ai/core";
 import {
   STEP_ORDER,
   initialWizardState,

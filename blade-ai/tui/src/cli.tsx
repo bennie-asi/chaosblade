@@ -36,13 +36,16 @@ import process from "node:process";
 import { render } from "ink";
 import React from "react";
 import { BootRunner } from "./components/boot/BootRunner.js";
-import type { BladeClient } from "./api/client.js";
+import type { BladeClient } from "@blade-ai/core";
 import type { ServerHandle } from "./api/server-process.js";
-import { t } from "./i18n/index.js";
-import { sessionStatsRef } from "./state/sessionStats.js";
-import { StoreProvider } from "./state/store.js";
+import { t } from "@blade-ai/core";
+import { sessionStatsRef } from "@blade-ai/core";
+import { StoreProvider } from "@blade-ai/core";
 import { TerminalBgProvider } from "./theme/TerminalBgContext.js";
 import { printGoodbye } from "./utils/printGoodbye.js";
+// Side-effect import: registers the JSONL perf backend into
+// @blade-ai/core's sink (self-gated on BLADE_AI_PERF_TRACE=1).
+import "./utils/perfTrace.js";
 import { installSynchronizedOutput } from "./utils/synchronizedOutput.js";
 import { detectTerminalBg } from "./utils/terminalBg.js";
 import { installTerminalRedrawOptimizer } from "./utils/terminalRedrawOptimizer.js";

@@ -12,7 +12,7 @@
 import { Box, Text } from "ink";
 import React, { memo } from "react";
 
-import { t } from "../../i18n/index.js";
+import { t } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { Icons } from "../../theme/icons.js";
 import { useBootCardWidth } from "../boot/BootCardFrame.js";

@@ -14,7 +14,7 @@
  */
 
 import type { ValidationResult, ModelPreset, SaveResult } from "../api/wizard.js";
-import { t } from "../i18n/index.js";
+import { t } from "@blade-ai/core";
 
 // ── Step model ─────────────────────────────────────────────────────────
 

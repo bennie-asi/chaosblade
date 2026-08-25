@@ -62,6 +62,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { setPerfSink } from "@blade-ai/core";
 
 /** True iff ``BLADE_AI_PERF_TRACE=1`` at process start. Cached so
  *  hot-path callers don't repeat the env lookup. */
@@ -335,3 +336,12 @@ if (ENABLED) {
   }
   hookStdoutPerf();
 }
+
+// Register this module as the perf backend for @blade-ai/core. Core
+// modules (reducer / useStream) emit through the environment-neutral
+// sink in ``core/src/utils/perf.ts``; installing here (module load)
+// wires every core call site to this JSONL backend. Unconditional:
+// the functions above self-gate on ENABLED, so an unattached or
+// disabled run pays one closure call per mark, nothing more.
+// Loaded via a side-effect import in cli.tsx.
+setPerfSink({ mark: perfMark, span: perfSpan, flush: perfFlush });

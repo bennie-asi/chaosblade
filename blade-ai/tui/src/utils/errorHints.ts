@@ -11,7 +11,7 @@
  * etc. stays English (real command names) while prose translates.
  */
 
-import { t, tArr } from "../i18n/index.js";
+import { t, tArr } from "@blade-ai/core";
 
 export interface ErrorHint {
   /** Capitalised label rendered next to the ✗ glyph. */

@@ -24,10 +24,10 @@
  */
 
 import { Box, Text } from "ink";
-import type { MemoryCardItem } from "../state/types.js";
+import type { MemoryCardItem } from "@blade-ai/core";
 import { Theme } from "../theme/colors.js";
 import { Icons } from "../theme/icons.js";
-import { t } from "../i18n/index.js";
+import { t } from "@blade-ai/core";
 
 /** Width of the leading glyph cell (1 cell glyph + 2 cells gap). */
 const GLYPH_COL_WIDTH = 3;
@@ -51,7 +51,7 @@ export interface MemoryRow {
  *  the component module (e.g. preview scripts). The canonical
  *  declaration lives in ``state/types.ts`` so the reducer / commands
  *  can dispatch it without circular imports. */
-export type { MemoryCardItem } from "../state/types.js";
+export type { MemoryCardItem } from "@blade-ai/core";
 
 function glyphForStatus(s: MemoryRowStatus): string {
   switch (s) {

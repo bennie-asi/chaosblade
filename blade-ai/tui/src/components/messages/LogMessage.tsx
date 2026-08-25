@@ -34,7 +34,7 @@
 
 import { Box, Text } from "ink";
 import { memo } from "react";
-import type { LogItem } from "../../state/types.js";
+import type { LogItem } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { Icons } from "../../theme/icons.js";
 

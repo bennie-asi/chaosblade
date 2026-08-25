@@ -15,7 +15,7 @@
 import { render as inkRender } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import { ToolMessage } from "./ToolMessage.js";
-import type { ToolItem } from "../../state/types.js";
+import type { ToolItem } from "@blade-ai/core";
 
 function tool(overrides: Partial<ToolItem> = {}): ToolItem {
   return {

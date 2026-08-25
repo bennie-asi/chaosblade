@@ -30,8 +30,8 @@
 
 import { Box, Text } from "ink";
 import { memo } from "react";
-import { t } from "../i18n/index.js";
-import type { RuntimeDoctorCardItem } from "../state/types.js";
+import { t } from "@blade-ai/core";
+import type { RuntimeDoctorCardItem } from "@blade-ai/core";
 import { Theme } from "../theme/colors.js";
 import { Icons } from "../theme/icons.js";
 import { useTerminalBgInfo } from "../theme/TerminalBgContext.js";

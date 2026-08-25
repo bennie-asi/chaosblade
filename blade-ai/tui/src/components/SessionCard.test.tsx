@@ -7,7 +7,7 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import { SessionCard } from "./SessionCard.js";
-import type { SessionCardItem } from "../state/types.js";
+import type { SessionCardItem } from "@blade-ai/core";
 
 const SAMPLE: SessionCardItem = {
   kind: "session_card",

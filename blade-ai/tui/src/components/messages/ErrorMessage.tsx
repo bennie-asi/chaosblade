@@ -9,8 +9,8 @@
 
 import { Box, Text } from "ink";
 import { memo } from "react";
-import { t } from "../../i18n/index.js";
-import type { ErrorItem } from "../../state/types.js";
+import { t } from "@blade-ai/core";
+import type { ErrorItem } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { Icons } from "../../theme/icons.js";
 import { suggestionsForError } from "../../utils/errorHints.js";

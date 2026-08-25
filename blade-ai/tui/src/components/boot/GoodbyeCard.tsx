@@ -25,10 +25,10 @@
 
 import { Box, Text } from "ink";
 import stringWidth from "string-width";
-import type { AppState } from "../../state/types.js";
+import type { AppState } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { Icons } from "../../theme/icons.js";
-import { t } from "../../i18n/index.js";
+import { t } from "@blade-ai/core";
 import { BootCardFrame } from "./BootCardFrame.js";
 
 export interface GoodbyeCardProps {

@@ -10,7 +10,7 @@
 
 import { render } from "ink-testing-library";
 import { describe, expect, it, vi } from "vitest";
-import { buildRegistry } from "../state/commands.js";
+import { buildRegistry } from "@blade-ai/core";
 import { InputPrompt, orderCandidatesByGroup } from "./InputPrompt.js";
 
 const noop = () => undefined;

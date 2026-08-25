@@ -28,8 +28,8 @@
 
 import { Box, Text } from "ink";
 import { useEffect, useState } from "react";
-import { t } from "../i18n/index.js";
-import { useAppSelector } from "../state/store.js";
+import { t } from "@blade-ai/core";
+import { useAppSelector } from "@blade-ai/core";
 import { Theme } from "../theme/colors.js";
 import { ThinkingSpinner } from "../theme/spinners.js";
 import { Spinner } from "./shared/Spinner.js";

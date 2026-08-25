@@ -21,9 +21,9 @@
 
 import { Box, Text } from "ink";
 import { memo } from "react";
-import { t } from "../../i18n/index.js";
+import { t } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
-import type { MemoryCompactionItem } from "../../state/types.js";
+import type { MemoryCompactionItem } from "@blade-ai/core";
 
 /** Compact token formatter — same convention as TurnUsageMessage so
  *  the two related rows render with consistent number widths.

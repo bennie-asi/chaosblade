@@ -16,7 +16,7 @@
  */
 
 import { memo } from "react";
-import type { HistoryItem } from "../state/types.js";
+import type { HistoryItem } from "@blade-ai/core";
 import { BootDoctorCard } from "./boot/BootDoctorCard.js";
 import { PendingTasksCard } from "./boot/PendingTasksCard.js";
 import { WelcomeCard } from "./boot/WelcomeCard.js";
@@ -108,6 +108,13 @@ const HistoryItemDisplayInternal: React.FC<{
       return <ThinkingMessage item={item} />;
     case "turn_usage":
       return <TurnUsageMessage item={item} />;
+    // TUI intentionally hides the finalised phase-stepper strip (65ee010
+    // removed the original TUI stepper; P2 re-introduced it via shared core
+    // for the web). Core still appends the item to history — the web UI's
+    // live session renders it (8ad2dc9 keeps it unconditionally; replay
+    // re-derives it from recorded events) — but it renders as nothing here.
+    case "phase_stepper":
+      return null;
     case "memory_compaction":
       return <MemoryCompactionMessage item={item} />;
     case "welcome_card":

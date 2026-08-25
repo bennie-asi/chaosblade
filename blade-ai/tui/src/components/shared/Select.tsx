@@ -50,7 +50,7 @@
 
 import { Box, Text, useInput } from "ink";
 import { useState } from "react";
-import { t } from "../../i18n/index.js";
+import { t } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { Icons } from "../../theme/icons.js";
 

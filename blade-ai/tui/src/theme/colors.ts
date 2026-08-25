@@ -118,20 +118,28 @@ const status = {
   // Failure red — slightly muted so it doesn't strobe.
   err: "#C44545",
   // Change / drift alert — "pay attention, the course changed".
-  // Violet is the canonical drift/change hue: unmistakably distinct
-  // from warn amber (execution-confirm cards), err red (failure
-  // cards) and the brand orange, so 目标变更 / 计划变更 cards can't
-  // be mistaken for any of them. (An earlier crimson/magenta pair
-  // read pink and off on light terminals — user rejected it.)
+  // Deep amber / bronze, warm-side like every other card border in
+  // the palette (fire / iron / err / ok). It stays distinct from the
+  // neighbours it must not mimic: brighter and browner than the
+  // execution-confirm cards' fire orange, lighter than the hard-decision
+  // iron rust, and never red like failure cards — so 目标变更 / 计划变更
+  // cards read as their own family without leaving the palette's one
+  // visual temperature. Colour history: crimson/magenta read pink on
+  // light terminals (rejected); violet (#7C3AED/#8B5CF6) was visually
+  // distinct but arrived brand-foreign in an all-warm palette — same
+  // verdict the doctor card's violet got (see ``border.diagnostic``).
   //
   // Per-terminal-bg pair (same pattern as USER_BUBBLE_PALETTE):
-  // dark-canvas gets the lifted violet (#8B5CF6) which holds contrast
-  // against near-black; light-canvas gets the deeper violet (#7C3AED)
-  // so the hue stays vivid on white. Picked via
-  // ``Theme.status.change[useTerminalBg()]``.
+  // dark-canvas gets the lifted gold-bronze (#D4A017) which holds
+  // contrast against near-black; light-canvas gets the deeper dark
+  // goldenrod (#B8860B) so the hue stays vivid on white. Picked via
+  // ``Theme.status.change[useTerminalBg()]``. Distinct from
+  // ``status.warn`` (#E8B341): same hue family but far darker, and
+  // their use never overlaps — warn paints text/labels only, change
+  // paints card borders only.
   change: {
-    dark: "#8B5CF6",
-    light: "#7C3AED",
+    dark: "#D4A017",
+    light: "#B8860B",
   },
   // Cool info — calm, factual, for advisory metadata.
   info: "#5A8A9A",

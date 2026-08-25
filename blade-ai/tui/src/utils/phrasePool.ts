@@ -11,7 +11,7 @@
  * phrase into the action payload so the reducer itself stays pure.
  */
 
-import { tArr } from "../i18n/index.js";
+import { tArr } from "@blade-ai/core";
 import { ThinkingPhrases } from "../theme/colors.js";
 
 export function getPool(): readonly string[] {

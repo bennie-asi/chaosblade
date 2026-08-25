@@ -5,7 +5,7 @@
 
 import { Box, Text } from "ink";
 import { memo } from "react";
-import type { SystemItem } from "../../state/types.js";
+import type { SystemItem } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 
 const SystemMessageInternal: React.FC<{ item: SystemItem }> = ({ item }) => (

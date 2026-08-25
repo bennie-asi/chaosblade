@@ -13,8 +13,8 @@
  *
  * ``isPending=true`` (the streaming path) caps the visible body to the
  * tail of the rendered output that fits in the current viewport
- * minus a chrome reserve (LoadingIndicator + InputPrompt + Footer +
- * optional PhaseStepper strip). Without this cap a multi-screen
+ * minus a chrome reserve (LoadingIndicator + InputPrompt + Footer).
+ * Without this cap a multi-screen
  * agent reply pushes the dynamic frame past ``stdout.rows`` on every
  * token — Ink's render-loop falls into its fullscreen-redraw branch
  * (``eraseScreen + cursorTo(0,0) + fullStaticOutput + output``) and
@@ -28,8 +28,8 @@
 import { Box, Text } from "ink";
 import { memo, useMemo } from "react";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
-import { t } from "../../i18n/index.js";
-import type { AgentItem } from "../../state/types.js";
+import { t } from "@blade-ai/core";
+import type { AgentItem } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { Icons } from "../../theme/icons.js";
 import { renderMarkdown } from "../../utils/markdown.js";

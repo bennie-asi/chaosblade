@@ -19,7 +19,7 @@
  *     the wizard hung indefinitely.
  */
 
-import { t } from "../i18n/index.js";
+import { t } from "@blade-ai/core";
 import { resolveServerToken } from "./auth.js";
 
 export interface ValidationResult {

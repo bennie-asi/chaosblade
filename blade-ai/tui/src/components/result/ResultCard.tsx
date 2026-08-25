@@ -45,8 +45,8 @@ import { memo } from "react";
 import { useBootCardWidth } from "../boot/BootCardFrame.js";
 import { PlanPreviewSection } from "./PlanPreviewSection.js";
 import { PostmortemSection } from "./PostmortemSection.js";
-import { t } from "../../i18n/index.js";
-import type { ResultItem } from "../../state/types.js";
+import { t } from "@blade-ai/core";
+import type { ResultItem } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { Icons } from "../../theme/icons.js";
 
@@ -203,13 +203,13 @@ const ResultCardInternal: React.FC<{ item: ResultItem }> = ({ item }) => {
   const replanCount = item.replanCount ?? 0;
   // Guard: skip the Outcome section entirely when no metadata field
   // is populated. Without this guard, a malformed payload (no
-  // faultType / bladeUid / duration / target / replanCount) would
+  // faultType / experimentUid / duration / target / replanCount) would
   // render a dangling "── Outcome" heading followed by an empty
   // Box — visual noise with no information. Mirrors the same guard
   // pattern landed in ExecutionConfirmCard (hasPlanContent).
   const hasOutcome = Boolean(
     item.faultType ||
-      item.bladeUid ||
+      item.experimentUid ||
       item.duration ||
       targetStr ||
       replanCount > 0,
@@ -257,7 +257,7 @@ const ResultCardInternal: React.FC<{ item: ResultItem }> = ({ item }) => {
                 value={targetStr}
                 valueBold
               />
-              <Field label={t("result.label.uid")} value={item.bladeUid} />
+              <Field label={t("result.label.uid")} value={item.experimentUid} />
               <Field
                 label={t("result.label.duration")}
                 value={item.duration}

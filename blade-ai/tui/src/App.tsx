@@ -26,7 +26,7 @@
  */
 
 import { Box } from "ink";
-import type { BladeClient } from "./api/client.js";
+import type { BladeClient } from "@blade-ai/core";
 import { BootOrchestrator } from "./components/boot/BootOrchestrator.js";
 import { Composer } from "./components/Composer.js";
 import { MainContent } from "./components/MainContent.js";

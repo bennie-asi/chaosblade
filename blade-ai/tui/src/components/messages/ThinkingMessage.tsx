@@ -23,9 +23,9 @@
 
 import { Box, Text } from "ink";
 import { memo } from "react";
-import { t } from "../../i18n/index.js";
+import { t } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
-import type { ThinkingItem } from "../../state/types.js";
+import type { ThinkingItem } from "@blade-ai/core";
 
 const ThinkingMessageInternal: React.FC<{ item: ThinkingItem }> = ({ item }) => {
   const duration = formatDuration(item.durationMs);

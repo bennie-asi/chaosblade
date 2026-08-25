@@ -6,7 +6,7 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import { ModelCard } from "./ModelCard.js";
-import type { ModelCardItem } from "../state/types.js";
+import type { ModelCardItem } from "@blade-ai/core";
 
 const SAMPLE: ModelCardItem = {
   kind: "model_card",

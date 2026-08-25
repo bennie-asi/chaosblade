@@ -34,11 +34,11 @@
 
 import { Box, Text } from "ink";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
-import { t } from "../i18n/index.js";
+import { t } from "@blade-ai/core";
 import {
   type SlashCommand,
   type SlashSubcommand,
-} from "../state/commands.js";
+} from "@blade-ai/core";
 import { Theme } from "../theme/colors.js";
 import { Icons } from "../theme/icons.js";
 

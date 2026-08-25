@@ -24,8 +24,8 @@
 
 import { Box, Text } from "ink";
 import { memo } from "react";
-import { t } from "../i18n/index.js";
-import type { HelpCardItem, HelpCardRow } from "../state/types.js";
+import { t } from "@blade-ai/core";
+import type { HelpCardItem, HelpCardRow } from "@blade-ai/core";
 import { Theme } from "../theme/colors.js";
 import { isAsciiMode } from "../theme/icons.js";
 import { useBootCardWidth } from "./boot/BootCardFrame.js";

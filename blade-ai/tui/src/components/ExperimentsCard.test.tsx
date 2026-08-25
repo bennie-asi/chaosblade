@@ -7,7 +7,7 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import { ExperimentsCard } from "./ExperimentsCard.js";
-import type { ExperimentsCardItem } from "../state/types.js";
+import type { ExperimentsCardItem } from "@blade-ai/core";
 
 const SAMPLE: ExperimentsCardItem = {
   kind: "experiments_card",

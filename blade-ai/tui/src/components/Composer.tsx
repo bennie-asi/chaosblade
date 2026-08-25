@@ -1,41 +1,20 @@
 /**
- * Bottom region — owns the LoadingIndicator + (optional sticky) todo
- * list + InputPrompt + Footer stack. Connects user input to the SSE
- * stream.
+ * Bottom region — owns the LoadingIndicator + (optional sticky)
+ * phase-stepper strip + InputPrompt + Footer stack. Connects user
+ * input to the SSE stream.
  *
  * Bottom-region layout (top → bottom):
  *
  *   ⠋ thinking …                       ← LoadingIndicator (dynamic)
- *   ╭ ⚡ Inject todos ────────────╮    ← active todo list (sticky)
- *   │ 1. ✔ Intent                  │      pinned RIGHT ABOVE the
- *   │ 2. ⚡ Plan                    │      InputPrompt while the turn
- *   │ 3. ○ Safety check            │      is in flight
- *   │ 4. ○ Inject                  │
- *   │ 5. ○ Verify                  │
- *   ╰─────────────────────────────╯
+ *   ✓ Intent ─ ✓ Safety ─ ◉ Inject ─ ○ Verify
+ *                                      ← live phase strip (sticky),
+ *                                        pinned RIGHT ABOVE the
+ *                                        InputPrompt while an inject /
+ *                                        recover turn is in flight
  *   ─────────────────────────────────  ← InputPrompt fence
  *   ❯ ▌ Type your message · /help…
  *   ─────────────────────────────────
  *   ? for help            confirm · ns:default   ← Footer
- *
- * Sticky todo list:
- *   - The active inject-pipeline strip lives in
- *     ``state.currentPhaseStepper`` (NOT in pending — it would
- *     otherwise block the leading-stable flush). Composer pins the
- *     strip directly above the InputPrompt so it stays visible
- *     regardless of how much agent output streams above it. At
- *     TURN_DONE / TURN_ABORTED ``commitPending`` finalises the
- *     strip and appends it to pending → Static history.
- *
- * Why LoadingIndicator goes ABOVE the strip:
- *   The user reads the todo list as "the work that's queued for the
- *   slot I'm typing into". The thinking / replying spinner is
- *   transient agent chrome — sticking it BETWEEN the strip and the
- *   InputPrompt visually pushed the strip away from the input on
- *   every spinner tick. Putting LoadingIndicator above the strip
- *   keeps the strip → InputPrompt anchor stable across stream
- *   states; the spinner slot is empty when no LLM call is in
- *   flight, so it doesn't add chrome on idle either.
  *
  * Visibility rules:
  *   - awaiting confirmation: LoadingIndicator HIDDEN, InputPrompt
@@ -79,20 +58,20 @@
 
 import { Box, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import type { BladeClient } from "../api/client.js";
-import { useStream } from "../hooks/useStream.js";
-import { t } from "../i18n/index.js";
+import type { BladeClient } from "@blade-ai/core";
+import { useStream } from "@blade-ai/core";
+import { t } from "@blade-ai/core";
 import {
   useAppDispatch,
   useAppSelector,
   useAppStateGetter,
-} from "../state/store.js";
+} from "@blade-ai/core";
 import {
   buildRegistry,
   parseSlashCommand,
   parseSlashLine,
   type SlashCommandContext,
-} from "../state/commands.js";
+} from "@blade-ai/core";
 import { Footer } from "./Footer.js";
 import { InputPrompt } from "./InputPrompt.js";
 import { LoadingIndicator } from "./LoadingIndicator.js";
@@ -107,6 +86,30 @@ import {
 import { setChromeMeasureRef } from "../state/chromeMeasureRef.js";
 import type { DOMElement } from "ink";
 import { getPool, pickRandomDistinct } from "../utils/phrasePool.js";
+import { saveTextFile } from "../utils/saveTextFile.js";
+import { PKG_VERSION } from "../utils/version.js";
+
+/**
+ * ANSI viewport-clear (preserves scrollback) — the TUI implementation
+ * of ``SlashCommandContext.clearScreen``, invoked by /clear before it
+ * dispatches HISTORY_CLEARED so the visible terminal frame matches the
+ * now-empty state.
+ *
+ *   \x1b[H   — cursor home (top-left)
+ *   \x1b[J   — erase from cursor to end of screen (i.e. whole viewport)
+ *
+ * Why we DON'T emit \x1b[3J (erase scrollback) anymore (Phase 3.4):
+ * the previous sequence ``\x1b[3J\x1b[2J\x1b[H`` wiped the user's
+ * entire scrollback history, matching ``bash clear`` semantics but
+ * diverging from how Claude Code / qwen-code / modern TUIs treat
+ * /clear. Users expect /clear to give them a fresh dialogue surface
+ * WITHOUT losing the prior session as recoverable scroll history —
+ * "clear" is about starting a new chat, not wiping the record.
+ * Bumping ``historyRemountKey`` (reducer HISTORY_CLEARED) forces
+ * Ink's ``<Static>`` to remount and start a fresh append-only stream
+ * from the cleared viewport.
+ */
+const CLEAR_SCREEN = "\x1b[H\x1b[J";
 
 interface Props {
   client: BladeClient;
@@ -487,6 +490,15 @@ export const Composer: React.FC<Props> = ({ client, sessionId }) => {
           beginManualCompact,
           submitTurn,
           submitRecover,
+          hostVersion: PKG_VERSION,
+          clearScreen: () => {
+            try {
+              process.stdout.write(CLEAR_SCREEN);
+            } catch {
+              // Best-effort — tests / non-TTY contexts may stub stdout.
+            }
+          },
+          saveTextFile,
         };
 
         // Subcommand match → dispatch to the sub's handler. The sub
@@ -542,14 +554,9 @@ export const Composer: React.FC<Props> = ({ client, sessionId }) => {
 
   return (
     <Box flexDirection="column" marginTop={1} ref={attachControlsRef}>
-      {/* Order matters: LoadingIndicator first, then the sticky todo
-          list, then InputPrompt. The user reads the strip "right
-          above where I type"; thinking / replying chrome belongs
-          above that strip so the dynamic spinner row doesn't push
-          it away from the input. When ``activeStepper`` is null
-          (chat-only turn, /command, idle) the strip slot is empty
-          and LoadingIndicator falls naturally to the row directly
-          above InputPrompt. */}
+      {/* Order matters: LoadingIndicator first, then InputPrompt.
+          Thinking / replying chrome sits directly above the input;
+          the spinner slot is empty on idle so it adds no chrome. */}
       {/* Phase 4 spinner mutex: while a memory compaction is in
           flight, MemoryCompactingIndicator owns the spinner slot
           (LoadingIndicator's hook nullifies its own visibility). The

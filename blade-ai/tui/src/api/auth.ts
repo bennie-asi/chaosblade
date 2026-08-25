@@ -1,5 +1,5 @@
 /**
- * Server-auth token resolution for the TUI's HTTP clients.
+ * Server-auth token resolution — the TUI host's Node-side IO legs.
  *
  * When a ``blade-ai server`` instance is started with ``server_token``
  * configured, TokenAuthMiddleware rejects every request that lacks an
@@ -7,8 +7,9 @@
  * same credential the Python CLI already sends (``AgentClient
  * ._auth_headers``).
  *
- * Resolution mirrors the Python settings precedence (config.json beats
- * env vars):
+ * The precedence RULE lives in @blade-ai/core (``pickServerToken``) so
+ * every frontend shares it; this module only adds the Node-specific
+ * sources:
  *   1. ``server_token`` from the local ``~/.blade-ai/config.json``
  *      (or ``$BLADE_AI_CONFIG_DIR/config.json`` — mirrors Python's
  *      ``_active_config_file`` override);
@@ -23,21 +24,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-
-/**
- * Pure precedence rule, separated from IO for unit tests: returns the
- * first non-blank candidate, or undefined when both are absent.
- */
-export function pickServerToken(
-  configFileValue: string | undefined,
-  envValue: string | undefined,
-): string | undefined {
-  const fromConfig = configFileValue?.trim();
-  if (fromConfig) return fromConfig;
-  const fromEnv = envValue?.trim();
-  if (fromEnv) return fromEnv;
-  return undefined;
-}
+import { pickServerToken } from "@blade-ai/core";
 
 /** Best-effort read of ``server_token`` from the local config file. */
 export function readConfigFileToken(): string | undefined {

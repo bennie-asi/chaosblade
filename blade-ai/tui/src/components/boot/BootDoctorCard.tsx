@@ -11,8 +11,8 @@
 
 import { Box, Text } from "ink";
 import { memo } from "react";
-import { t } from "../../i18n/index.js";
-import type { BootDoctorCardItem } from "../../state/types.js";
+import { t } from "@blade-ai/core";
+import type { BootDoctorCardItem } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { Icons } from "../../theme/icons.js";
 import { CheckList } from "../shared/CheckList.js";

@@ -44,8 +44,8 @@ import {
 } from "../shared/YesNoFeedbackSelect.js";
 import { Select, type SelectItem } from "../shared/Select.js";
 import { PlanPreviewSection } from "../result/PlanPreviewSection.js";
-import { t } from "../../i18n/index.js";
-import { useAppDispatch } from "../../state/store.js";
+import { t } from "@blade-ai/core";
+import { useAppDispatch } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { useTerminalBg } from "../../theme/TerminalBgContext.js";
 import { Icons } from "../../theme/icons.js";
@@ -1333,8 +1333,8 @@ const TargetChangeCard: React.FC<{ payload: Payload; taskId?: string }> = ({
   taskId,
 }) => {
   const cardWidth = useBootCardWidth();
-  // Adaptive change hue: deep crimson on dark canvases, lifted
-  // magenta on light ones (see status.change in theme/colors.ts).
+  // Adaptive change hue: gold-bronze on dark canvases, dark
+  // goldenrod on light ones (see status.change in theme/colors.ts).
   const changeColor = Theme.status.change[useTerminalBg()];
   const p = payload ?? {};
   const reason = asString(p["reason"]);
@@ -1416,8 +1416,8 @@ const PlanChangeCard: React.FC<{ payload: Payload; taskId?: string }> = ({
   const renderFaultType = (ft: Record<string, unknown> | null) => {
     if (!ft) return <Text dimColor>—</Text>;
     const scope = asString(ft["scope"]);
-    const target = asString(ft["blade_target"]);
-    const action = asString(ft["blade_action"]);
+    const target = asString(ft["fault_target"]);
+    const action = asString(ft["fault_action"]);
     // Duration contract: the bound is part of the reviewed contract, so a
     // material change proposal must surface it (embedded fault_spec carries
     // duration_seconds). Stays dim when absent so unchanged contracts
@@ -1609,7 +1609,7 @@ const PlanBuilderSelect: React.FC<{
 // ---------------------------------------------------------------------------
 
 const ConfirmContextMessageInternal: React.FC<{
-  item: import("../../state/types.js").ConfirmContextItem;
+  item: import("@blade-ai/core").ConfirmContextItem;
 }> = ({ item }) => {
   const body = ((): React.ReactNode => {
     if (item.payload && item.node === "plan_builder") {
@@ -1693,7 +1693,7 @@ export const ConfirmContextMessage = memo(ConfirmContextMessageInternal);
  * without re-occupying the full card area.
  */
 const ConfirmPromptMessageInternal: React.FC<{
-  item: import("../../state/types.js").ConfirmPromptItem;
+  item: import("@blade-ai/core").ConfirmPromptItem;
   isFocused?: boolean;
 }> = ({ item, isFocused = true }) => {
   // Width is read unconditionally so the hook call order stays stable

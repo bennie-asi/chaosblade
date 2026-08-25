@@ -51,15 +51,15 @@ watchdog.unref?.();
 probe("entry");
 
 probe("tsImport state/commands.ts");
-const cmdMod = await tsImport("../src/state/commands.ts", import.meta.url);
+const cmdMod = await tsImport("../../core/src/state/commands.ts", import.meta.url);
 probe("tsImport state/reducer.ts");
-const reducerMod = await tsImport("../src/state/reducer.ts", import.meta.url);
+const reducerMod = await tsImport("../../core/src/state/reducer.ts", import.meta.url);
 probe("tsImport state/types.ts");
-const typesMod = await tsImport("../src/state/types.ts", import.meta.url);
+const typesMod = await tsImport("../../core/src/state/types.ts", import.meta.url);
 probe("tsImport api/client.ts");
-const clientMod = await tsImport("../src/api/client.ts", import.meta.url);
+const clientMod = await tsImport("../../core/src/api/client.ts", import.meta.url);
 probe("tsImport utils/replay.ts");
-const replayMod = await tsImport("../src/utils/replay.ts", import.meta.url);
+const replayMod = await tsImport("../../core/src/utils/replay.ts", import.meta.url);
 probe("tsImport utils/errorHints.ts");
 const hintsMod = await tsImport("../src/utils/errorHints.ts", import.meta.url);
 probe("tsImport utils/cursorMath.ts");
@@ -124,7 +124,12 @@ const reg = buildRegistry();
   assert(empty.length === 0, "filter('xyz_no_match') should be empty");
 }
 
-// --- /help handler dispatches a LogItem ---------------------------
+// --- /help handler dispatches a structured HelpCardItem -----------
+//
+// /help used to push one big markdown LogItem; it now dispatches a
+// structured ``help_card`` item (sections → rows) that the renderer
+// lays out as a card. Assert on the card's shape rather than markdown
+// text so the test survives copy tweaks.
 {
   let state = { ...initialAppState };
   const dispatch = (a) => { state = reducer(state, a); };
@@ -140,29 +145,30 @@ const reg = buildRegistry();
     },
     [],
   );
-  const logs = state.history.filter((h) => h.kind === "log");
-  assert(logs.length === 1, `expected 1 log item from /help, got ${logs.length}`);
-  if (logs.length === 1) {
-    // Group headers are wrapped in **bold**; count them rather than
-    // pinning to one English literal so the assertion survives the
-    // M9 i18n + M10 changes.
-    const headerCount = (logs[0].text.match(/^\*\*[^*\n]+\*\*$/gm) ?? []).length;
+  const cards = state.history.filter((h) => h.kind === "help_card");
+  assert(cards.length === 1, `expected 1 help_card item from /help, got ${cards.length}`);
+  if (cards.length === 1) {
+    const card = cards[0];
     // Group taxonomy switched to general/business/skills/dynamic in
     // Phase 0.1 (alignment with Python). With the current built-in
     // set we have ``general`` + ``business`` populated; ``skills``
     // and ``dynamic`` are empty until Phase 4 wires the skill
-    // commands. ``renderHelp`` skips empty groups so 2 headers is
-    // the correct count today; relax the floor and assert each
-    // populated group is actually labelled.
-    assert(headerCount >= 2,
-      `/help text should have ≥2 bold group headers; got ${headerCount}`);
-    assert(logs[0].text.includes("**通用**") || logs[0].text.includes("**General**"),
-      "/help text should label the 'general' group");
-    assert(logs[0].text.includes("**业务**") || logs[0].text.includes("**Business**"),
-      "/help text should label the 'business' group");
-    assert(logs[0].text.includes("/help"), "/help text should mention /help itself");
-    // Bug 7 regression: ID must follow the reducer-allocated 'log-N' shape.
-    assert(/^log-\d+$/.test(logs[0].id), `LogItem id should match /^log-\\d+$/, got '${logs[0].id}'`);
+    // commands. buildHelpCard drops empty groups, so ≥2 sections is
+    // the correct floor today; assert each populated group is
+    // actually labelled (locale-dependent).
+    assert(card.sections.length >= 2,
+      `/help card should have ≥2 group sections; got ${card.sections.length}`);
+    const headings = card.sections.map((s) => s.heading);
+    assert(headings.includes("通用") || headings.includes("General"),
+      "/help card should label the 'general' group");
+    assert(headings.includes("业务") || headings.includes("Business"),
+      "/help card should label the 'business' group");
+    const rowNames = card.sections.flatMap((s) => s.rows.map((r) => r.name));
+    assert(rowNames.some((n) => n.startsWith("/help")),
+      "/help card should mention /help itself");
+    // IDs are hand-rolled at build time: ``help-<epoch-ms>``.
+    assert(/^help-\d+$/.test(card.id),
+      `help_card id should match /^help-\\d+$/, got '${card.id}'`);
   }
 }
 
@@ -457,84 +463,76 @@ probe("block: /doctor + reachable client");
   );
 }
 
-// --- /permission toggle reads ctx.state + announces new value ----
+// --- /permission sub-set semantics (direct-set, no bare toggle) ----
 //
 // Phase 1.2 (alignment with Python) split the legacy ``/mode
 // auto|confirm`` into ``/permission`` (permission mode) and
-// ``/mode`` (display density: calm/working/dense). This block
-// pins the permission toggle's semantics + log shape on its new
-// home; the ``/mode`` block below covers display density.
+// ``/mode`` (display density: calm/working/dense). The bare-toggle
+// semantic was later removed as a foot-gun (a stray ``/permission``
+// silently flipping into ``auto`` removes the safety gate): bare
+// invocation now surfaces a usage hint and changes nothing; the
+// ``auto`` / ``confirm`` subcommands do direct sets. This block pins
+// that contract.
 {
   let state = { ...initialAppState };
   state.config = { ...state.config, permissionMode: "auto" };
   const dispatch = (a) => { state = reducer(state, a); };
   const permission = reg.get("permission");
   assert(permission, "/permission command should be registered");
+  // The sub handler persists via client.setConfig — stub it so the
+  // smoke ctx doesn't need a live server.
+  const fakeClient = { setConfig: async () => ({}) };
+  const ctx = (snapshot) => ({
+    client: fakeClient,
+    sessionId: "s",
+    state: snapshot,
+    registry: reg,
+    dispatch,
+    exit: () => {},
+  });
 
-  // No-arg toggle: handler must observe ctx.state.config.permissionMode
-  // and dispatch the *opposite* value.
-  await permission.handler(
-    {
-      client: null,
-      sessionId: "s",
-      state, // pre-toggle snapshot
-      registry: reg,
-      dispatch,
-      exit: () => {},
-    },
-    [],
-  );
-  assert(state.config.permissionMode === "confirm", "/permission toggle: auto → confirm");
-  // Log line should announce the new value, not just "toggled".
+  // Bare /permission: usage hint, mode unchanged.
+  await permission.handler(ctx(state), []);
+  assert(state.config.permissionMode === "auto",
+    "bare /permission must NOT toggle (foot-gun guard)");
+  const hint = [...state.history].reverse().find((h) => h.kind === "log");
+  assert(hint && hint.level === "warn",
+    "bare /permission should produce a warn-level usage hint");
+
+  // Explicit sub: /permission confirm → MODE_TOGGLED + announcement.
+  const confirmSub = permission.subcommands?.confirm;
+  assert(confirmSub, "/permission should have a 'confirm' subcommand");
+  await confirmSub.handler(ctx(state), []);
+  assert(state.config.permissionMode === "confirm",
+    "/permission confirm: auto → confirm");
+  // Log line should announce the new value, not just "changed".
   const lastLog = [...state.history].reverse().find((h) => h.kind === "log");
   assert(
     lastLog && lastLog.text.includes("**confirm**"),
-    `/permission toggle log should contain '**confirm**', got: ${lastLog?.text}`,
+    `/permission confirm log should contain '**confirm**', got: ${lastLog?.text}`,
   );
 
-  // Explicit value with fresh snapshot.
-  await permission.handler(
-    {
-      client: null,
-      sessionId: "s",
-      state,
-      registry: reg,
-      dispatch,
-      exit: () => {},
-    },
-    ["auto"],
-  );
-  assert(state.config.permissionMode === "auto", "/permission auto explicit");
-
-  // Unknown value should warn, not silently ignore.
-  await permission.handler(
-    {
-      client: null,
-      sessionId: "s",
-      state,
-      registry: reg,
-      dispatch,
-      exit: () => {},
-    },
-    ["bogus"],
-  );
+  // Unknown arg on bare root should warn, not silently ignore.
+  await permission.handler(ctx(state), ["bogus"]);
   const warns = state.history.filter((h) => h.kind === "log" && h.level === "warn");
   assert(warns.length >= 1, "/permission bogus should produce a warn log");
-  assert(state.config.permissionMode === "auto", "/permission bogus should not change mode");
+  assert(state.config.permissionMode === "confirm",
+    "/permission bogus should not change mode");
 }
 
-// --- /mode (display density) cycles + dispatches DISPLAY_MODE_CHANGED -
+// --- /mode (display density) sub-set semantics, no bare cycle ------
 //
-// Bare ``/mode`` cycles calm → working → dense → calm. Explicit
-// subcommand (``/mode dense``) goes through the per-density sub
-// handler; this block exercises both via the bare-root entry point
-// since smoke is a non-React harness — we wire the sub call
-// through ``cmd.subcommands[name].handler`` directly to mirror
-// the Composer's dispatch path.
+// The bare-cycle semantic (calm → working → dense → calm) was removed
+// as a foot-gun: users would land on a density without knowing which
+// one. Bare ``/mode`` now surfaces a usage hint and changes nothing;
+// the per-density subcommands (calm / working / dense) do direct sets
+// via DISPLAY_MODE_CHANGED. We wire the sub call through
+// ``cmd.subcommands[name].handler`` directly to mirror the Composer's
+// dispatch path.
 {
   let state = { ...initialAppState };
   // initialAppState's displayMode default is "calm" — verify we
-  // start there so the cycle assertions below hold.
+  // start there so the assertions below hold.
   assert(state.config.displayMode === "calm", "initial displayMode should be calm");
   const dispatch = (a) => { state = reducer(state, a); };
   const mode = reg.get("mode");
@@ -549,30 +547,168 @@ probe("block: /doctor + reachable client");
     exit: () => {},
   });
 
-  // Bare /mode: calm → working.
+  // Bare /mode: usage hint, displayMode unchanged.
   await mode.handler(ctx(state), []);
-  assert(state.config.displayMode === "working", `bare /mode cycle: calm→working, got ${state.config.displayMode}`);
+  assert(state.config.displayMode === "calm",
+    `bare /mode must NOT cycle (foot-gun guard), got ${state.config.displayMode}`);
+  const hint = [...state.history].reverse().find((h) => h.kind === "log");
+  assert(hint && hint.level === "warn",
+    "bare /mode should produce a warn-level usage hint");
 
-  // Bare /mode again: working → dense.
-  await mode.handler(ctx(state), []);
-  assert(state.config.displayMode === "dense", `bare /mode cycle: working→dense, got ${state.config.displayMode}`);
+  // Direct subs: /mode working, then /mode dense.
+  const workingSub = mode.subcommands?.working;
+  assert(workingSub, "/mode should have a 'working' subcommand");
+  await workingSub.handler(ctx(state), []);
+  assert(state.config.displayMode === "working",
+    `/mode working explicit, got ${state.config.displayMode}`);
 
-  // Bare /mode wraps: dense → calm.
-  await mode.handler(ctx(state), []);
-  assert(state.config.displayMode === "calm", `bare /mode wrap: dense→calm, got ${state.config.displayMode}`);
-
-  // Direct sub: /mode dense.
   const denseSub = mode.subcommands?.dense;
   assert(denseSub, "/mode should have a 'dense' subcommand");
   await denseSub.handler(ctx(state), []);
-  assert(state.config.displayMode === "dense", `/mode dense explicit, got ${state.config.displayMode}`);
+  assert(state.config.displayMode === "dense",
+    `/mode dense explicit, got ${state.config.displayMode}`);
 
-  // Bogus arg on bare-root → warn (handler treats unrecognised
-  // positional arg as a typo of the cycle entry point).
+  // Bogus arg on bare-root → warn, displayMode unchanged.
   await mode.handler(ctx(state), ["bogus"]);
   const warns = state.history.filter((h) => h.kind === "log" && h.level === "warn");
   assert(warns.length >= 1, "/mode bogus should produce a warn log");
   assert(state.config.displayMode === "dense", "/mode bogus should not change displayMode");
+}
+
+// --- /clear uses the host-injected clearScreen (P0 seam) -----------
+//
+// P0 moved the ANSI viewport-clear out of core: the /clear handler now
+// calls ``ctx.clearScreen?.()`` (TUI writes \x1b[H\x1b[J; web omits it)
+// and then dispatches HISTORY_CLEARED. Pin both halves: the host hook
+// fires, and history empties either way.
+{
+  let clearCalls = 0;
+  let state = { ...initialAppState };
+  state = reducer(state, { type: "TURN_STARTED", input: "x" });
+  state = reducer(state, { type: "TURN_DONE" });
+  assert(state.history.length > 0, "precondition: history non-empty");
+  const clear = reg.get("clear");
+  await clear.handler(
+    {
+      client: null,
+      sessionId: "s",
+      state,
+      registry: reg,
+      dispatch: (a) => { state = reducer(state, a); },
+      clearScreen: () => { clearCalls++; },
+      exit: () => {},
+    },
+    [],
+  );
+  assert(clearCalls === 1,
+    `/clear should invoke ctx.clearScreen exactly once, got ${clearCalls}`);
+  assert(state.history.length === 0,
+    "/clear should empty history via HISTORY_CLEARED");
+
+  // Host without the hook (web): no throw, history still cleared.
+  let state2 = { ...initialAppState };
+  state2 = reducer(state2, { type: "TURN_STARTED", input: "x" });
+  state2 = reducer(state2, { type: "TURN_DONE" });
+  await clear.handler(
+    {
+      client: null,
+      sessionId: "s",
+      state: state2,
+      registry: reg,
+      dispatch: (a) => { state2 = reducer(state2, a); },
+      exit: () => {},
+    },
+    [],
+  );
+  assert(state2.history.length === 0,
+    "/clear without clearScreen hook must still clear history");
+}
+
+// --- /doctor renders the host-injected version (P0 seam) -----------
+//
+// core no longer reads its own package.json: the runtime doctor card's
+// ``tuiVersion`` comes from ``ctx.hostVersion`` (TUI passes PKG_VERSION).
+// Pin the wiring + the "?" fallback when the host omits it.
+{
+  const doctor = reg.get("doctor");
+  const fakeClient = {
+    url: "http://stub",
+    serverProtocolVersion: "1",
+    health: async () => true,
+    getSessionState: async () => ({ cluster: "test-cluster" }),
+    getServerVersion: async () => "9.9.9",
+    getPreflight: async () => null,
+  };
+  const run = async (hostVersion) => {
+    let state = { ...initialAppState };
+    const ctx = {
+      client: fakeClient,
+      sessionId: "s",
+      state,
+      registry: reg,
+      dispatch: (a) => { state = reducer(state, a); },
+      exit: () => {},
+    };
+    if (hostVersion !== undefined) ctx.hostVersion = hostVersion;
+    await doctor.handler(ctx, []);
+    return state.history.find((h) => h.kind === "runtime_doctor_card");
+  };
+  const card = await run("1.2.3");
+  assert(card, "/doctor should append a runtime_doctor_card");
+  assert(card.tuiVersion === "1.2.3",
+    `/doctor card should carry ctx.hostVersion, got: ${card.tuiVersion}`);
+  const cardNoHost = await run(undefined);
+  assert(cardNoHost.tuiVersion === "?",
+    `/doctor without hostVersion should fall back to '?', got: ${cardNoHost.tuiVersion}`);
+}
+
+// --- /recordings export via host-injected saveTextFile (P0 seam) ----
+//
+// core keeps the JSONL shaping but the file write is host-injected so
+// the registry stays browser-safe. Pin three branches: unsupported
+// host (no hook → warn, no write), successful save (content + path
+// forwarded verbatim), and the exists-refusal pass-through.
+{
+  const exportSub = reg.get("recordings")?.subcommands?.export;
+  assert(exportSub, "/recordings export should be registered");
+  const tape = { events: [{ type: "token", n: 1 }, { type: "done" }] };
+  const fakeClient = { getRecording: async () => tape };
+  const run = async (saveTextFile) => {
+    let state = { ...initialAppState };
+    const ctx = {
+      client: fakeClient,
+      sessionId: "s",
+      state,
+      registry: reg,
+      dispatch: (a) => { state = reducer(state, a); },
+      exit: () => {},
+    };
+    if (saveTextFile) ctx.saveTextFile = saveTextFile;
+    await exportSub.handler(ctx, ["task-1", "/tmp/tape.jsonl"]);
+    return state;
+  };
+
+  // Unsupported host: warn, and the handler must not crash.
+  const s1 = await run(undefined);
+  const w1 = [...s1.history].reverse().find((h) => h.kind === "log" && h.level === "warn");
+  assert(w1, "/recordings export on a host without saveTextFile should warn");
+
+  // Successful save: JSONL forwarded with trailing newline.
+  let captured = null;
+  const s2 = await run(async (outPath, content) => {
+    captured = { outPath, content };
+    return { saved: true, absPath: outPath, bytes: content.length };
+  });
+  assert(captured?.outPath === "/tmp/tape.jsonl", "outPath should pass through");
+  assert(captured?.content === tape.events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+    "content should be JSONL with a trailing newline");
+  const ok2 = [...s2.history].reverse().find((h) => h.kind === "log" && h.level === "ok");
+  assert(ok2, "/recordings export success should log ok");
+
+  // Exists refusal: warn, no crash.
+  const s3 = await run(async (outPath) => ({ saved: false, alreadyExists: true, absPath: outPath }));
+  const w3 = [...s3.history].reverse().find((h) => h.kind === "log" && h.level === "warn");
+  assert(w3, "/recordings export exists-refusal should warn");
 }
 
 probe("block: listTasks envelope failure");
@@ -677,50 +813,13 @@ probe("block: listTasks envelope failure");
   }
 }
 
-// --- Phase 2: recoverTask returns the full envelope (success + fail) ---
+// --- Phase 2: recovery client API ---------------------------------
 //
-// Unlike listTasks/getMetric/listSkills which throw on ``status:fail``,
-// recoverTask is documented to hand the entire envelope back so the
-// handler can render the failure_reason card. Pin both branches.
-{
-  const realFetch = globalThis.fetch;
-  // Success branch.
-  globalThis.fetch = async () =>
-    new Response(
-      JSON.stringify({
-        status: "success",
-        data: { task_id: "t1", result: "recovered", blade_uid: "u1", targets: [] },
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    );
-  try {
-    const c = new BladeClient("http://stub");
-    const env = await c.recoverTask("t1");
-    assert(env.status === "success", `recover success: status=${env.status}`);
-    assert(env.data?.result === "recovered", "recover success: data.result");
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-  // Fail branch — must NOT throw, the handler reads env.status.
-  globalThis.fetch = async () =>
-    new Response(
-      JSON.stringify({
-        status: "fail",
-        code: "RECOVERY_FAILED",
-        message: "verification failed",
-        data: { task_id: "t1", result: "failed", error: "still injected" },
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    );
-  try {
-    const c = new BladeClient("http://stub");
-    const env = await c.recoverTask("t1");
-    assert(env.status === "fail", `recover fail: status=${env.status}`);
-    assert(env.data?.error === "still injected", "recover fail: data.error preserved");
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-}
+// The old non-streaming ``client.recoverTask`` was removed when the
+// server moved to ``POST /api/v1/recover-stream`` (SSE). Recovery now
+// flows through ``client.streamRecover`` (same wire format + frame
+// parser as ``streamTurn``) and the command path is covered below by
+// the ``/recover latest`` block via ``ctx.submitRecover``.
 
 // --- Phase 2: /review E# locator path resolves through state.locators ---
 //
@@ -888,12 +987,14 @@ probe("block: listTasks envelope failure");
 //   - t() renders {param} interpolation
 //   - missing keys gracefully return the key string (visible marker)
 {
-  const i18n = await tsImport("../src/i18n/index.ts", import.meta.url);
-  const { t, tArr, ACTIVE_LANG } = i18n;
+  const i18n = await tsImport("../../core/src/i18n/index.ts", import.meta.url);
+  const { t, tArr, getActiveLang } = i18n;
 
-  // ACTIVE_LANG must be one of en | zh.
-  assert(["en", "zh"].includes(ACTIVE_LANG),
-    `ACTIVE_LANG should be en|zh; got ${ACTIVE_LANG}`);
+  // Active lang must be one of en | zh (P0: ACTIVE_LANG constant
+  // became getActiveLang() when i18n moved to @blade-ai/core).
+  const activeLang = getActiveLang();
+  assert(["en", "zh"].includes(activeLang),
+    `getActiveLang() should be en|zh; got ${activeLang}`);
 
   // Thinking phrases array — non-empty.
   const phrases = tArr("thinking.phrases");
@@ -1600,11 +1701,17 @@ probe("block: M6.1 path traversal (last block before first stdout)");
 }
 
 // --- Phase 3a: getConfig / setConfig / unsetConfig / getMemoryInfo /
-//               clearMemory / compactSession throw on envelope fail ---
+//               clearMemory throw on envelope fail ---
 //
 // Same fail-envelope contract as listTasks/getMetric/listSkills —
 // each new method must throw with the server's message preserved so
 // the slash handlers can render an actionable warning.
+//
+// (``compactSession`` used to be in this list; compaction moved to
+// the SSE ``streamCompactSession`` generator, which by design does
+// NOT throw on server ``error`` frames — it yields them so the
+// handler can render a friendly message and still consume the
+// ``done`` sentinel.)
 {
   const cases = [
     ["getConfig", []],
@@ -1612,7 +1719,6 @@ probe("block: M6.1 path traversal (last block before first stdout)");
     ["unsetConfig", ["model_name"]],
     ["getMemoryInfo", ["sess-1"]],
     ["clearMemory", ["sess-1"]],
-    ["compactSession", ["sess-1"]],
   ];
   for (const [methodName, args] of cases) {
     const realFetch = globalThis.fetch;
@@ -1686,9 +1792,13 @@ probe("block: M6.1 path traversal (last block before first stdout)");
 {
   let captured = null;
   const fakeClient = {
-    compactSession: async (sid) => {
+    // Current compaction API: SSE generator. If the mid-stream gate
+    // regresses, the handler would consume this and ``captured``
+    // flips — failing the assertion below precisely (rather than a
+    // TypeError on a missing mock).
+    streamCompactSession: async function* (sid) {
       captured = sid;
-      return { tokens_before: 100, tokens_after: 50, tokens_saved: 50, compacted: true, layer: "lightweight" };
+      yield { type: "done" };
     },
   };
   let state = { ...initialAppState };
@@ -1704,6 +1814,7 @@ probe("block: M6.1 path traversal (last block before first stdout)");
     state,
     registry: reg,
     dispatch: (a) => { state = reducer(state, a); },
+    beginManualCompact: () => new AbortController(),
     exit: () => {},
   };
   const compact = reg.get("compact");
@@ -1720,18 +1831,16 @@ probe("block: M6.1 path traversal (last block before first stdout)");
 //
 // Mirrors Python ``_cmd_recover``'s ``if task_id == "latest": task_id =
 // last_task_id``. Drives the bare-recover handler with a fake state
-// where lastTaskId is set, captures the id passed to recoverTask, and
-// asserts the keyword was unwrapped to the real id BEFORE the call
-// fired (the API never sees the literal string "latest").
+// where lastTaskId is set, captures the id passed to submitRecover
+// (the ctx-level streaming recover entry), and asserts the keyword
+// was unwrapped to the real id BEFORE the call fired (the submit
+// layer never sees the literal string "latest").
 {
   let captured = null;
   const fakeClient = {
     listTasks: async () => ({ total: 0, tasks: [] }),
-    recoverTask: async (id) => {
-      captured = id;
-      return { status: "success", data: { task_id: id, result: "recovered" } };
-    },
   };
+  const submitRecover = async (id) => { captured = id; };
   let state = { ...initialAppState };
   // Seed lastTaskId via a real RESULT_RECEIVED so the wiring + payload
   // shape match production. Catches a regression where lastTaskId is
@@ -1756,32 +1865,31 @@ probe("block: M6.1 path traversal (last block before first stdout)");
     state,
     registry: reg,
     dispatch: (a) => { state = reducer(state, a); },
+    submitRecover,
     exit: () => {},
   };
   const recoverCmd = reg.get("recover");
   await recoverCmd.handler(ctx, ["latest"]);
   assert(captured === "task-from-state",
-    `/recover latest should call recoverTask with state.lastTaskId, got: ${captured}`);
+    `/recover latest should submitRecover with state.lastTaskId, got: ${captured}`);
 
   // Also lock the empty-state path: when no task has finished yet,
-  // /recover latest must NOT call the API and must surface the
+  // /recover latest must NOT submit and must surface the
   // recover.no_latest message.
   let captured2 = null;
-  const fakeClient2 = {
-    recoverTask: async (id) => { captured2 = id; return { status: "success", data: {} }; },
-  };
   let state2 = { ...initialAppState };
   const ctx2 = {
-    client: fakeClient2,
+    client: fakeClient,
     sessionId: "sess-test",
     state: state2,
     registry: reg,
     dispatch: (a) => { state2 = reducer(state2, a); },
+    submitRecover: async (id) => { captured2 = id; },
     exit: () => {},
   };
   await recoverCmd.handler(ctx2, ["latest"]);
   assert(captured2 === null,
-    "/recover latest with no lastTaskId must NOT hit the API");
+    "/recover latest with no lastTaskId must NOT submit a recovery");
   const lastWarn = [...state2.history, ...state2.pending]
     .reverse().find((it) => it.kind === "log" && it.level === "warn");
   assert(lastWarn, "/recover latest empty path should append a warn LogItem");

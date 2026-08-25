@@ -15,7 +15,7 @@
 import { render as inkRender } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import { LogMessage } from "./LogMessage.js";
-import type { LogItem } from "../../state/types.js";
+import type { LogItem } from "@blade-ai/core";
 import { Icons } from "../../theme/icons.js";
 
 function readout(overrides: Partial<LogItem> = {}): LogItem {

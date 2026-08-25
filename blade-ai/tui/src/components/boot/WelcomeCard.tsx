@@ -23,8 +23,8 @@
 import { Box, Text } from "ink";
 import { memo } from "react";
 import { useTerminalSize, NARROW_THRESHOLD } from "../../hooks/useTerminalSize.js";
-import { t } from "../../i18n/index.js";
-import type { WelcomeCardItem } from "../../state/types.js";
+import { t } from "@blade-ai/core";
+import type { WelcomeCardItem } from "@blade-ai/core";
 import { Theme } from "../../theme/colors.js";
 import { Icons } from "../../theme/icons.js";
 import { BootCardFrame, useBootCardWidth } from "./BootCardFrame.js";

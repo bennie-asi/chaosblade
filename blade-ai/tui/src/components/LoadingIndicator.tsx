@@ -56,7 +56,7 @@
 import { memo } from "react";
 import { Box, Text } from "ink";
 import { useLoadingIndicator } from "../hooks/useLoadingIndicator.js";
-import { t } from "../i18n/index.js";
+import { t } from "@blade-ai/core";
 import { Theme } from "../theme/colors.js";
 import { ThinkingSpinner } from "../theme/spinners.js";
 import { Spinner } from "./shared/Spinner.js";

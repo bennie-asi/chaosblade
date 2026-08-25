@@ -29,7 +29,7 @@ import { Children, useEffect } from "react";
 import { Box, Text } from "ink";
 import { useOverflowActions } from "../../contexts/OverflowContext.js";
 import { Theme } from "../../theme/colors.js";
-import { t } from "../../i18n/index.js";
+import { t } from "@blade-ai/core";
 
 export interface MaxSizedBoxProps {
   children?: React.ReactNode;

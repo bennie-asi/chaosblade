@@ -3,7 +3,8 @@
  *
  * Why minimal:
  *   - We're a Node ESM project (no JSDOM/browser). Default node env is
- *     correct for everything in src/state, src/utils, src/i18n.
+ *     correct for everything under src/ (state/i18n now live in
+ *     @blade-ai/core; the host-side utils + components remain here).
  *   - React component tests would need ink-testing-library + a separate
  *     env; we deliberately punt on those — smoke scripts already cover
  *     end-to-end reducer / slash dispatch behaviour from outside.
@@ -34,8 +35,8 @@ export default defineConfig({
     // GitHub-hosted Linux runners ``LC_ALL=C.UTF-8`` and i18n falls
     // through to en, breaking 8 string assertions. Forcing
     // ``BLADE_AI_LANG=zh`` here makes the test environment match the
-    // assertions regardless of host locale; ``i18n/index.ts`` reads
-    // this env var BEFORE LC_ALL/LANG, so it always wins.
+    // assertions regardless of host locale; @blade-ai/core's i18n
+    // module reads this env var BEFORE LC_ALL/LANG, so it always wins.
     env: {
       BLADE_AI_LANG: "zh",
     },

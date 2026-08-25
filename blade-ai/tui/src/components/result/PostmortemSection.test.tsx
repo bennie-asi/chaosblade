@@ -6,7 +6,7 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 
-import type { ResultItem } from "../../state/types.js";
+import type { ResultItem } from "@blade-ai/core";
 import { PostmortemSection } from "./PostmortemSection.js";
 import { ResultCard } from "./ResultCard.js";
 
@@ -16,7 +16,7 @@ const BASE_ITEM: ResultItem = {
   taskId: "task-abc12345",
   status: "success",
   faultType: "k8s-chaos-skills",
-  bladeUid: "blade-uid-1",
+  experimentUid: "blade-uid-1",
   duration: "47s",
   summary: "Verified",
 };

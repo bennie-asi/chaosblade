@@ -88,8 +88,12 @@ import { performance } from "node:perf_hooks";
 import { useLayoutEffect } from "react";
 import { measureElement, type DOMElement } from "ink";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
-import { useAppSelector, useAppStateGetter } from "../state/store.js";
-import type { HistoryItem } from "../state/types.js";
+import {
+  setActionRecorder,
+  useAppSelector,
+  useAppStateGetter,
+  type HistoryItem,
+} from "@blade-ai/core";
 
 /**
  * Compact, stable string description of a pending item — designed so
@@ -554,6 +558,12 @@ export function recordAction(action: unknown): void {
     ...summariseAction(action),
   });
 }
+
+// Register as the action recorder for @blade-ai/core's store (every
+// dispatch flows through ``core/src/utils/debug.ts``). Self-gating:
+// recordAction no-ops unless ENABLED, so installing unconditionally
+// costs one function call per dispatch when the probe is off.
+setActionRecorder(recordAction);
 
 /**
  * Append a record (any shape; gets a ``_kind`` discriminator) to

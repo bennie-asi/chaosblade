@@ -24,7 +24,7 @@
 import { render } from "ink";
 import React from "react";
 import { GoodbyeCard } from "../components/boot/GoodbyeCard.js";
-import type { AppState } from "../state/types.js";
+import type { AppState } from "@blade-ai/core";
 
 /**
  * Print the goodbye card to stdout. Safe to call from any exit path

@@ -25,11 +25,11 @@
 import { Box, Text } from "ink";
 import { memo } from "react";
 import stringWidth from "string-width";
-import { t } from "../i18n/index.js";
+import { t } from "@blade-ai/core";
 import type {
   ExperimentsCardItem,
   ExperimentsCardRow,
-} from "../state/types.js";
+} from "@blade-ai/core";
 import { Theme } from "../theme/colors.js";
 import { Icons, isAsciiMode } from "../theme/icons.js";
 import { useBootCardWidth } from "./boot/BootCardFrame.js";
