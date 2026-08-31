@@ -1,0 +1,26 @@
+# Backend Interface Ledger
+
+| Interface | Owner Task | Contract | Consumers | Verification |
+| --- | --- | --- | --- | --- |
+| `DataSourceConnectionPoolFullActionSpec` | `backend-001` | target=`datasource`, action=`connectionpoolfull`; flags `data-source-name=coreDataSource`, `target-percent=100`, `timeout=60` | dynamic JVM YAML loader, Agent `ModelParser` | `DataSourceModelSpecTest#shouldExposeValidatedDefaults` |
+| `ConnectionPoolRequest.from(ActionModel)` | `backend-001` | trim bean name; percent `1..100`; timeout positive seconds; invalid input returns stable reason | datasource executor | `ConnectionPoolRequestTest#shouldRejectInvalidFlags` |
+| `PoolAdapter` | `backend-002` | `maximum()`, `active()`, `idle()`, `borrow()`; reflection binding fails closed | orchestration service | `PoolAdapterFactoryTest#shouldSelectSupportedPoolByCapabilities` |
+| `ConnectionTarget.calculate(int,int,int)` | `backend-002` | target=`ceil(maximum*percent/100)`; hold=`max(0,target-active)` | datasource executor | `ConnectionTargetTest#shouldRoundUpAndSubtractActive` |
+| `SpringContextResolver.resolve(ClassLoader,String)` | `backend-003` | returns exactly one live Context/DataSource identity; zero/ambiguous/incompatible fails with stable reason | datasource executor | `SpringContextResolverTest#shouldFailClosedForAmbiguousContexts` |
+| `ExperimentRegistry.create(uid,identity,expiresAt)` | `backend-004` | same UID idempotent, competing UID rejected, different identities independent | datasource executor, TTL reaper | `ExperimentRegistryTest#shouldSerializePerDatasourceIdentity` |
+| `ExperimentRegistry.release(uid,reason)` | `backend-004` | once-only close loop; completed tombstone idempotency; release success only after owned set empty and identity unregistered | destroy, rollback, TTL, unload | `ExperimentRegistryTest#shouldReleaseExactlyOnceAcrossRaces` |
+| `ConnectionPoolResult` | `backend-005` | stable state/reason plus before/after, target, held, failed, expiry and release metrics; never includes connection or credential | Agent handlers, Operator, CLI | `DataSourceConnectionPoolFullExecutorTest#shouldReturnObservableResult` |
+| `InjectionResultProvider.getInjectionResult(String uid)` | `backend-006` | optional model contract used by create/status/destroy; absent provider preserves legacy string behavior | Agent service handlers | `StructuredResultHandlerTest#shouldPreserveLegacyResponse` |
+| datasource plugin SPI/YAML | `backend-007` | plugin JAR discoverable by SPI and spec build emits datasource target/action flags | root dynamic command registration | `mvn -pl chaosblade-exec-plugin/chaosblade-exec-plugin-datasource -am test` |
+| compatibility matrix runner | `backend-008` | JDK/Boot/Hikari/Druid combinations attach after startup and execute create/destroy | release validation | `test/compatibility/run-matrix.sh` |
+| `ResourceStatus.Result` | `backend-009` | optional embedded JSON object; omitted for legacy actions; deepcopy and served CRD schema agree | Operator controller, root CLI | `go test ./pkg/apis/chaosblade/v1alpha1/...` |
+| child command result decoder | `backend-010` | accepts legacy string UID and `{uid,detail}`; malformed new payload is failure, never guessed | parallel resource executors | `TestExecCommandsDecodesLegacyAndDetailedResult` |
+| `rollbackAtomicCreate` | `backend-011` | only datasource/connectionpoolfull; destroy every successful child UID after any failure; states `ROLLED_BACK`/`ROLLBACK_FAILED` | dispatched controller | `TestDatasourceCreateCompensatesSuccessfulResources` |
+| Operator regression suite | `backend-012` | non-target Actions and all-success datasource create retain existing flow | release validation | `go test ./exec/... ./pkg/apis/chaosblade/v1alpha1/...` |
+| JVM timeout forwarding | `backend-013` | timeout remains filtered for legacy Actions and is sent only to datasource/connectionpoolfull | Agent TTL | `TestCreateURLForwardsTimeoutOnlyForDatasource` |
+| root detailed response envelope | `backend-014` | create/destroy new Action prints UID plus detail; old Action result remains current string/experiment behavior | users, Operator | `TestDatasourceCreateAndDestroyPreserveDetail` |
+| external repository overrides | `backend-015` | Makefile defaults unchanged; `BLADE_*_PROJECT` and `BLADE_*_BRANCH` may select local feature repos | container build/E2E | `make -n build_with_local_components` equivalent dry-run assertion |
+| dynamic command contract | `backend-016` | generated `datasource` and `container-datasource` commands expose exact flags without hardcoded registration | host/K8s users | `TestDatasourceCommandsRegisteredFromJvmSpec` |
+| E2E application API | `backend-017` | `/query` reports success/timeout and `/pool` exposes safe max/active/idle for selected `coreDataSource` | E2E runner | `mvn test` in fixture plus Kubernetes readiness probe |
+| `run-e2e.sh` | `backend-018` | builds/deploys versioned images, runs effect/destroy/TTL/compensation assertions, exits nonzero on missing evidence | live verifier | `shellcheck` plus disposable namespace dry run |
+| `e2e-evidence.md` | `backend-019` | records exact SHAs/images/cluster, commands, per-Pod structured result, business impact, destroy, TTL and compensation recovery | final review | live run on `bennieliu-honor` with all gates PASS |
