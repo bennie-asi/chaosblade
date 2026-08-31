@@ -1,6 +1,6 @@
 # JVM Agent Tasks
 
-- [ ] **Task backend-001: 建立 datasource 插件模块、模型与请求校验契约**
+- [x] **Task backend-001: 建立 datasource 插件模块、模型与请求校验契约**
 
 **Files:**
 - Modify: `../chaosblade-exec-jvm/chaosblade-exec-plugin/pom.xml`
@@ -42,7 +42,7 @@ Expected: PASS。
 
 Run: `git add chaosblade-exec-plugin/pom.xml chaosblade-exec-plugin/chaosblade-exec-plugin-datasource && git commit -m "feat: add datasource connection pool model"`
 
-- [ ] **Task backend-002: 实现连接池能力适配器与目标占用计算**
+- [x] **Task backend-002: 实现连接池能力适配器与目标占用计算**
 
 **Files:**
 - Create: `../chaosblade-exec-jvm/chaosblade-exec-plugin/chaosblade-exec-plugin-datasource/src/main/java/com/alibaba/chaosblade/exec/plugin/datasource/pool/PoolAdapter.java`
@@ -85,7 +85,7 @@ Expected: PASS。
 
 Run: `git add chaosblade-exec-plugin/chaosblade-exec-plugin-datasource && git commit -m "feat: adapt hikari and druid pools"`
 
-- [ ] **Task backend-003: 实现 Spring Boot 活动 Context 与唯一 DataSource Bean 定位**
+- [x] **Task backend-003: 实现 Spring Boot 活动 Context 与唯一 DataSource Bean 定位**
 
 **Files:**
 - Create: `../chaosblade-exec-jvm/chaosblade-exec-plugin/chaosblade-exec-plugin-datasource/src/main/java/com/alibaba/chaosblade/exec/plugin/datasource/spring/SpringContextResolver.java`
@@ -126,7 +126,7 @@ Expected: PASS。
 
 Run: `git add chaosblade-exec-plugin/chaosblade-exec-plugin-datasource && git commit -m "feat: resolve spring datasource beans"`
 
-- [ ] **Task backend-004: 实现 UID Holder 注册表、互斥、硬 TTL 与幂等释放**
+- [x] **Task backend-004: 实现 UID Holder 注册表、互斥、硬 TTL 与幂等释放**
 
 **Files:**
 - Create: `../chaosblade-exec-jvm/chaosblade-exec-plugin/chaosblade-exec-plugin-datasource/src/main/java/com/alibaba/chaosblade/exec/plugin/datasource/registry/ConnectionHolder.java`
@@ -166,7 +166,7 @@ Expected: PASS，重复运行 20 次无竞态失败。
 
 Run: `git add chaosblade-exec-plugin/chaosblade-exec-plugin-datasource && git commit -m "feat: manage datasource experiment lifecycle"`
 
-- [ ] **Task backend-005: 编排探测、借出、达标确认、回滚与恢复结果**
+- [x] **Task backend-005: 编排探测、借出、达标确认、回滚与恢复结果**
 
 **Files:**
 - Create: `../chaosblade-exec-jvm/chaosblade-exec-plugin/chaosblade-exec-plugin-datasource/src/main/java/com/alibaba/chaosblade/exec/plugin/datasource/DataSourceConnectionPoolFullExecutor.java`
@@ -206,7 +206,7 @@ Expected: PASS。
 
 Run: `git add chaosblade-exec-plugin/chaosblade-exec-plugin-datasource && git commit -m "feat: exhaust and recover datasource pools"`
 
-- [ ] **Task backend-006: 让 Agent handlers 可选返回结构化实验结果并保持旧模型兼容**
+- [x] **Task backend-006: 让 Agent handlers 可选返回结构化实验结果并保持旧模型兼容**
 
 **Files:**
 - Create: `../chaosblade-exec-jvm/chaosblade-exec-service/src/main/java/com/alibaba/chaosblade/exec/service/handler/InjectionResultProvider.java`
@@ -248,7 +248,7 @@ Expected: PASS，并执行现有 service tests 通过。
 
 Run: `git add chaosblade-exec-service chaosblade-exec-plugin/chaosblade-exec-plugin-datasource && git commit -m "feat: expose datasource experiment results"`
 
-- [ ] **Task backend-007: 注册插件 SPI、生成 JVM spec 并完成模块回归**
+- [x] **Task backend-007: 注册插件 SPI、生成 JVM spec 并完成模块回归**
 
 **Files:**
 - Create: `../chaosblade-exec-jvm/chaosblade-exec-plugin/chaosblade-exec-plugin-datasource/src/main/java/com/alibaba/chaosblade/exec/plugin/datasource/DataSourcePlugin.java`
@@ -287,7 +287,7 @@ Expected: PASS，生成 spec 含 datasource 且旧 Druid suite 不变。
 
 Run: `git add chaosblade-exec-plugin && git commit -m "feat: package datasource chaos plugin"`
 
-- [ ] **Task backend-008: 建立 JDK、Spring Boot 与连接池兼容矩阵**
+- [x] **Task backend-008: 建立 JDK、Spring Boot 与连接池兼容矩阵**
 
 **Files:**
 - Create: `../chaosblade-exec-jvm/test/compatibility/datasource/pom.xml`

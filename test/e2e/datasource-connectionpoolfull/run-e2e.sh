@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091 -- lib.sh is resolved next to this script at runtime.
+# shellcheck disable=SC1091
+# lib.sh is resolved next to this script at runtime.
 source "$SCRIPT_DIR/lib.sh"
 
 if [[ ${1:-} == "--self-test" ]]; then

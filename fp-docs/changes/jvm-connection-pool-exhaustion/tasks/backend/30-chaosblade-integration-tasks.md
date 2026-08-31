@@ -1,6 +1,6 @@
 # ChaosBlade Root Integration Tasks
 
-- [ ] **Task backend-013: 仅为新 datasource Action 向 Agent 转发 timeout**
+- [x] **Task backend-013: 仅为新 datasource Action 向 Agent 转发 timeout**
 
 **Files:**
 - Modify: `exec/jvm/executor.go`
@@ -38,7 +38,7 @@ Expected: PASS。
 
 Run: `git add exec/jvm/executor.go exec/jvm/sandbox_test.go && git commit -m "feat: forward datasource hard timeout"`
 
-- [ ] **Task backend-014: 在根 CLI 与 Kubernetes状态中保留新 Action 详细结果**
+- [x] **Task backend-014: 在根 CLI 与 Kubernetes状态中保留新 Action 详细结果**
 
 **Files:**
 - Modify: `cli/cmd/create.go`
@@ -80,7 +80,7 @@ Expected: PASS，legacy snapshots 无变化。
 
 Run: `git add cli/cmd apis/chaosblade/v1alpha1 && git commit -m "feat: preserve datasource experiment details"`
 
-- [ ] **Task backend-015: 支持三仓本地功能分支的可复现容器构建**
+- [x] **Task backend-015: 支持三仓本地功能分支的可复现容器构建**
 
 **Files:**
 - Modify: `Makefile`
@@ -118,7 +118,7 @@ Expected: PASS，默认/override 两组断言均通过。
 
 Run: `git add Makefile test/e2e/jvm-connection-pool/verify-make-overrides.sh && git commit -m "build: allow local chaosblade components"`
 
-- [ ] **Task backend-016: 验证动态主机/Kubernetes命令和根仓全量回归**
+- [x] **Task backend-016: 验证动态主机/Kubernetes命令和根仓全量回归**
 
 **Files:**
 - Modify: `cli/cmd/command_test.go`

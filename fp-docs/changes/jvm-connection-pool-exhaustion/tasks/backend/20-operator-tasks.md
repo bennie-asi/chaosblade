@@ -1,6 +1,6 @@
 # Operator Tasks
 
-- [ ] **Task backend-009: 扩展逐资源状态以承载可选结构化 result**
+- [x] **Task backend-009: 扩展逐资源状态以承载可选结构化 result**
 
 **Files:**
 - Modify: `../chaosblade-operator/pkg/apis/chaosblade/v1alpha1/types.go`
@@ -42,7 +42,7 @@ Expected: PASS，三个 CRD 的 schema 检查脚本通过。
 
 Run: `git add pkg/apis/chaosblade/v1alpha1 deploy/crds deploy/helm && git commit -m "feat: retain per-resource experiment results"`
 
-- [ ] **Task backend-010: 兼容解析 legacy UID 与 datasource 详细子响应**
+- [x] **Task backend-010: 兼容解析 legacy UID 与 datasource 详细子响应**
 
 **Files:**
 - Modify: `../chaosblade-operator/exec/model/executor.go`
@@ -82,7 +82,7 @@ Expected: PASS，旧 string 与新 envelope 全部通过。
 
 Run: `git add exec/model && git commit -m "feat: decode detailed child experiment results"`
 
-- [ ] **Task backend-011: 为 datasource 多资源创建实现 action-specific 原子补偿**
+- [x] **Task backend-011: 为 datasource 多资源创建实现 action-specific 原子补偿**
 
 **Files:**
 - Modify: `../chaosblade-operator/exec/controller.go`
@@ -120,7 +120,7 @@ Expected: PASS，fake 记录每个成功 UID 恰好一次 destroy。
 
 Run: `git add exec/controller.go exec/controller_test.go && git commit -m "feat: compensate partial datasource experiments"`
 
-- [ ] **Task backend-012: 完成 Operator 全量回归、CRD 一致性与竞态验证**
+- [x] **Task backend-012: 完成 Operator 全量回归、CRD 一致性与竞态验证**
 
 **Files:**
 - Modify: `../chaosblade-operator/exec/controller_test.go`

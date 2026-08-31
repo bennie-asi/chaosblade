@@ -15,7 +15,10 @@ Component bases:
 
 ## Completed
 
-- None
+- `backend-001`–`backend-008`: datasource Agent plugin、结构化 handler 结果、SPI/spec、UID Holder、硬 TTL、Hikari/Druid 适配器与六组 JDK/Boot 兼容矩阵；commit `647e492a53d168ee4ff03f957c17351335dbffcc`。
+- `backend-009`–`backend-012`: Operator/CRD 结构化逐资源 result、legacy decoder、稳定资源归属与 datasource-only 原子补偿；commit `41bab875e3c0957310e8afae8c6d2a262d98f0a1`。
+- `backend-013`–`backend-018`: 根 CLI timeout/detail 透传、Makefile 本地仓覆盖、动态命令验证、自包含 Hikari/Druid 应用与可重入 E2E runner；commit `b3e85917c696ba77b37a24d79ae8cdbc7c87a632`。
+- `backend-019`: `bennieliu-honor` 完整 k3s E2E、证据固化、无故障残留核验与 task marker 更新；evidence: `fp-docs/changes/jvm-connection-pool-exhaustion/e2e-evidence.md`。
 
 ## Blocked
 
@@ -26,3 +29,9 @@ Component bases:
 - Full automation authorized by the user through implementation and remote Kubernetes E2E.
 - `fp-docs/manifest.md` is absent and treated as non-blocking per FeaturePilot workspace rules.
 - Root CodeGraph existed before source writes; after the first source edit, navigation uses current-source search until one final `codegraph sync`.
+- Verified gates: 7 JVM unit tests, JVM full build, six JDK/Boot/pool matrix cases, Operator full `-race` suite, root focused tests, two application tests, shellcheck, Hikari explicit destroy, Druid 60-second TTL, mixed-target rollback, and final cleanup.
+- Root master combined Go test remains affected by the pre-existing chaosblade-exec-cri versus current Docker/containerd dependency mismatch; the 1.8 release-line package and all changed runtime paths were compiled and exercised end to end.
+
+## Status
+
+- `completed`

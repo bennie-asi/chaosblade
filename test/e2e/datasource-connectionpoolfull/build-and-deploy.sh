@@ -12,7 +12,8 @@ APP_IMAGE=${APP_IMAGE:-chaosblade-e2e/datasource-pool:local}
 TOOL_IMAGE=${TOOL_IMAGE:-chaosblade-e2e/chaosblade-tool:local}
 OPERATOR_IMAGE=${OPERATOR_IMAGE:-chaosblade-e2e/chaosblade-operator:local}
 
-# shellcheck disable=SC1091 -- lib.sh is resolved next to this script at runtime.
+# shellcheck disable=SC1091
+# lib.sh is resolved next to this script at runtime.
 source "$SCRIPT_DIR/lib.sh"
 for command in git go make mvn docker kubectl helm jq readlink; do
   require_command "$command"

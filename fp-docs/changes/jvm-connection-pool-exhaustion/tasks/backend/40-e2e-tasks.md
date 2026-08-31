@@ -1,6 +1,6 @@
 # Kubernetes E2E Tasks
 
-- [ ] **Task backend-017: 创建 Hikari/Druid 自包含 Kubernetes 测试应用**
+- [x] **Task backend-017: 创建 Hikari/Druid 自包含 Kubernetes 测试应用**
 
 **Files:**
 - Create: `test/e2e/jvm-connection-pool/app/pom.xml`
@@ -44,7 +44,7 @@ Expected: PASS；两个 profile 均完成测试且镜像构建成功。
 
 Run: `git add test/e2e/jvm-connection-pool/app test/e2e/jvm-connection-pool/k8s && git commit -m "test: add datasource kubernetes fixtures"`
 
-- [ ] **Task backend-018: 自动化三仓构建、集群部署与效果/恢复断言**
+- [x] **Task backend-018: 自动化三仓构建、集群部署与效果/恢复断言**
 
 **Files:**
 - Create: `test/e2e/jvm-connection-pool/lib.sh`
@@ -84,7 +84,7 @@ Expected: PASS；`bash -n` 和可用时 `shellcheck` 无错误。
 
 Run: `git add test/e2e/jvm-connection-pool && git commit -m "test: automate datasource kubernetes e2e"`
 
-- [ ] **Task backend-019: 在 bennieliu-honor 执行完整 E2E 并固化证据**
+- [x] **Task backend-019: 在 bennieliu-honor 执行完整 E2E 并固化证据**
 
 **Files:**
 - Create: `fp-docs/changes/jvm-connection-pool-exhaustion/e2e-evidence.md`
