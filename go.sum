@@ -26,6 +26,8 @@ github.com/chaosblade-io/chaosblade-exec-cloud v1.8.0 h1:mok61h2sX7/1rtIOZftxnxp
 github.com/chaosblade-io/chaosblade-exec-cloud v1.8.0/go.mod h1:78wXoQqsyAHXJ36dAcRa9i4nf82k6JiA7+K8BNEgR/U=
 github.com/chaosblade-io/chaosblade-exec-cri v1.8.0 h1:mLv5fp0aEzZ5DFHZ1bZIyNJCVagh1OSm8Qqi0NQEApU=
 github.com/chaosblade-io/chaosblade-exec-cri v1.8.0/go.mod h1:o+W6ELOzrLodXclewVKq8TIQdmdMoNaWw34Va4pyX9s=
+github.com/chaosblade-io/chaosblade-exec-cri v1.8.1-0.20251022015312-6ee0319889a1 h1:ORGgKhBU/BNrRR98mWIuuPs+XeA9A8BLePucvG6ToU4=
+github.com/chaosblade-io/chaosblade-exec-cri v1.8.1-0.20251022015312-6ee0319889a1/go.mod h1:Bp+ZKl6qCewuaNoq9kHjmpTvOhLb7ic1546ractF5XM=
 github.com/chaosblade-io/chaosblade-exec-middleware v1.8.0 h1:vTS78QSqdytCNyTEtckIvRuGtshhpLA6WBU4j7DYEes=
 github.com/chaosblade-io/chaosblade-exec-middleware v1.8.0/go.mod h1:LWi/BtOPLF8NUNULGqqs41DkjyezoQgF1iIoKgnacTU=
 github.com/chaosblade-io/chaosblade-exec-os v1.8.0 h1:afLFHgiCvU8Tz2R0GVr+rU5D+YpPahygEMqYwa/8K/E=

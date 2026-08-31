@@ -18,7 +18,7 @@ go 1.25
 
 require (
         github.com/chaosblade-io/chaosblade-exec-cloud v1.8.0
-        github.com/chaosblade-io/chaosblade-exec-cri v1.8.0
+        github.com/chaosblade-io/chaosblade-exec-cri v1.8.1-0.20251022015312-6ee0319889a1
         github.com/chaosblade-io/chaosblade-exec-middleware v1.8.0
         github.com/chaosblade-io/chaosblade-exec-os v1.8.0
         github.com/chaosblade-io/chaosblade-spec-go v1.8.0
