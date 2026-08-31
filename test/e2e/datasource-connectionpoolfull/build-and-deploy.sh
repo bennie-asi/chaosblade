@@ -82,8 +82,12 @@ done
 
 kubectl --kubeconfig "$KUBECONFIG_PATH" create namespace "$NAMESPACE" \
   --dry-run=client -o yaml | kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f -
-kubectl --kubeconfig "$KUBECONFIG_PATH" apply \
-  -f "$OPERATOR_REPO/deploy/crds/chaosblade.io_chaosblades_crd.yaml"
+if kubectl --kubeconfig "$KUBECONFIG_PATH" get crd chaosblades.chaosblade.io >/dev/null 2>&1; then
+  echo "Reusing existing chaosblades.chaosblade.io CRD"
+else
+  kubectl --kubeconfig "$KUBECONFIG_PATH" apply \
+    -f "$OPERATOR_REPO/deploy/crds/chaosblade.io_chaosblades_crd.yaml"
+fi
 KUBECONFIG="$KUBECONFIG_PATH" helm upgrade --install chaosblade-e2e \
   "$OPERATOR_REPO/deploy/helm/chaosblade-operator" -n "$NAMESPACE" \
   --set operator.repository="${OPERATOR_IMAGE%:*}" \
@@ -95,7 +99,13 @@ KUBECONFIG="$KUBECONFIG_PATH" helm upgrade --install chaosblade-e2e \
   --set webhook.enable=false
 kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f "$SCRIPT_DIR/k8s-app.yaml"
 kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$NAMESPACE" \
+  rollout restart deployment/chaosblade-operator daemonset/chaosblade-tool
+kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$NAMESPACE" \
+  rollout restart deployment/datasource-hikari deployment/datasource-druid
+kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$NAMESPACE" \
   rollout status deployment/chaosblade-operator --timeout=180s
+kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$NAMESPACE" \
+  rollout status daemonset/chaosblade-tool --timeout=180s
 kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$NAMESPACE" \
   rollout status deployment/datasource-hikari --timeout=180s
 kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$NAMESPACE" \

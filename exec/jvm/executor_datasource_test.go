@@ -8,7 +8,7 @@ import (
 	"github.com/chaosblade-io/chaosblade-spec-go/spec"
 )
 
-func TestCreateURLForwardsTimeoutOnlyForDatasource(t *testing.T) {
+func TestCreateURLForwardsTimeoutForLongRunningAgentActions(t *testing.T) {
 	tests := []struct {
 		name        string
 		model       *spec.ExpModel
@@ -24,10 +24,19 @@ func TestCreateURLForwardsTimeoutOnlyForDatasource(t *testing.T) {
 			wantTimeout: true,
 		},
 		{
-			name: "legacy jvm action",
+			name: "jvm full gc",
 			model: &spec.ExpModel{
 				Target:      "jvm",
 				ActionName:  "full-gc",
+				ActionFlags: map[string]string{"timeout": "60"},
+			},
+			wantTimeout: true,
+		},
+		{
+			name: "legacy jvm action",
+			model: &spec.ExpModel{
+				Target:      "jvm",
+				ActionName:  "delay",
 				ActionFlags: map[string]string{"timeout": "60"},
 			},
 			wantTimeout: false,
