@@ -101,6 +101,7 @@ BLADE_EXEC_CLOUD_BRANCH=v1.8.0
 # chaosblade-exec-cri
 BLADE_EXEC_CRI_PROJECT=https://github.com/chaosblade-io/chaosblade-exec-cri.git
 BLADE_EXEC_CRI_BRANCH=v1.8.0
+BLADE_EXEC_CRI_VERSION=v1.8.1-0.20251022015312-6ee0319889a1
 
 # chaosblade-exec-kubernetes
 BLADE_OPERATOR_PROJECT?=https://github.com/chaosblade-io/chaosblade-operator.git
