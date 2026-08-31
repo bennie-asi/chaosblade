@@ -159,8 +159,12 @@ func (dc *DestroyCommand) destroyExperimentByUid(model *data.ExperimentModel, ui
 	if err != nil {
 		return nil, spec.ResponseFailWithFlags(spec.HandlerExecNotFound, err.Error())
 	}
-	if err = dc.destroyExperiment(uid, executor, expModel); err != nil {
+	response, err := dc.destroyExperiment(uid, executor, expModel)
+	if err != nil {
 		return nil, err
+	}
+	if isDatasourceConnectionPoolFull(expModel) {
+		return response, nil
 	}
 	return spec.ReturnSuccess(expModel), nil
 }
@@ -182,8 +186,12 @@ func (dc *DestroyCommand) destroyK8sExperimentWithoutRecord(uid string) (*spec.R
 	if err != nil {
 		return nil, spec.ResponseFailWithFlags(spec.HandlerExecNotFound, err.Error())
 	}
-	if err := dc.destroyExperiment(uid, executor, expModel); err != nil {
+	response, err := dc.destroyExperiment(uid, executor, expModel)
+	if err != nil {
 		return nil, err
+	}
+	if isDatasourceConnectionPoolFull(expModel) {
+		return response, nil
 	}
 	return spec.ReturnSuccess(exp), nil
 }
@@ -204,18 +212,22 @@ func (dc *DestroyCommand) checkAndForceRemoveForExpRecord(uid string) error {
 	return nil
 }
 
-func (dc *DestroyCommand) destroyExperiment(uid string, executor spec.Executor, expModel *spec.ExpModel) error {
+func (dc *DestroyCommand) destroyExperiment(uid string, executor spec.Executor, expModel *spec.ExpModel) (*spec.Response, error) {
 	// set destroy flag
 	ctx := spec.SetDestroyFlag(context.Background(), uid)
 	ctx = context.WithValue(ctx, spec.Uid, uid)
 	// execute
 	response := executor.Exec(uid, ctx, expModel)
 	if !response.Success {
-		return response
+		return nil, response
 	}
 	// return result
 	checkError(GetDS().UpdateExperimentModelByUid(uid, Destroyed, ""))
-	return nil
+	return response, nil
+}
+
+func isDatasourceConnectionPoolFull(model *spec.ExpModel) bool {
+	return model != nil && model.Target == "datasource" && model.ActionName == "connectionpoolfull"
 }
 
 func (dc *DestroyCommand) getExecutorAndExpModelByRecord(model *data.ExperimentModel) (

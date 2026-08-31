@@ -221,12 +221,42 @@ func (cc *CreateCommand) actionRunEFunc(target, scope string, actionCommand *act
 				// update status
 				checkError(GetDS().UpdateExperimentModelByUid(model.Uid, Success, response.Err))
 			}
-			response.Result = model.Uid
+			response.Result = createResult(model.Uid, expModel, response.Result)
 			cmd.Println(response.Print())
 			endpointCallBack(ctx, endpoint, model.Uid, response)
 			return nil
 		}
 	}
+}
+
+type datasourceCreateResult struct {
+	Uid    string          `json:"uid"`
+	Detail json.RawMessage `json:"detail,omitempty"`
+}
+
+func createResult(uid string, model *spec.ExpModel, result interface{}) interface{} {
+	if model == nil || model.Target != "datasource" || model.ActionName != "connectionpoolfull" {
+		return uid
+	}
+	detail := normalizeJSONResult(result)
+	return datasourceCreateResult{Uid: uid, Detail: detail}
+}
+
+func normalizeJSONResult(result interface{}) json.RawMessage {
+	if result == nil {
+		return nil
+	}
+	if value, ok := result.(string); ok {
+		var raw json.RawMessage
+		if json.Unmarshal([]byte(value), &raw) == nil {
+			return raw
+		}
+	}
+	value, err := json.Marshal(result)
+	if err != nil {
+		return nil
+	}
+	return value
 }
 
 func endpointCallBack(ctx context.Context, endpoint, uid string, response *spec.Response) {

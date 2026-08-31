@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: datasource-invalid
+  namespace: chaosblade-e2e
+  labels:
+    scenario: pool-mixed
+spec:
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: chaosblade-e2e/chaosblade-tool:local
+      imagePullPolicy: Never

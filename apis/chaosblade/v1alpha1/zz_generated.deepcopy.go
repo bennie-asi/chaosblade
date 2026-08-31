@@ -140,7 +140,9 @@ func (in *ExperimentStatus) DeepCopyInto(out *ExperimentStatus) {
 	if in.ResStatuses != nil {
 		in, out := &in.ResStatuses, &out.ResStatuses
 		*out = make([]ResourceStatus, len(*in))
-		copy(*out, *in)
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
 	}
 }
 
@@ -173,6 +175,11 @@ func (in *FlagSpec) DeepCopy() *FlagSpec {
 
 func (in *ResourceStatus) DeepCopyInto(out *ResourceStatus) {
 	*out = *in
+	if in.Result != nil {
+		in, out := &in.Result, &out.Result
+		*out = make([]byte, len(*in))
+		copy(*out, *in)
+	}
 }
 
 func (in *ResourceStatus) DeepCopy() *ResourceStatus {

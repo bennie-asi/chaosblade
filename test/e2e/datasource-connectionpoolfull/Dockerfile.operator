@@ -1,0 +1,6 @@
+FROM scratch
+COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY chaosblade-operator /usr/local/bin/chaosblade-operator
+COPY chaosblade /opt/chaosblade
+ENV PATH=/usr/local/bin
+ENTRYPOINT ["/usr/local/bin/chaosblade-operator"]

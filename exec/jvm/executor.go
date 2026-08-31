@@ -187,8 +187,9 @@ func (e *Executor) createUrl(ctx context.Context, port string, model *spec.ExpMo
 		if v == "" || v == "false" {
 			continue
 		}
-		// filter timeout because of the java agent implementation by all matchers
-		if k == "timeout" {
+		// Most JVM actions are timed out by the CLI/operator. Datasource pool exhaustion
+		// also needs the value inside the agent to enforce its hard safety TTL.
+		if k == "timeout" && !isDatasourceConnectionPoolFull(model) {
 			continue
 		}
 		bodyMap[k] = v
@@ -200,6 +201,10 @@ func (e *Executor) createUrl(ctx context.Context, port string, model *spec.ExpMo
 		return "", nil, spec.ResponseFailWithFlags(spec.ResultMarshalFailed, bodyMap, err)
 	}
 	return url, bytes, nil
+}
+
+func isDatasourceConnectionPoolFull(model *spec.ExpModel) bool {
+	return model != nil && model.Target == "datasource" && model.ActionName == "connectionpoolfull"
 }
 
 func (e *Executor) sandboxUrl(port, requestPath string) string {

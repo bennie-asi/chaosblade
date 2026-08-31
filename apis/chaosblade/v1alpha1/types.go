@@ -17,6 +17,8 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -75,13 +77,14 @@ const (
 )
 
 type ResourceStatus struct {
-	Id         string `json:"id,omitempty"`
-	State      string `json:"state"`
-	Code       int32  `json:"code,omitempty"`
-	Error      string `json:"error,omitempty"`
-	Success    bool   `json:"success"`
-	Kind       string `json:"kind"`
-	Identifier string `json:"identifier,omitempty"`
+	Id         string          `json:"id,omitempty"`
+	State      string          `json:"state"`
+	Code       int32           `json:"code,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	Success    bool            `json:"success"`
+	Kind       string          `json:"kind"`
+	Identifier string          `json:"identifier,omitempty"`
+	Result     json.RawMessage `json:"result,omitempty"`
 }
 
 const (

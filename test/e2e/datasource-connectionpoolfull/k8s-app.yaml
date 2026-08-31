@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datasource-hikari
+  namespace: chaosblade-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: datasource-hikari
+  template:
+    metadata:
+      labels:
+        app: datasource-hikari
+    spec:
+      containers:
+        - name: app
+          image: chaosblade-e2e/datasource-pool:local
+          imagePullPolicy: Never
+          env:
+            - name: POOL_TYPE
+              value: hikari
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: datasource-hikari
+  namespace: chaosblade-e2e
+spec:
+  type: NodePort
+  selector:
+    app: datasource-hikari
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datasource-druid
+  namespace: chaosblade-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: datasource-druid
+  template:
+    metadata:
+      labels:
+        app: datasource-druid
+    spec:
+      containers:
+        - name: app
+          image: chaosblade-e2e/datasource-pool:local
+          imagePullPolicy: Never
+          env:
+            - name: POOL_TYPE
+              value: druid
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: datasource-druid
+  namespace: chaosblade-e2e
+spec:
+  type: NodePort
+  selector:
+    app: datasource-druid
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30082
