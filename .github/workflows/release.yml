@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g., 1.8.0)'
+        description: 'Release version (e.g., 1.8.1)'
         required: true
         type: string
       draft:
@@ -34,7 +34,11 @@ env:
   GO_VERSION: '1.25'
   JAVA_VERSION: '11'
   REGISTRY: 'ghcr.io'
-  IMAGE_NAME: 'chaosblade-io/chaosblade'
+  IMAGE_NAME: 'bennie-asi/chaosblade'
+  BLADE_EXEC_JVM_PROJECT: 'https://github.com/bennie-asi/chaosblade-exec-jvm.git'
+  BLADE_EXEC_JVM_BRANCH: 'v1.8.1'
+  BLADE_OPERATOR_PROJECT: 'https://github.com/bennie-asi/chaosblade-operator.git'
+  BLADE_OPERATOR_BRANCH: 'v1.8.1'
 
 permissions:
   contents: write
@@ -226,8 +230,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.GHCR_USER }}
-          password: ${{ secrets.GHCR_PASSWORD }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Debug permissions
         run: |
@@ -350,45 +354,6 @@ jobs:
           echo "Generated checksums:"
           cat checksums.txt
 
-      - name: Setup OSSUTIL environment
-        uses: yizhoumo/setup-ossutil@v1.1.3
-        env:
-          BINARY_TAG: ${{ needs.build-multi-platform.outputs.version }}
-        with:
-          endpoint: ${{ secrets.OSS_ENDPOINT }}
-          access-key-id: ${{ secrets.OSS_ACCESS_KEY_ID }}
-          access-key-secret: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
-          ossutil-version: '1.7.14'
-
-      - name: Upload packages to OSS
-        env:
-          BINARY_TAG: ${{ needs.build-multi-platform.outputs.version }}
-        run: |
-          echo "Uploading ChaosBlade packages to OSS..."
-
-          # 上传所有平台的包
-          for platform in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
-            package_file="release-assets/chaosblade-${BINARY_TAG}-${platform}.tar.gz"
-            if [[ -f "$package_file" ]]; then
-              echo "Uploading $platform package..."
-              ossutil cp -f "$package_file" "oss://chaosblade/agent/github/${BINARY_TAG}/chaosblade-${BINARY_TAG}-${platform}.tar.gz"
-              echo "✅ $platform package uploaded successfully"
-            else
-              echo "❌ $platform package not found: $package_file"
-            fi
-          done
-
-          # 上传校验和文件
-          if [[ -f "release-assets/checksums.txt" ]]; then
-            echo "Uploading checksums file..."
-            ossutil cp -f "release-assets/checksums.txt" "oss://chaosblade/agent/github/${BINARY_TAG}/checksums.txt"
-            echo "✅ Checksums file uploaded successfully"
-          else
-            echo "❌ Checksums file not found"
-          fi
-
-          echo "All packages uploaded to OSS successfully"
-
       - name: Generate release notes
         run: |
           cat > release-assets/RELEASE_NOTES.md << 'EOF'
@@ -404,21 +369,11 @@ jobs:
 
           **Docker Images:**
           - **Linux AMD64**:
-              `ghcr.io/chaosblade-io/chaosblade-tool:${{ needs.build-multi-platform.outputs.version }}`
-              `ghcr.io/chaosblade-io/chaosblade-operator:${{ needs.build-multi-platform.outputs.version }}`
+              `ghcr.io/bennie-asi/chaosblade-tool:${{ needs.build-multi-platform.outputs.version }}`
+              `ghcr.io/bennie-asi/chaosblade-operator:${{ needs.build-multi-platform.outputs.version }}`
           - **Linux ARM64**:
-              `ghcr.io/chaosblade-io/chaosblade-tool-arm64:${{ needs.build-multi-platform.outputs.version }}`
-              `ghcr.io/chaosblade-io/chaosblade-operator-arm64:${{ needs.build-multi-platform.outputs.version }}`
-
-          ### 🌐 OSS Download Links
-          Alternative download links from Alibaba Cloud OSS:
-
-          **Full Package (All Components):**
-          - [chaosblade-${{ needs.build-multi-platform.outputs.version }}-linux_amd64.tar.gz](https://chaosblade.oss-cn-hangzhou.aliyuncs.com/agent/github/${{ needs.build-multi-platform.outputs.version }}/chaosblade-${{ needs.build-multi-platform.outputs.version }}-linux_amd64.tar.gz)
-          - [chaosblade-${{ needs.build-multi-platform.outputs.version }}-linux_arm64.tar.gz](https://chaosblade.oss-cn-hangzhou.aliyuncs.com/agent/github/${{ needs.build-multi-platform.outputs.version }}/chaosblade-${{ needs.build-multi-platform.outputs.version }}-linux_arm64.tar.gz)
-          - [chaosblade-${{ needs.build-multi-platform.outputs.version }}-darwin_amd64.tar.gz](https://chaosblade.oss-cn-hangzhou.aliyuncs.com/agent/github/${{ needs.build-multi-platform.outputs.version }}/chaosblade-${{ needs.build-multi-platform.outputs.version }}-darwin_amd64.tar.gz)
-          - [chaosblade-${{ needs.build-multi-platform.outputs.version }}-darwin_arm64.tar.gz](https://chaosblade.oss-cn-hangzhou.aliyuncs.com/agent/github/${{ needs.build-multi-platform.outputs.version }}/chaosblade-${{ needs.build-multi-platform.outputs.version }}-darwin_arm64.tar.gz)
-          - [checksums.txt](https://chaosblade.oss-cn-hangzhou.aliyuncs.com/agent/github/${{ needs.build-multi-platform.outputs.version }}/checksums.txt) - SHA256 checksums
+              `ghcr.io/bennie-asi/chaosblade-tool-arm64:${{ needs.build-multi-platform.outputs.version }}`
+              `ghcr.io/bennie-asi/chaosblade-operator-arm64:${{ needs.build-multi-platform.outputs.version }}`
 
           ### 🔧 Installation
 
@@ -435,13 +390,10 @@ jobs:
           ### For Kubernetes
           #### Install
           ```
-          helm repo add chaosblade-io https://chaosblade-io.github.io/charts
-          helm install chaosblade chaosblade-io/chaosblade-operator --namespace chaosblade
+          curl -LO https://github.com/bennie-asi/chaosblade-operator/releases/download/v${{ needs.build-multi-platform.outputs.version }}/chaosblade-operator-amd64-${{ needs.build-multi-platform.outputs.version }}.tgz
+          helm install chaosblade-operator ./chaosblade-operator-amd64-${{ needs.build-multi-platform.outputs.version }}.tgz --namespace chaosblade --create-namespace
           ```
-          Default image repository is `ghcr.io/chaosblade-io/chaosblade-tool` and  `ghcr.io/chaosblade-io/chaosblade-operator`, you can append `--set blade.repository` or `--set operator.repository` flag to change the image repository. For examples:
-          ```
-          helm install chaosblade-operator chaosblade-io/chaosblade-operator --namespace chaosblade --set blade.repository=chaosbladeio/chaosblade-tool,operator.repository=chaosbladeio/chaosblade-operator
-          ```
+          Default image repositories are `ghcr.io/bennie-asi/chaosblade-tool` and `ghcr.io/bennie-asi/chaosblade-operator`.
           #### Uninstall
           ```
           helm uninstall chaosblade-operator --namespace chaosblade
