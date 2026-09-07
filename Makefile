@@ -93,6 +93,7 @@ BLADE_EXEC_OS_BRANCH=v1.8.0
 # chaosblade-exec-middleware
 BLADE_EXEC_MIDDLEWARE_PROJECT=https://github.com/chaosblade-io/chaosblade-exec-middleware.git
 BLADE_EXEC_MIDDLEWARE_BRANCH=v1.8.0
+BLADE_EXEC_MIDDLEWARE_SOURCE ?= $(BUILD_TARGET_CACHE)/chaosblade-exec-middleware
 
 # chaosblade-exec-cloud
 BLADE_EXEC_CLOUD_PROJECT=https://github.com/chaosblade-io/chaosblade-exec-cloud.git
@@ -363,6 +364,7 @@ endif
 	cp -R $(BUILD_TARGET_CACHE)/chaosblade-exec-os/target/$(call get_platform_dir_name,$(GOOS),$(GOARCH))/* $(OUTPUT_DIR)/
 
 middleware: ## Build middleware experimental scenarios.
+ifeq ($(BLADE_EXEC_MIDDLEWARE_SOURCE),$(BUILD_TARGET_CACHE)/chaosblade-exec-middleware)
 ifneq ($(BUILD_TARGET_CACHE)/chaosblade-exec-middleware, $(wildcard $(BUILD_TARGET_CACHE)/chaosblade-exec-middleware))
 	git clone -b $(BLADE_EXEC_MIDDLEWARE_BRANCH) $(BLADE_EXEC_MIDDLEWARE_PROJECT) $(BUILD_TARGET_CACHE)/chaosblade-exec-middleware
 else
@@ -371,13 +373,14 @@ ifdef ALERTMSG
 endif
 	git -C $(BUILD_TARGET_CACHE)/chaosblade-exec-middleware pull origin $(BLADE_EXEC_MIDDLEWARE_BRANCH)
 endif
+endif
 	@if [ -z "$(GOOS)" ]; then \
-		make -C $(BUILD_TARGET_CACHE)/chaosblade-exec-middleware; \
+		make -C $(BLADE_EXEC_MIDDLEWARE_SOURCE); \
 	else \
-		make -C $(BUILD_TARGET_CACHE)/chaosblade-exec-middleware $(GOOS)_$(GOARCH); \
+		make -C $(BLADE_EXEC_MIDDLEWARE_SOURCE) $(GOOS)_$(GOARCH); \
 	fi
 	@$(eval OUTPUT_DIR := $(call get_build_output_dir)) \
-	cp -R $(BUILD_TARGET_CACHE)/chaosblade-exec-middleware/target/$(call get_platform_dir_name,$(GOOS),$(GOARCH))/* $(OUTPUT_DIR)/
+	cp -R $(BLADE_EXEC_MIDDLEWARE_SOURCE)/target/$(call get_platform_dir_name,$(GOOS),$(GOARCH))/* $(OUTPUT_DIR)/
 
 cloud: ## Build cloud experimental scenarios.
 ifneq ($(BUILD_TARGET_CACHE)/chaosblade-exec-cloud, $(wildcard $(BUILD_TARGET_CACHE)/chaosblade-exec-cloud))

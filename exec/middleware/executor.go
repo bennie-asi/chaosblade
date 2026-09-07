@@ -21,7 +21,9 @@ import (
 	"fmt"
 	os_exec "os/exec"
 	"path"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/chaosblade-io/chaosblade-exec-middleware/exec"
 	"github.com/chaosblade-io/chaosblade-spec-go/log"
@@ -56,7 +58,25 @@ func (e *Executor) Exec(uid string, ctx context.Context, model *spec.ExpModel) *
 	}
 
 	argsArray = append(argsArray, mode, model.Target, model.ActionName, fmt.Sprintf("--uid=%s", uid))
+	// MySQL workers own their deadline; forward CLI timeout as their duration.
+	duration := model.ActionFlags["duration"]
+	if model.Target == "mysql-server" && model.ActionFlags["timeout"] != "" {
+		duration = model.ActionFlags["timeout"]
+		if _, err := strconv.Atoi(duration); err != nil {
+			parsed, err := time.ParseDuration(duration)
+			if err != nil || parsed < time.Second || parsed%time.Second != 0 {
+				return spec.ReturnFail(spec.OsCmdExecFailed, "MySQL timeout must be a positive whole number of seconds")
+			}
+			duration = strconv.FormatInt(int64(parsed/time.Second), 10)
+		}
+	}
+	if model.Target == "mysql-server" && duration != "" {
+		argsArray = append(argsArray, "--duration="+duration)
+	}
 	for k, v := range model.ActionFlags {
+		if model.Target == "mysql-server" && k == "duration" {
+			continue
+		}
 		if v == "" || k == "timeout" {
 			continue
 		}
