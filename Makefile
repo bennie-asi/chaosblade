@@ -28,7 +28,7 @@ else
     GIT_TAG := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "")
     ifeq ($(GIT_TAG),)
         # If no Git Tag exists, use default version
-        BLADE_VERSION := 1.8.2
+        BLADE_VERSION := 1.8.1
     else
         # Extract version number from Git Tag (remove v prefix)
         BLADE_VERSION := $(shell echo $(GIT_TAG) | sed 's/^v//')
@@ -94,7 +94,7 @@ BLADE_EXEC_OS_BRANCH=v1.8.0
 
 # chaosblade-exec-middleware
 BLADE_EXEC_MIDDLEWARE_PROJECT=https://github.com/bennie-asi/chaosblade-exec-middleware.git
-BLADE_EXEC_MIDDLEWARE_BRANCH=1.8.2
+BLADE_EXEC_MIDDLEWARE_BRANCH=1.8.1
 # CLI adapter API dependency; the executor source is built from the branch above.
 BLADE_EXEC_MIDDLEWARE_VERSION=v1.8.0
 BLADE_EXEC_MIDDLEWARE_SOURCE ?= $(BUILD_TARGET_CACHE)/chaosblade-exec-middleware

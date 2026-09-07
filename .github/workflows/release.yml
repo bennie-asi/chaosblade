@@ -16,14 +16,12 @@ name: Release
 
 on:
   push:
-    branches:
-      - '1.8.2'
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g., 1.8.2)'
+        description: 'Release version (e.g., 1.8.1)'
         required: true
         type: string
       publish:
@@ -94,7 +92,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: bennie-asi/chaosblade-exec-middleware
-          ref: 48b28c63f6753714956fc3fd4102ccd4a58c5ccf
+          ref: eeeefee549c7f44d38f779194f4be343a2b9c867
           path: .middleware-source
 
       - name: Set up Go
@@ -380,6 +378,12 @@ jobs:
       - name: Generate release notes
         run: |
           cat > release-assets/RELEASE_NOTES.md << 'EOF'
+
+          ### MySQL server fault updates
+          - Native MySQL protocol support with `go-sql-driver/mysql`; no mysql client binary required.
+          - Recoverable `mysql-server max-connections` and real `mysql-server connection-exhaustion` with percentage occupancy.
+          - Explicit recovery, bounded duration and worker failure recovery, validated on an isolated MySQL 8.4 instance.
+          - This release replaces the previous v1.8.1 packages and tool images with the updated MySQL implementation.
 
           ### 📦 Downloads
           Choose the appropriate package for your platform:
