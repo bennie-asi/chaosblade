@@ -17,13 +17,13 @@ name: Release
 on:
   push:
     branches:
-      - 'codex/mysql-middleware'
+      - '1.8.2'
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g., 1.8.1)'
+        description: 'Release version (e.g., 1.8.2)'
         required: true
         type: string
       publish:
@@ -94,7 +94,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: bennie-asi/chaosblade-exec-middleware
-          ref: 9393fee07959e11dfa28006d7c1439275c9c755d
+          ref: 48b28c63f6753714956fc3fd4102ccd4a58c5ccf
           path: .middleware-source
 
       - name: Set up Go
@@ -134,7 +134,7 @@ jobs:
             VERSION="${{ github.event.inputs.version }}"
             TAG="v$VERSION"
           elif [[ "$GITHUB_REF" == refs/heads/* ]]; then
-            VERSION="1.8.1-mysql-dev.${GITHUB_RUN_NUMBER}"
+            VERSION="$(cat .blade-version)"
             TAG="v$VERSION"
           else
             TAG="${{ github.ref_name }}"

@@ -17,16 +17,18 @@
 .PHONY: build build_all
 
 # Version information management
-# Priority: use environment variable BLADE_VERSION, otherwise auto-get version from Git Tag
+# Priority: explicit BLADE_VERSION, .blade-version file, then Git tag.
 ifneq ($(BLADE_VERSION),)
     # If environment variable BLADE_VERSION is set, use it directly
     # BLADE_VERSION is already defined in environment variables
+else ifneq ($(wildcard .blade-version),)
+    BLADE_VERSION := $(strip $(shell cat .blade-version))
 else
     # If environment variable BLADE_VERSION is not set, try to get from Git Tag
     GIT_TAG := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "")
     ifeq ($(GIT_TAG),)
         # If no Git Tag exists, use default version
-        BLADE_VERSION := 1.8.1
+        BLADE_VERSION := 1.8.2
     else
         # Extract version number from Git Tag (remove v prefix)
         BLADE_VERSION := $(shell echo $(GIT_TAG) | sed 's/^v//')
@@ -91,8 +93,10 @@ BLADE_EXEC_OS_PROJECT=https://github.com/chaosblade-io/chaosblade-exec-os.git
 BLADE_EXEC_OS_BRANCH=v1.8.0
 
 # chaosblade-exec-middleware
-BLADE_EXEC_MIDDLEWARE_PROJECT=https://github.com/chaosblade-io/chaosblade-exec-middleware.git
-BLADE_EXEC_MIDDLEWARE_BRANCH=v1.8.0
+BLADE_EXEC_MIDDLEWARE_PROJECT=https://github.com/bennie-asi/chaosblade-exec-middleware.git
+BLADE_EXEC_MIDDLEWARE_BRANCH=1.8.2
+# CLI adapter API dependency; the executor source is built from the branch above.
+BLADE_EXEC_MIDDLEWARE_VERSION=v1.8.0
 BLADE_EXEC_MIDDLEWARE_SOURCE ?= $(BUILD_TARGET_CACHE)/chaosblade-exec-middleware
 
 # chaosblade-exec-cloud

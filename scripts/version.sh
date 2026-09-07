@@ -19,22 +19,24 @@
 set -e
 
 # 获取Git信息
-GIT_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+GIT_TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
 GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
-# 如果没有Git Tag，尝试从环境变量获取版本
-if [ -z "$GIT_TAG" ]; then
-    if [ -n "$VERSION" ]; then
-        GIT_TAG="$VERSION"
-    else
-        GIT_TAG="dev"
-    fi
+# Keep local builds and CI on the same declared release version.
+if [ -n "${BLADE_VERSION:-}" ]; then
+    VERSION="$BLADE_VERSION"
+elif [ -s .blade-version ]; then
+    VERSION=$(cat .blade-version)
+elif [ -n "${VERSION:-}" ]; then
+    VERSION=${VERSION#v}
+elif [ -n "$GIT_TAG" ]; then
+    VERSION=${GIT_TAG#v}
+else
+    VERSION="dev"
 fi
-
-# 清理版本号（移除v前缀）
-VERSION=${GIT_TAG#v}
+GIT_TAG=${GIT_TAG:-dev}
 
 # 生成版本信息文件
 cat > version/version_info.go << EOF

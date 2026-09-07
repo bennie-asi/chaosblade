@@ -72,6 +72,7 @@ extract_branch_config() {
     # Extract branch configurations for each project
     BLADE_EXEC_OS_BRANCH=$(grep "^BLADE_EXEC_OS_BRANCH=" Makefile | cut -d'=' -f2)
     BLADE_EXEC_MIDDLEWARE_BRANCH=$(grep "^BLADE_EXEC_MIDDLEWARE_BRANCH=" Makefile | cut -d'=' -f2)
+    BLADE_EXEC_MIDDLEWARE_VERSION=$(grep "^BLADE_EXEC_MIDDLEWARE_VERSION=" Makefile | cut -d'=' -f2)
     BLADE_EXEC_CLOUD_BRANCH=$(grep "^BLADE_EXEC_CLOUD_BRANCH=" Makefile | cut -d'=' -f2)
     BLADE_EXEC_CRI_BRANCH=$(grep "^BLADE_EXEC_CRI_BRANCH=" Makefile | cut -d'=' -f2)
     BLADE_EXEC_CRI_VERSION=$(grep "^BLADE_EXEC_CRI_VERSION=" Makefile | cut -d'=' -f2)
@@ -129,7 +130,7 @@ update_go_mod() {
     
     # Generate version numbers for each project
     OS_VERSION=$(generate_version "$BLADE_EXEC_OS_BRANCH" "$BLADE_VERSION")
-    MIDDLEWARE_VERSION=$(generate_version "$BLADE_EXEC_MIDDLEWARE_BRANCH" "$BLADE_VERSION")
+    MIDDLEWARE_VERSION=${BLADE_EXEC_MIDDLEWARE_VERSION:-$(generate_version "$BLADE_EXEC_MIDDLEWARE_BRANCH" "$BLADE_VERSION")}
     CLOUD_VERSION=$(generate_version "$BLADE_EXEC_CLOUD_BRANCH" "$BLADE_VERSION")
     CRI_VERSION=${BLADE_EXEC_CRI_VERSION:-$(generate_version "$BLADE_EXEC_CRI_BRANCH" "$BLADE_VERSION")}
     OPERATOR_VERSION=$(generate_version "$BLADE_OPERATOR_BRANCH" "$BLADE_VERSION")
