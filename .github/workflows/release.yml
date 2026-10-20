@@ -43,7 +43,7 @@ env:
   BLADE_EXEC_JVM_PROJECT: 'https://github.com/bennie-asi/chaosblade-exec-jvm.git'
   BLADE_EXEC_JVM_BRANCH: 'v1.8.1'
   BLADE_OPERATOR_PROJECT: 'https://github.com/bennie-asi/chaosblade-operator.git'
-  BLADE_OPERATOR_BRANCH: 'v1.8.1'
+  BLADE_OPERATOR_BRANCH: 'v1.8.2'
 
 permissions:
   contents: write
