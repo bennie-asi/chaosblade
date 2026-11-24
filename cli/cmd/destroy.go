@@ -344,8 +344,9 @@ func (dc *DestroyCommand) actionRunEFunc(target, scope string, _ *actionCommand,
 		}
 		executor := actionCommandSpec.Executor()
 		executor.SetChannel(channel.NewLocalChannel())
-		ctx = spec.SetDestroyFlag(ctx, spec.UnknownUid)
-		response := executor.Exec(spec.UnknownUid, ctx, expModel)
+		destroyUID := matcherDestroyUID(expModel)
+		ctx = spec.SetDestroyFlag(ctx, destroyUID)
+		response := executor.Exec(destroyUID, ctx, expModel)
 		if !response.Success {
 			return response
 		}
@@ -368,6 +369,17 @@ func (dc *DestroyCommand) actionRunEFunc(target, scope string, _ *actionCommand,
 		cmd.Println(spec.ReturnSuccess(expModel).Print())
 		return nil
 	}
+}
+
+// matcherDestroyUID preserves the kernel owner when a Pod network child record is missing.
+func matcherDestroyUID(m *spec.ExpModel) string {
+	if m.Scope == "cri" && m.Target == "network" && strings.Contains(m.ActionFlags["protocol"], ",") && m.ActionFlags["uid"] != "" {
+		switch m.ActionName {
+		case "loss", "delay", "reorder":
+			return m.ActionFlags["uid"]
+		}
+	}
+	return spec.UnknownUid
 }
 
 func (dc *DestroyCommand) actionPostRunEFunc(actionCommand *actionCommand) func(cmd *cobra.Command, args []string) error {
