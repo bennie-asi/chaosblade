@@ -17,20 +17,37 @@
 package cmd
 
 import (
-	"github.com/chaosblade-io/chaosblade-spec-go/spec"
 	"testing"
+
+	"github.com/chaosblade-io/chaosblade-spec-go/spec"
 )
 
 func TestMatcherDestroyUID(t *testing.T) {
-	for _, tc := range []struct{ scope, protocol, action, uid, want string }{
-		{"cri", "tcp,udp", "loss", "child", "child"}, {"cri", "udp,icmp", "delay", "child", "child"},
-		{"cri", "tcp,icmp", "reorder", "child", "child"}, {"cri", "tcp,udp", "loss", "", spec.UnknownUid},
-		{"cri", "tcp", "loss", "child", spec.UnknownUid}, {"host", "tcp,udp", "loss", "child", spec.UnknownUid},
-		{"cri", "tcp,udp", "corrupt", "child", spec.UnknownUid},
-	} {
-		m := &spec.ExpModel{Scope: tc.scope, Target: "network", ActionName: tc.action, ActionFlags: map[string]string{"uid": tc.uid, "protocol": tc.protocol}}
-		if v := matcherDestroyUID(m); v != tc.want {
-			t.Fatalf("%+v got %q", tc, v)
-		}
+	tests := []struct {
+		name, scope, protocol, action, uid, want string
+	}{
+		{"cri loss", "cri", "tcp,udp", "loss", "child", "child"},
+		{"cri delay", "cri", "udp,icmp", "delay", "child", "child"},
+		{"cri reorder", "cri", "tcp,icmp", "reorder", "child", "child"},
+		{"missing child uid", "cri", "tcp,udp", "loss", "", spec.UnknownUid},
+		{"single protocol", "cri", "tcp", "loss", "child", spec.UnknownUid},
+		{"host scope", "host", "tcp,udp", "loss", "child", spec.UnknownUid},
+		{"unsupported action", "cri", "tcp,udp", "corrupt", "child", spec.UnknownUid},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := &spec.ExpModel{
+				Scope:      tt.scope,
+				Target:     "network",
+				ActionName: tt.action,
+				ActionFlags: map[string]string{
+					"uid":      tt.uid,
+					"protocol": tt.protocol,
+				},
+			}
+			if got := matcherDestroyUID(model); got != tt.want {
+				t.Errorf("matcherDestroyUID() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
